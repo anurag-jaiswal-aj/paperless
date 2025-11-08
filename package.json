@@ -1,0 +1,17 @@
+{
+  "name": "paperless",
+  "version": "1.0.0",
+  "description": "AI-powered form builder with MERN stack",
+  "scripts": {
+    "install:server": "cd server && npm install",
+    "install:client": "cd client && npm install",
+    "install:all": "npm run install:server && npm run install:client",
+    "server": "cd server && npm run dev",
+    "client": "cd client && npm run dev",
+    "dev": "echo 'Run npm run server and npm run client in separate terminals'",
+    "build:client": "cd client && npm run build"
+  },
+  "keywords": ["forms", "mern", "ai", "mongodb", "react", "express", "nodejs"],
+  "author": "",
+  "license": "MIT"
+}
