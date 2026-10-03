@@ -8,7 +8,7 @@ const Login = () => {
   const navigate = useNavigate();
   const dispatch = useDispatch();
   const { loading, error } = useSelector((state) => state.auth);
-  const { theme } = useSelector((state) => state.theme);
+
 
   const [formData, setFormData] = useState({
     email: '',
@@ -24,16 +24,15 @@ const Login = () => {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    
+
     dispatch(loginStart());
 
     try {
       const response = await api.post('/api/auth/login', formData);
-      
+
       if (response.data.success) {
         dispatch(loginSuccess({
-          user: response.data.data.user,
-          token: response.data.data.token
+          user: response.data.data.user
         }));
         navigate('/dashboard');
       }
@@ -70,7 +69,7 @@ const Login = () => {
               value={formData.email}
               onChange={handleChange}
               required
-              className="w-full px-4 py-3 rounded focus:outline-none focus:ring-2 focus:ring-offset-2 theme-transition"
+              className="input"
               placeholder="you@example.com"
             />
           </div>
@@ -87,22 +86,28 @@ const Login = () => {
               onChange={handleChange}
               required
               minLength={6}
-              className="w-full px-4 py-3 rounded focus:outline-none focus:ring-2 focus:ring-offset-2 theme-transition"
+              className="input"
               placeholder="••••••••"
             />
+          </div>
+
+          <div className="flex justify-end mt-2 mb-4">
+            <Link to="/forgot-password" className="text-sm font-medium hover:opacity-70 underline">
+              Forgot password?
+            </Link>
           </div>
 
           <button
             type="submit"
             disabled={loading}
-            className="w-full btn-primary py-3 rounded font-medium hover:opacity-80 transition disabled:opacity-50"
+            className="btn w-full btn-primary"
           >
             {loading ? 'Signing in...' : 'Sign In'}
           </button>
         </form>
 
         <p className="text-center mt-6 opacity-70">
-          Don't have an account?{' '}
+          Don&apos;t have an account?{' '}
           <Link to="/register" className="font-medium hover:opacity-70 underline">
             Sign up
           </Link>

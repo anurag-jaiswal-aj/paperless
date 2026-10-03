@@ -1,13 +1,11 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import { useParams } from 'react-router-dom';
-import { useSelector } from 'react-redux';
 import api from '../utils/api';
 import Loader from '../components/Loader';
 import { FiCheckCircle } from 'react-icons/fi';
 
 const PublicForm = () => {
   const { id } = useParams();
-  const { theme } = useSelector((state) => state.theme);
   const [form, setForm] = useState(null);
   const [questions, setQuestions] = useState([]);
   const [answers, setAnswers] = useState({});
@@ -16,11 +14,31 @@ const PublicForm = () => {
   const [submitted, setSubmitted] = useState(false);
   const [error, setError] = useState('');
 
-  useEffect(() => {
-    fetchForm();
-  }, [id]);
+  const isQuestionVisible = (question) => {
+    if (!question.visibilityRule || !question.visibilityRule.targetQuestionId) {
+      return true;
+    }
+    const { targetQuestionId, operator, value } = question.visibilityRule;
+    const targetAnswer = answers[targetQuestionId];
 
-  const fetchForm = async () => {
+    if (targetAnswer === undefined || targetAnswer === null || targetAnswer === '') {
+      return false;
+    }
+
+    switch (operator) {
+      case 'equals':
+        return String(targetAnswer) === String(value);
+      case 'not_equals':
+        return String(targetAnswer) !== String(value);
+      case 'contains':
+        if (Array.isArray(targetAnswer)) return targetAnswer.includes(value);
+        return String(targetAnswer).includes(String(value));
+      default:
+        return true;
+    }
+  };
+
+  const fetchForm = useCallback(async () => {
     try {
       const response = await api.get(`/api/forms/${id}`);
       if (response.data.success) {
@@ -32,7 +50,12 @@ const PublicForm = () => {
     } finally {
       setLoading(false);
     }
-  };
+  }, [id]);
+
+  useEffect(() => {
+    // eslint-disable-next-line
+    fetchForm();
+  }, [fetchForm]);
 
   const handleAnswerChange = (questionId, value) => {
     setAnswers({
@@ -45,10 +68,11 @@ const PublicForm = () => {
     e.preventDefault();
     setError('');
 
-    // Validate required questions
-    const requiredQuestions = questions.filter(q => q.required);
+    // Validate required questions (only visible ones)
+    const visibleQuestions = questions.filter(isQuestionVisible);
+    const requiredQuestions = visibleQuestions.filter((q) => q.required);
     for (const q of requiredQuestions) {
-      if (!answers[q._id] || answers[q._id] === '') {
+      if (answers[q._id] === undefined || answers[q._id] === '' || (Array.isArray(answers[q._id]) && answers[q._id].length === 0)) {
         setError(`Please answer: ${q.label}`);
         return;
       }
@@ -57,13 +81,47 @@ const PublicForm = () => {
     setSubmitting(true);
 
     try {
-      const formattedAnswers = Object.entries(answers).map(([questionId, value]) => ({
-        questionId,
-        value
-      }));
+      const formattedAnswers = Object.entries(answers)
+        .filter(([qId]) => {
+          const q = questions.find(question => question._id === qId);
+          return q && isQuestionVisible(q);
+        })
+        .map(([questionId, value]) => ({
+          questionId,
+          value
+        }));
 
-      const response = await api.post(`/api/responses/${id}`, { answers: formattedAnswers });
-      
+      const hasFiles = formattedAnswers.some(ans => ans.value instanceof File);
+
+      let response;
+      if (hasFiles) {
+        const formData = new FormData();
+
+        // Strip out file objects from the JSON answers array to avoid sending empty {}
+        const jsonAnswers = formattedAnswers.map(ans => {
+          if (ans.value instanceof File) {
+            return { questionId: ans.questionId, value: null };
+          }
+          return ans;
+        });
+
+        formData.append('answers', JSON.stringify(jsonAnswers));
+
+        formattedAnswers.forEach(ans => {
+          if (ans.value instanceof File) {
+            formData.append(`file_${ans.questionId}`, ans.value);
+          }
+        });
+
+        response = await api.post(`/api/responses/${id}`, formData, {
+          headers: {
+            'Content-Type': 'multipart/form-data'
+          }
+        });
+      } else {
+        response = await api.post(`/api/responses/${id}`, { answers: formattedAnswers });
+      }
+
       if (response.data.success) {
         setSubmitted(true);
       }
@@ -85,7 +143,7 @@ const PublicForm = () => {
             value={answers[questionId] || ''}
             onChange={(e) => handleAnswerChange(questionId, e.target.value)}
             required={question.required}
-            className="w-full px-4 py-2 rounded border-2 focus:outline-none focus:ring-2 theme-transition"
+            className="input"
             placeholder="Your answer"
           />
         );
@@ -97,7 +155,7 @@ const PublicForm = () => {
             onChange={(e) => handleAnswerChange(questionId, e.target.value)}
             required={question.required}
             rows={4}
-            className="w-full px-4 py-2 rounded border-2 focus:outline-none focus:ring-2 theme-transition"
+            className="input"
             placeholder="Your answer"
           />
         );
@@ -152,7 +210,7 @@ const PublicForm = () => {
             value={answers[questionId] || ''}
             onChange={(e) => handleAnswerChange(questionId, e.target.value)}
             required={question.required}
-            className="w-full px-4 py-2 rounded border-2 focus:outline-none focus:ring-2 theme-transition"
+            className="input"
           >
             <option value="">Select an option</option>
             {question.options.map((option, index) => (
@@ -190,15 +248,18 @@ const PublicForm = () => {
             value={answers[questionId] || ''}
             onChange={(e) => handleAnswerChange(questionId, e.target.value)}
             required={question.required}
-            className="w-full px-4 py-2 rounded border-2 focus:outline-none focus:ring-2 theme-transition"
+            className="input"
           />
         );
 
       case 'file':
         return (
-          <div className="text-sm opacity-70">
-            File upload functionality requires additional setup (storage service)
-          </div>
+          <input
+            type="file"
+            onChange={(e) => handleAnswerChange(questionId, e.target.files[0])}
+            required={question.required && !answers[questionId]}
+            className="input file:mr-4 file:py-2 file:px-4 file:rounded file:border-0 file:text-sm file:font-semibold file:bg-gray-100 dark:file:bg-gray-800 file:text-black dark:file:text-white"
+          />
         );
 
       default:
@@ -239,7 +300,7 @@ const PublicForm = () => {
   return (
     <div className="min-h-screen py-12 px-4">
       <div className="container mx-auto max-w-3xl">
-        <div className={`border-2 ${theme === 'light' ? 'border-black' : 'border-white'} rounded p-8 mb-6`}>
+        <div className={`card p-8 mb-6`}>
           <h1 className="text-3xl font-bold mb-2">{form.title}</h1>
           {form.description && (
             <p className="opacity-70">{form.description}</p>
@@ -253,10 +314,10 @@ const PublicForm = () => {
             </div>
           )}
 
-          {questions.map((question) => (
+          {questions.filter(isQuestionVisible).map((question) => (
             <div
               key={question._id}
-              className={`border-2 ${theme === 'light' ? 'border-black' : 'border-white'} rounded p-6`}
+              className={`card p-6`}
             >
               <label className="block mb-4">
                 <span className="font-medium text-lg">
@@ -271,7 +332,7 @@ const PublicForm = () => {
           <button
             type="submit"
             disabled={submitting}
-            className="w-full btn-primary py-3 rounded font-medium hover:opacity-80 transition disabled:opacity-50"
+            className="btn w-full btn-primary"
           >
             {submitting ? 'Submitting...' : 'Submit'}
           </button>

@@ -8,22 +8,37 @@
     "start": "node src/server.js",
     "dev": "nodemon src/server.js"
   },
-  "keywords": ["forms", "mongodb", "express", "api"],
+  "keywords": [
+    "forms",
+    "mongodb",
+    "express",
+    "api"
+  ],
   "author": "",
   "license": "MIT",
   "dependencies": {
-    "express": "^4.18.2",
-    "mongoose": "^8.0.3",
+    "@aws-sdk/client-s3": "^3.1146.0",
+    "@aws-sdk/s3-request-presigner": "^3.1146.0",
     "bcryptjs": "^2.4.3",
-    "jsonwebtoken": "^9.0.2",
+    "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",
-    "helmet": "^7.1.0",
-    "morgan": "^1.10.0",
     "dotenv": "^16.3.1",
+    "express": "^4.18.2",
+    "express-rate-limit": "^8.7.0",
     "express-validator": "^7.0.1",
-    "openai": "^4.20.1"
+    "helmet": "^7.1.0",
+    "jsonwebtoken": "^9.0.2",
+    "mongoose": "^8.0.3",
+    "morgan": "^1.10.0",
+    "multer": "^2.4.0",
+    "openai": "^4.20.1",
+    "resend": "^6.32.0",
+    "uuid": "^14.0.2",
+    "zod": "^3.25.76"
   },
   "devDependencies": {
-    "nodemon": "^3.0.2"
+    "mongodb-memory-server": "^11.3.0",
+    "nodemon": "^3.0.2",
+    "supertest": "^7.3.1"
   }
 }

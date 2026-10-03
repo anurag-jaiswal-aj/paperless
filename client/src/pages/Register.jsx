@@ -8,7 +8,6 @@ const Register = () => {
   const navigate = useNavigate();
   const dispatch = useDispatch();
   const { loading, error } = useSelector((state) => state.auth);
-  const { theme } = useSelector((state) => state.theme);
 
   const [formData, setFormData] = useState({
     name: '',
@@ -29,7 +28,7 @@ const Register = () => {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    
+
     // Validation
     if (formData.password !== formData.confirmPassword) {
       setValidationError('Passwords do not match');
@@ -49,7 +48,7 @@ const Register = () => {
         email: formData.email,
         password: formData.password
       });
-      
+
       if (response.data.success) {
         dispatch(loginSuccess({
           user: response.data.data.user,
@@ -90,7 +89,7 @@ const Register = () => {
               value={formData.name}
               onChange={handleChange}
               required
-              className="w-full px-4 py-3 rounded focus:outline-none focus:ring-2 focus:ring-offset-2 theme-transition"
+              className="input theme-transition"
               placeholder="John Doe"
             />
           </div>
@@ -106,7 +105,7 @@ const Register = () => {
               value={formData.email}
               onChange={handleChange}
               required
-              className="w-full px-4 py-3 rounded focus:outline-none focus:ring-2 focus:ring-offset-2 theme-transition"
+              className="input theme-transition"
               placeholder="you@example.com"
             />
           </div>
@@ -123,7 +122,7 @@ const Register = () => {
               onChange={handleChange}
               required
               minLength={6}
-              className="w-full px-4 py-3 rounded focus:outline-none focus:ring-2 focus:ring-offset-2 theme-transition"
+              className="input theme-transition"
               placeholder="••••••••"
             />
           </div>
@@ -140,7 +139,7 @@ const Register = () => {
               onChange={handleChange}
               required
               minLength={6}
-              className="w-full px-4 py-3 rounded focus:outline-none focus:ring-2 focus:ring-offset-2 theme-transition"
+              className="input"
               placeholder="••••••••"
             />
           </div>
@@ -148,7 +147,7 @@ const Register = () => {
           <button
             type="submit"
             disabled={loading}
-            className="w-full btn-primary py-3 rounded font-medium hover:opacity-80 transition disabled:opacity-50"
+            className="btn w-full btn-primary"
           >
             {loading ? 'Creating account...' : 'Sign Up'}
           </button>

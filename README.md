@@ -316,10 +316,10 @@ MONGO_URI=mongodb://localhost:27017/paperless
    ```bash
    cd client
    npm run build  # Test build locally
-   
+
    # Install Vercel CLI
    npm install -g vercel
-   
+
    # Deploy
    vercel
    ```

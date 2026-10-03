@@ -23,8 +23,8 @@ router.delete('/:id', protect, deleteForm);
 
 // Question routes
 router.post('/:id/questions', protect, addQuestion);
+router.put('/:formId/questions/reorder', protect, reorderQuestions);
 router.put('/:formId/questions/:questionId', protect, updateQuestion);
 router.delete('/:formId/questions/:questionId', protect, deleteQuestion);
-router.put('/:formId/questions/reorder', protect, reorderQuestions);
 
 export default router;

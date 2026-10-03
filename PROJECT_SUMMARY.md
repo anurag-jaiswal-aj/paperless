@@ -148,7 +148,7 @@ Everything else is configured and ready!
 2. **Register/Login** → Secure authentication
 3. **Dashboard** → List of your forms
 4. **Create Form** → Add title/description
-5. **Form Builder** → 
+5. **Form Builder** →
    - Add questions (8 types)
    - Use AI suggestions
    - Drag to reorder
@@ -156,7 +156,7 @@ Everything else is configured and ready!
    - Add options for choice questions
 6. **Share** → Copy public link
 7. **Public Form** → Anyone can submit (no login)
-8. **Responses** → 
+8. **Responses** →
    - View analytics charts
    - Export CSV/JSON
    - Generate AI summary

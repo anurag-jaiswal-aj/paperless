@@ -23,9 +23,10 @@ const formSchema = new mongoose.Schema({
     maxlength: [1000, 'Description cannot exceed 1000 characters'],
     default: ''
   },
-  isPublic: {
-    type: Boolean,
-    default: true
+  status: {
+    type: String,
+    enum: ['draft', 'published', 'closed'],
+    default: 'draft'
   },
   createdAt: {
     type: Date,
@@ -38,7 +39,7 @@ const formSchema = new mongoose.Schema({
 });
 
 // Update the updatedAt timestamp on save
-formSchema.pre('save', function(next) {
+formSchema.pre('save', function (next) {
   this.updatedAt = Date.now();
   next();
 });

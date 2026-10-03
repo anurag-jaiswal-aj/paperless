@@ -45,7 +45,7 @@ const Navbar = () => {
               <span className="text-sm opacity-70">{user?.name}</span>
               <button
                 onClick={handleLogout}
-                className="flex items-center gap-2 btn-secondary px-4 py-2 rounded hover:opacity-70 transition"
+                className="btn btn-secondary"
               >
                 <FiLogOut />
                 Logout
@@ -61,7 +61,7 @@ const Navbar = () => {
               </Link>
               <Link
                 to="/register"
-                className="btn-primary px-4 py-2 rounded hover:opacity-70 transition"
+                className="btn btn-primary"
               >
                 Sign Up
               </Link>

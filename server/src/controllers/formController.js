@@ -1,6 +1,7 @@
 import Form from '../models/form.js';
 import Question from '../models/question.js';
 import Response from '../models/response.js';
+import storageService from '../services/StorageService.js';
 
 /**
  * @route   GET /api/forms
@@ -9,9 +10,7 @@ import Response from '../models/response.js';
  */
 export const getForms = async (req, res, next) => {
   try {
-    const forms = await Form.find({ ownerId: req.user.id })
-      .sort({ createdAt: -1 })
-      .lean();
+    const forms = await Form.find({ ownerId: req.user.id }).sort({ createdAt: -1 }).lean();
 
     // Get response counts for each form
     const formsWithCounts = await Promise.all(
@@ -34,7 +33,7 @@ export const getForms = async (req, res, next) => {
 /**
  * @route   GET /api/forms/:id
  * @desc    Get single form with questions
- * @access  Private (owner) or Public (if form.isPublic)
+ * @access  Private (owner) or Public (if form.status !== 'draft')
  */
 export const getForm = async (req, res, next) => {
   try {
@@ -47,8 +46,8 @@ export const getForm = async (req, res, next) => {
       });
     }
 
-    // Check authorization - must be owner or form must be public
-    if (!form.isPublic && (!req.user || form.ownerId.toString() !== req.user.id)) {
+    // Check authorization - must be owner or form must not be draft
+    if (form.status === 'draft' && (!req.user || form.ownerId.toString() !== req.user.id)) {
       return res.status(403).json({
         success: false,
         message: 'Not authorized to view this form'
@@ -77,7 +76,7 @@ export const getForm = async (req, res, next) => {
  */
 export const createForm = async (req, res, next) => {
   try {
-    const { title, description, isPublic } = req.body;
+    const { title, description, status } = req.body;
 
     if (!title) {
       return res.status(400).json({
@@ -90,7 +89,7 @@ export const createForm = async (req, res, next) => {
       ownerId: req.user.id,
       title,
       description: description || '',
-      isPublic: isPublic !== undefined ? isPublic : true
+      status: status || 'draft'
     });
 
     res.status(201).json({
@@ -127,11 +126,11 @@ export const updateForm = async (req, res, next) => {
       });
     }
 
-    const { title, description, isPublic } = req.body;
+    const { title, description, status } = req.body;
 
     if (title !== undefined) form.title = title;
     if (description !== undefined) form.description = description;
-    if (isPublic !== undefined) form.isPublic = isPublic;
+    if (status !== undefined) form.status = status;
 
     await form.save();
 
@@ -171,6 +170,20 @@ export const deleteForm = async (req, res, next) => {
 
     // Delete all associated questions and responses
     await Question.deleteMany({ formId: req.params.id });
+
+    // Delete attached files in S3
+    const responses = await Response.find({ formId: req.params.id });
+    for (const r of responses) {
+      for (const answer of r.answers) {
+        if (answer.value && answer.value.key) {
+          try {
+            await storageService.deleteFile(answer.value.key);
+          } catch (e) {
+            console.error('Failed to delete S3 file during form deletion', e);
+          }
+        }
+      }
+    }
     await Response.deleteMany({ formId: req.params.id });
     await form.deleteOne();
 
@@ -217,8 +230,7 @@ export const addQuestion = async (req, res, next) => {
     }
 
     // Get current max order
-    const maxOrderQuestion = await Question.findOne({ formId: req.params.id })
-      .sort({ order: -1 });
+    const maxOrderQuestion = await Question.findOne({ formId: req.params.id }).sort({ order: -1 });
     const nextOrder = maxOrderQuestion ? maxOrderQuestion.order + 1 : 0;
 
     const question = await Question.create({

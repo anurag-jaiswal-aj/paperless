@@ -9,9 +9,32 @@
     "server": "cd server && npm run dev",
     "client": "cd client && npm run dev",
     "dev": "echo 'Run npm run server and npm run client in separate terminals'",
-    "build:client": "cd client && npm run build"
+    "build:client": "cd client && npm run build",
+    "lint": "eslint client/src server/src",
+    "format": "prettier --write \"client/src/**/*.{js,jsx,css}\" \"server/src/**/*.js\"",
+    "format:check": "prettier --check \"client/src/**/*.{js,jsx,css}\" \"server/src/**/*.js\"",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
-  "keywords": ["forms", "mern", "ai", "mongodb", "react", "express", "nodejs"],
+  "keywords": [
+    "forms",
+    "mern",
+    "ai",
+    "mongodb",
+    "react",
+    "express",
+    "nodejs"
+  ],
   "author": "",
-  "license": "MIT"
+  "license": "MIT",
+  "devDependencies": {
+    "eslint": "^8.57.1",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-react": "^7.37.5",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "jsdom": "^29.1.1",
+    "prettier": "^3.9.9",
+    "supertest": "^7.3.1",
+    "vitest": "^5.0.3"
+  }
 }

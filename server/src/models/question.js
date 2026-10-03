@@ -18,11 +18,11 @@ const questionSchema = new mongoose.Schema({
     enum: [
       'short_text',
       'long_text',
+      'number',
+      'email',
+      'single_choice',
       'multiple_choice',
-      'checkbox',
       'dropdown',
-      'rating',
-      'date',
       'file'
     ]
   },
@@ -44,6 +44,14 @@ const questionSchema = new mongoose.Schema({
   options: {
     type: [String],
     default: []
+  },
+  validation: {
+    type: mongoose.Schema.Types.Mixed,
+    default: {}
+  },
+  visibilityRule: {
+    type: mongoose.Schema.Types.Mixed,
+    default: null
   },
   createdAt: {
     type: Date,

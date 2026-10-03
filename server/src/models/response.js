@@ -11,17 +11,19 @@ const responseSchema = new mongoose.Schema({
     required: true,
     index: true
   },
-  answers: [{
-    questionId: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: 'Question',
-      required: true
-    },
-    value: {
-      type: mongoose.Schema.Types.Mixed, // Can be string, array, or number
-      required: true
+  answers: [
+    {
+      questionId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Question',
+        required: true
+      },
+      value: {
+        type: mongoose.Schema.Types.Mixed, // Can be string, array, or number
+        required: true
+      }
     }
-  }],
+  ],
   submittedBy: {
     type: String, // IP or identifier (optional for anonymous)
     default: 'anonymous'

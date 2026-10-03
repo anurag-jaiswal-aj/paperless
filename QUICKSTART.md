@@ -9,7 +9,7 @@
 cd server
 npm install
 
-# Install frontend dependencies  
+# Install frontend dependencies
 cd ../client
 npm install
 ```
@@ -81,7 +81,7 @@ The app requires MongoDB. For quick testing:
 ### Without OpenAI (Basic features only)
 The app works without OpenAI! Just skip:
 - AI Suggest Questions
-- Improve Wording  
+- Improve Wording
 - Auto Summary
 
 All other features work perfectly.

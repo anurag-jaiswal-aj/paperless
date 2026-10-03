@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import { Link } from 'react-router-dom';
 import { useSelector, useDispatch } from 'react-redux';
 import { setForms, setLoading, setError, addForm, removeForm } from '../store/formSlice';
@@ -9,18 +9,13 @@ import Loader from '../components/Loader';
 const Dashboard = () => {
   const dispatch = useDispatch();
   const { forms, loading, error } = useSelector((state) => state.forms);
-  const { theme } = useSelector((state) => state.theme);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [newFormData, setNewFormData] = useState({
     title: '',
     description: ''
   });
 
-  useEffect(() => {
-    fetchForms();
-  }, []);
-
-  const fetchForms = async () => {
+  const fetchForms = useCallback(async () => {
     dispatch(setLoading(true));
     try {
       const response = await api.get('/api/forms');
@@ -30,7 +25,11 @@ const Dashboard = () => {
     } catch (err) {
       dispatch(setError(err.response?.data?.message || 'Failed to load forms'));
     }
-  };
+  }, [dispatch]);
+
+  useEffect(() => {
+    fetchForms();
+  }, [fetchForms]);
 
   const handleCreateForm = async (e) => {
     e.preventDefault();
@@ -78,7 +77,7 @@ const Dashboard = () => {
           </div>
           <button
             onClick={() => setShowCreateModal(true)}
-            className="btn-primary px-6 py-3 rounded flex items-center gap-2 hover:opacity-80 transition"
+            className="btn btn-primary"
           >
             <FiPlus /> Create New Form
           </button>
@@ -104,13 +103,13 @@ const Dashboard = () => {
             {forms.map((form) => (
               <div
                 key={form._id}
-                className={`border-2 ${theme === 'light' ? 'border-black' : 'border-white'} rounded p-6 hover:shadow-lg transition theme-transition`}
+                className={`card p-6 hover:shadow-lg transition theme-transition`}
               >
                 <h3 className="text-xl font-bold mb-2">{form.title}</h3>
                 <p className="opacity-70 mb-4 line-clamp-2">
                   {form.description || 'No description'}
                 </p>
-                
+
                 <div className="text-sm opacity-70 mb-4">
                   {form.responseCount || 0} responses
                 </div>
@@ -118,28 +117,28 @@ const Dashboard = () => {
                 <div className="flex gap-2 flex-wrap">
                   <Link
                     to={`/builder/${form._id}`}
-                    className="btn-secondary px-3 py-2 rounded text-sm flex items-center gap-1 hover:opacity-70 transition"
+                    className="btn btn-secondary text-sm"
                   >
                     <FiEdit size={14} /> Edit
                   </Link>
-                  
+
                   <Link
                     to={`/responses/${form._id}`}
-                    className="btn-secondary px-3 py-2 rounded text-sm flex items-center gap-1 hover:opacity-70 transition"
+                    className="btn btn-secondary text-sm"
                   >
                     <FiBarChart2 size={14} /> Responses
                   </Link>
-                  
+
                   <button
                     onClick={() => copyShareLink(form._id)}
-                    className="btn-secondary px-3 py-2 rounded text-sm flex items-center gap-1 hover:opacity-70 transition"
+                    className="btn btn-secondary text-sm"
                   >
                     <FiCopy size={14} /> Share
                   </button>
-                  
+
                   <button
                     onClick={() => handleDeleteForm(form._id)}
-                    className="btn-secondary px-3 py-2 rounded text-sm flex items-center gap-1 hover:opacity-70 transition text-red-600"
+                    className="btn btn-secondary text-sm text-red-600"
                   >
                     <FiTrash2 size={14} /> Delete
                   </button>
@@ -152,9 +151,9 @@ const Dashboard = () => {
         {/* Create Form Modal */}
         {showCreateModal && (
           <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
-            <div className={`${theme === 'light' ? 'bg-white' : 'bg-black'} border-2 ${theme === 'light' ? 'border-black' : 'border-white'} rounded p-8 max-w-md w-full theme-transition`}>
+            <div className={`card p-8 max-w-md w-full theme-transition`}>
               <h2 className="text-2xl font-bold mb-6">Create New Form</h2>
-              
+
               <form onSubmit={handleCreateForm} className="space-y-4">
                 <div>
                   <label htmlFor="title" className="block mb-2 font-medium">
@@ -166,7 +165,7 @@ const Dashboard = () => {
                     value={newFormData.title}
                     onChange={(e) => setNewFormData({ ...newFormData, title: e.target.value })}
                     required
-                    className="w-full px-4 py-2 rounded focus:outline-none focus:ring-2 theme-transition"
+                    className="input"
                     placeholder="e.g., Customer Feedback Survey"
                   />
                 </div>
@@ -180,7 +179,7 @@ const Dashboard = () => {
                     value={newFormData.description}
                     onChange={(e) => setNewFormData({ ...newFormData, description: e.target.value })}
                     rows={3}
-                    className="w-full px-4 py-2 rounded focus:outline-none focus:ring-2 theme-transition"
+                    className="input"
                     placeholder="Brief description of your form"
                   />
                 </div>
@@ -188,7 +187,7 @@ const Dashboard = () => {
                 <div className="flex gap-3 pt-4">
                   <button
                     type="submit"
-                    className="flex-1 btn-primary py-2 rounded hover:opacity-80 transition"
+                    className="btn flex-1 btn-primary"
                   >
                     Create Form
                   </button>
@@ -198,7 +197,7 @@ const Dashboard = () => {
                       setShowCreateModal(false);
                       setNewFormData({ title: '', description: '' });
                     }}
-                    className="flex-1 btn-secondary py-2 rounded hover:opacity-80 transition"
+                    className="btn flex-1 btn-secondary"
                   >
                     Cancel
                   </button>
