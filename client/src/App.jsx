@@ -15,10 +15,12 @@ const FormBuilder = React.lazy(() => import('./pages/FormBuilder'));
 const PublicForm = React.lazy(() => import('./pages/PublicForm'));
 const Responses = React.lazy(() => import('./pages/Responses'));
 
+import Loader from './components/Loader';
+
 // Simple loading fallback
 const SuspenseFallback = () => (
-  <div className="min-h-screen flex items-center justify-center">
-    <div className="opacity-70">Loading...</div>
+  <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-[#030712] theme-transition">
+    <Loader size="lg" />
   </div>
 );
 

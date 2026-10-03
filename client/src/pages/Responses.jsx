@@ -3,7 +3,7 @@ import { useParams, Link } from 'react-router-dom';
 import { useSelector } from 'react-redux';
 import api from '../utils/api';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
-import { FiDownload, FiZap, FiArrowLeft } from 'react-icons/fi';
+import { FiDownload, FiZap, FiArrowLeft, FiBarChart2 } from 'react-icons/fi';
 import Loader from '../components/Loader';
 
 const Responses = () => {
@@ -228,9 +228,12 @@ const Responses = () => {
         </div>
 
         {responses.length === 0 ? (
-          <div className="text-center py-16 opacity-70">
-            <p className="text-xl">No responses yet</p>
-            <p className="mt-2">Share your form to start collecting responses</p>
+          <div className="text-center py-20 px-4 card flex flex-col items-center justify-center bg-transparent border-dashed">
+            <div className="bg-gray-100 dark:bg-gray-800 p-4 rounded-full mb-4">
+              <FiBarChart2 className="w-8 h-8 opacity-50" />
+            </div>
+            <h3 className="text-xl font-bold mb-2">No responses yet</h3>
+            <p className="opacity-70 max-w-sm mx-auto">Share your form to start collecting responses and analyzing data.</p>
           </div>
         ) : (
           <>
@@ -294,17 +297,17 @@ const Responses = () => {
                   themes.length > 0 ? (
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                       {themes.map((themeItem, idx) => (
-                        <div key={idx} className="p-4 border border-gray-500 border-opacity-30 rounded">
-                          <div className="flex justify-between items-start mb-2">
+                        <div key={idx} className="p-5 bg-gray-50 dark:bg-gray-800/50 rounded-xl border border-gray-100 dark:border-gray-800">
+                          <div className="flex justify-between items-start mb-3">
                             <h3 className="font-bold text-lg">{themeItem.name}</h3>
-                            {themeItem.sentiment && <span className="text-xs opacity-70 px-2 py-1 rounded bg-gray-500 bg-opacity-20 uppercase">{themeItem.sentiment}</span>}
+                            {themeItem.sentiment && <span className="text-xs font-semibold px-2 py-1 rounded bg-white dark:bg-gray-900 shadow-sm uppercase">{themeItem.sentiment}</span>}
                           </div>
-                          <p className="text-sm opacity-90 mb-3">{themeItem.description}</p>
+                          <p className="text-sm opacity-90 mb-4">{themeItem.description}</p>
                           {themeItem.supportingResponses && themeItem.supportingResponses.length > 0 && (
-                            <div className="text-sm opacity-70">
-                              <p className="font-semibold mb-1">Examples:</p>
-                              <ul className="list-disc pl-4 space-y-1">
-                                {themeItem.supportingResponses.map((r, i) => <li key={i}>&quot;{r}&quot;</li>)}
+                            <div className="text-sm opacity-70 border-t border-gray-200 dark:border-gray-700 pt-3">
+                              <p className="font-semibold mb-2">Examples:</p>
+                              <ul className="list-disc pl-4 space-y-1.5">
+                                {themeItem.supportingResponses.map((r, i) => <li key={i} className="italic">&quot;{r}&quot;</li>)}
                               </ul>
                             </div>
                           )}
@@ -336,9 +339,9 @@ const Responses = () => {
                     {categories.categories && categories.categories.length > 0 && (
                       <div className="space-y-4">
                         {categories.categories.map((cat, idx) => (
-                          <div key={idx} className="p-4 border border-gray-500 border-opacity-30 rounded">
-                            <h3 className="font-bold text-lg mb-1">{cat.name} <span className="opacity-70 font-normal text-sm ml-2">({(cat.responseIndexes || []).length} responses)</span></h3>
-                            <p className="text-sm opacity-90 mb-2">{cat.description}</p>
+                          <div key={idx} className="p-5 bg-gray-50 dark:bg-gray-800/50 rounded-xl border border-gray-100 dark:border-gray-800">
+                            <h3 className="font-bold text-lg mb-2">{cat.name} <span className="opacity-70 font-normal text-sm ml-2 bg-white dark:bg-gray-900 px-2 py-1 rounded-md shadow-sm">{(cat.responseIndexes || []).length} responses</span></h3>
+                            <p className="text-sm opacity-90 mb-3">{cat.description}</p>
                             {(cat.responseIndexes || []).length > 0 && (
                               <p className="text-xs opacity-70">
                                 Includes Response IDs: {(cat.responseIndexes || []).map(i => {
@@ -352,8 +355,8 @@ const Responses = () => {
                       </div>
                     )}
                     {categories.uncategorizedResponseIndexes && categories.uncategorizedResponseIndexes.length > 0 && (
-                      <div className="mt-4 p-4 border border-gray-500 border-opacity-30 rounded">
-                        <h3 className="font-bold text-lg mb-1 opacity-70">Uncategorized</h3>
+                      <div className="mt-4 p-5 bg-gray-50 dark:bg-gray-800/50 rounded-xl border border-gray-100 dark:border-gray-800">
+                        <h3 className="font-bold text-lg mb-2 opacity-70">Uncategorized</h3>
                         <p className="text-xs opacity-70">
                           Response IDs: {categories.uncategorizedResponseIndexes.map(i => {
                             const r = responses[i];
@@ -416,21 +419,21 @@ const Responses = () => {
               ))}
 
               {totalPages > 1 && (
-                <div className="flex justify-between items-center mt-6 p-4">
+                <div className="flex justify-between items-center mt-8 p-4 bg-white dark:bg-gray-900 rounded-xl border shadow-sm">
                   <button
                     disabled={page === 1}
                     onClick={() => fetchResponses(page - 1)}
-                    className="btn btn-secondary px-4 py-2 rounded hover:opacity-70 disabled:opacity-30 transition"
+                    className="btn btn-secondary"
                   >
                     Previous
                   </button>
-                  <span className="opacity-70">
+                  <span className="opacity-70 font-medium">
                     Page {page} of {totalPages}
                   </span>
                   <button
                     disabled={page === totalPages}
                     onClick={() => fetchResponses(page + 1)}
-                    className="btn btn-secondary px-4 py-2 rounded hover:opacity-70 disabled:opacity-30 transition"
+                    className="btn btn-secondary"
                   >
                     Next
                   </button>

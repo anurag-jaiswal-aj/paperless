@@ -23,7 +23,6 @@ const FormBuilder = () => {
   const navigate = useNavigate();
   const dispatch = useDispatch();
   const { questions, loading } = useSelector((state) => state.forms);
-  const { theme } = useSelector((state) => state.theme);
 
   const [formData, setFormData] = useState({ title: '', description: '', status: 'draft' });
   const [showAIModal, setShowAIModal] = useState(false);
@@ -281,14 +280,14 @@ const FormBuilder = () => {
             <div className="flex gap-3 mb-6 items-center flex-wrap">
               <button
                 onClick={() => setShowAIModal(true)}
-                className="btn btn-primary px-4 py-2 rounded flex items-center gap-2"
+                className="btn btn-primary"
               >
                 <FiZap /> AI Suggest Questions
               </button>
 
               <button
                 onClick={handleConsultant}
-                className="btn btn-secondary px-4 py-2 rounded flex items-center gap-2"
+                className="btn btn-secondary"
               >
                 Form Consultant
               </button>
@@ -476,15 +475,15 @@ const FormBuilder = () => {
             {/* Add Question Button */}
             <button
               onClick={() => handleAddQuestion()}
-              className="w-full border-2 border-dashed rounded p-6 hover:bg-opacity-10 hover:bg-gray-500 transition mt-4"
+              className="w-full border-2 border-dashed border-gray-300 dark:border-gray-700 rounded-2xl p-6 hover:bg-gray-50 dark:hover:bg-gray-800/50 hover:border-gray-400 dark:hover:border-gray-600 transition-all duration-200 mt-6 text-gray-600 dark:text-gray-400 font-medium flex items-center justify-center gap-2"
             >
-              <FiPlus className="inline mr-2" /> Add Question
+              <FiPlus className="w-5 h-5" /> Add Question
             </button>
 
             {/* AI Suggest Modal */}
             {showAIModal && (
-              <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50 overflow-y-auto">
-                <div className={`card p-8 max-w-2xl w-full my-8`}>
+              <div className="glass-backdrop overflow-y-auto">
+                <div className="glass-panel max-w-2xl my-8">
                   <h2 className="text-2xl font-bold mb-4">AI Question Generation</h2>
                   <p className="opacity-70 mb-4">Enter a topic and AI will suggest relevant questions for your form.</p>
 
@@ -556,8 +555,8 @@ const FormBuilder = () => {
 
             {/* Improve Wording Modal */}
             {showImproveModal && (
-              <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
-                <div className={`card p-8 max-w-lg w-full`}>
+              <div className="glass-backdrop">
+                <div className="glass-panel">
                   <h2 className="text-2xl font-bold mb-4">AI Writing Improvement</h2>
 
                   {aiLoading ? (
@@ -599,10 +598,8 @@ const FormBuilder = () => {
 
             {/* Consultant Modal */}
             {showConsultantModal && (
-              <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50 overflow-y-auto">
-                <div
-                  className={`${theme === 'light' ? 'bg-white' : 'bg-black'} border-2 rounded p-8 max-w-2xl w-full my-8`}
-                >
+              <div className="glass-backdrop overflow-y-auto">
+                <div className="glass-panel max-w-2xl my-8">
                   <h2 className="text-2xl font-bold mb-4">Form Consultant</h2>
 
                   {aiLoading ? (

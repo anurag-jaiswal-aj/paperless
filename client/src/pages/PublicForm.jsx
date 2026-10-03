@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback } from 'react';
 import { useParams } from 'react-router-dom';
 import api from '../utils/api';
 import Loader from '../components/Loader';
-import { FiCheckCircle } from 'react-icons/fi';
+import { FiCheckCircle, FiAlertCircle } from 'react-icons/fi';
 
 const PublicForm = () => {
   const { id } = useParams();
@@ -223,16 +223,16 @@ const PublicForm = () => {
 
       case 'rating':
         return (
-          <div className="flex gap-2">
+          <div className="flex gap-3">
             {[1, 2, 3, 4, 5].map((rating) => (
               <button
                 key={rating}
                 type="button"
                 onClick={() => handleAnswerChange(questionId, rating)}
-                className={`w-12 h-12 rounded border-2 font-bold transition ${
+                className={`w-12 h-12 rounded-xl border-2 font-bold transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 ${
                   answers[questionId] === rating
-                    ? 'btn-primary'
-                    : 'btn-secondary hover:opacity-70'
+                    ? 'border-gray-900 bg-gray-900 text-white dark:border-gray-100 dark:bg-gray-100 dark:text-gray-900 shadow-md scale-105'
+                    : 'border-gray-200 bg-transparent text-gray-700 dark:border-gray-700 dark:text-gray-300 hover:border-gray-400 dark:hover:border-gray-500 hover:bg-gray-50 dark:hover:bg-gray-800'
                 }`}
               >
                 {rating}
@@ -277,9 +277,13 @@ const PublicForm = () => {
 
   if (error && !form) {
     return (
-      <div className="min-h-screen flex items-center justify-center px-4">
-        <div className="text-center">
-          <p className="text-xl mb-4">{error}</p>
+      <div className="min-h-screen flex items-center justify-center px-4 bg-gray-50 dark:bg-[#030712] theme-transition">
+        <div className="text-center card p-10 max-w-md w-full">
+          <div className="bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-6">
+            <FiAlertCircle size={32} />
+          </div>
+          <h2 className="text-2xl font-bold mb-3">Oops!</h2>
+          <p className="opacity-70">{error}</p>
         </div>
       </div>
     );
@@ -287,55 +291,60 @@ const PublicForm = () => {
 
   if (submitted) {
     return (
-      <div className="min-h-screen flex items-center justify-center px-4">
-        <div className="text-center max-w-md">
-          <FiCheckCircle size={64} className="mx-auto mb-4 text-green-600" />
-          <h1 className="text-3xl font-bold mb-2">Thank You!</h1>
-          <p className="opacity-70">Your response has been recorded successfully.</p>
+      <div className="min-h-screen flex items-center justify-center px-4 bg-gray-50 dark:bg-[#030712] theme-transition">
+        <div className="text-center card p-12 max-w-md w-full">
+          <div className="bg-green-100 dark:bg-green-900/30 text-green-600 dark:text-green-400 w-20 h-20 rounded-full flex items-center justify-center mx-auto mb-6">
+            <FiCheckCircle size={40} />
+          </div>
+          <h1 className="text-3xl font-bold mb-3">Thank You!</h1>
+          <p className="opacity-70 text-lg">Your response has been recorded successfully.</p>
         </div>
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen py-12 px-4">
+    <div className="min-h-screen py-16 md:py-24 px-4 bg-gray-50 dark:bg-[#030712] theme-transition">
       <div className="container mx-auto max-w-3xl">
-        <div className={`card p-8 mb-6`}>
-          <h1 className="text-3xl font-bold mb-2">{form.title}</h1>
+        <div className={`card p-8 md:p-10 mb-8 border-t-8 border-t-gray-900 dark:border-t-gray-100`}>
+          <h1 className="text-3xl md:text-4xl font-extrabold mb-4">{form.title}</h1>
           {form.description && (
-            <p className="opacity-70">{form.description}</p>
+            <p className="opacity-70 text-lg">{form.description}</p>
           )}
         </div>
 
-        <form onSubmit={handleSubmit} className="space-y-6">
+        <form onSubmit={handleSubmit} className="space-y-8">
           {error && (
-            <div className="p-4 border-2 border-red-500 rounded bg-red-50 text-red-700">
-              {error}
+            <div className="p-4 rounded-xl bg-red-50 text-red-700 dark:bg-red-900/20 dark:text-red-400 border border-red-200 dark:border-red-800 flex items-center gap-3">
+              <FiAlertCircle className="w-5 h-5 flex-shrink-0" />
+              <p>{error}</p>
             </div>
           )}
 
           {questions.filter(isQuestionVisible).map((question) => (
             <div
               key={question._id}
-              className={`card p-6`}
+              className={`card p-6 md:p-8`}
             >
-              <label className="block mb-4">
-                <span className="font-medium text-lg">
+              <label className="block mb-5">
+                <span className="font-semibold text-lg md:text-xl">
                   {question.label}
-                  {question.required && <span className="text-red-600 ml-1">*</span>}
+                  {question.required && <span className="text-red-600 dark:text-red-400 ml-1.5">*</span>}
                 </span>
               </label>
               {renderQuestion(question)}
             </div>
           ))}
 
-          <button
-            type="submit"
-            disabled={submitting}
-            className="btn w-full btn-primary"
-          >
-            {submitting ? 'Submitting...' : 'Submit'}
-          </button>
+          <div className="pt-4">
+            <button
+              type="submit"
+              disabled={submitting}
+              className="btn btn-lg w-full btn-primary"
+            >
+              {submitting ? 'Submitting...' : 'Submit Response'}
+            </button>
+          </div>
         </form>
       </div>
     </div>

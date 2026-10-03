@@ -4,7 +4,6 @@ import { FiCheck } from 'react-icons/fi';
 
 const Home = () => {
   const { isAuthenticated } = useSelector((state) => state.auth);
-  const { theme } = useSelector((state) => state.theme);
 
   const features = [
     'Drag-and-drop form builder',
@@ -32,21 +31,21 @@ const Home = () => {
         {isAuthenticated ? (
           <Link
             to="/dashboard"
-            className="btn inline-block btn-primary text-lg"
+            className="btn btn-lg btn-primary"
           >
             Go to Dashboard
           </Link>
         ) : (
-          <div className="flex gap-4 justify-center">
+          <div className="flex flex-col sm:flex-row gap-4 justify-center">
             <Link
               to="/register"
-              className="btn btn-primary text-lg"
+              className="btn btn-lg btn-primary"
             >
               Get Started Free
             </Link>
             <Link
               to="/login"
-              className="btn btn-secondary text-lg"
+              className="btn btn-lg btn-secondary"
             >
               Sign In
             </Link>
@@ -56,7 +55,7 @@ const Home = () => {
 
       {/* Features Section */}
       <div className="container mx-auto px-4 py-16">
-        <div className={`border-t-2 ${theme === 'light' ? 'border-black' : 'border-white'} pt-16`}>
+        <div className={`border-t border-gray-200 dark:border-gray-800 pt-16`}>
           <h2 className="text-4xl font-bold text-center mb-12">
             Everything you need to create amazing forms
           </h2>
@@ -82,7 +81,7 @@ const Home = () => {
           {!isAuthenticated && (
             <Link
               to="/register"
-              className="btn inline-block btn-primary text-lg"
+              className="btn btn-lg btn-primary"
             >
               Create Your First Form
             </Link>
@@ -91,7 +90,7 @@ const Home = () => {
       </div>
 
       {/* Footer */}
-      <footer className={`border-t-2 ${theme === 'light' ? 'border-black' : 'border-white'} py-8 mt-16`}>
+      <footer className="border-t border-gray-200 dark:border-gray-800 py-8 mt-16">
         <div className="container mx-auto px-4 text-center opacity-70">
           <p>&copy; 2025 Paperless. Built with MERN Stack.</p>
         </div>

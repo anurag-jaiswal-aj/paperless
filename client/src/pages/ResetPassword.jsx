@@ -3,6 +3,7 @@ import { useNavigate, useParams, Link } from 'react-router-dom';
 import api from '../utils/api';
 import { useDispatch } from 'react-redux';
 import { loginSuccess } from '../store/authSlice';
+import { FiAlertCircle, FiCheckCircle } from 'react-icons/fi';
 
 const ResetPassword = () => {
   const { token } = useParams();
@@ -46,24 +47,27 @@ const ResetPassword = () => {
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center px-4">
+    <div className="min-h-screen flex items-center justify-center px-4 bg-gray-50 dark:bg-[#030712] theme-transition">
       <div className="max-w-md w-full">
         <div className="text-center mb-8">
-          <h1 className="text-4xl font-bold mb-2">Create New Password</h1>
-          <p className="opacity-70">Enter your new password below</p>
+          <h1 className="text-4xl font-extrabold mb-3 tracking-tight">Create New Password</h1>
+          <p className="opacity-70 text-lg">Enter your new password below</p>
         </div>
 
-        <form onSubmit={handleSubmit} className="space-y-6">
-          {error && (
-            <div className="p-4 border-2 border-red-500 rounded bg-red-50 text-red-700">
-              {error}
-            </div>
-          )}
-          {success && (
-            <div className="p-4 border-2 border-green-500 rounded bg-green-50 text-green-700">
-              {success}
-            </div>
-          )}
+        <div className="card p-8 md:p-10">
+          <form onSubmit={handleSubmit} className="space-y-6">
+            {error && (
+              <div className="p-4 rounded-xl bg-red-50 text-red-700 dark:bg-red-900/20 dark:text-red-400 border border-red-200 dark:border-red-800 flex items-center gap-3">
+                <FiAlertCircle className="w-5 h-5 flex-shrink-0" />
+                <p className="text-sm">{error}</p>
+              </div>
+            )}
+            {success && (
+              <div className="p-4 rounded-xl bg-green-50 text-green-700 dark:bg-green-900/20 dark:text-green-400 border border-green-200 dark:border-green-800 flex items-center gap-3">
+                <FiCheckCircle className="w-5 h-5 flex-shrink-0" />
+                <p className="text-sm">{success}</p>
+              </div>
+            )}
 
           <div>
             <label htmlFor="password" className="block mb-2 font-medium">
@@ -100,14 +104,15 @@ const ResetPassword = () => {
           <button
             type="submit"
             disabled={loading || !!success}
-            className="btn btn-primary"
+            className="btn btn-lg w-full btn-primary mt-2"
           >
             {loading ? 'Resetting...' : 'Reset Password'}
           </button>
         </form>
+        </div>
 
-        <p className="text-center mt-6 opacity-70">
-          <Link to="/login" className="font-medium hover:opacity-70 underline">
+        <p className="text-center mt-8 opacity-70">
+          <Link to="/login" className="font-semibold text-gray-900 dark:text-gray-100 hover:underline">
             Back to login
           </Link>
         </p>

@@ -4,25 +4,28 @@
 
 @layer base {
   :root {
-    --radius: 0.5rem;
+    --radius: 0.75rem;
   }
   * {
     @apply border-gray-200;
   }
   body {
-    @apply antialiased text-gray-900 bg-gray-50;
+    @apply antialiased text-gray-900 bg-gray-50 transition-colors duration-300;
     font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen', 'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue', sans-serif;
+  }
+  h1, h2, h3, h4, h5, h6 {
+    @apply tracking-tight;
   }
 }
 
 @layer components {
   /* Button base */
   .btn {
-    @apply inline-flex items-center justify-center gap-2 px-4 py-2 text-sm font-medium transition-colors rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50;
+    @apply inline-flex items-center justify-center gap-2 px-4 py-2.5 text-sm font-semibold transition-all duration-200 rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 active:scale-[0.98];
   }
 
   .btn-lg {
-    @apply px-8 py-4 text-lg rounded-lg;
+    @apply px-8 py-3.5 text-base rounded-xl;
   }
 
   .btn-sm {
@@ -31,16 +34,16 @@
 
   /* Input styles */
   .input {
-    @apply flex h-10 w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-black focus:border-transparent disabled:cursor-not-allowed disabled:opacity-50 transition-colors;
+    @apply flex h-11 w-full rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-black focus:border-transparent disabled:cursor-not-allowed disabled:opacity-50 transition-all duration-200 shadow-sm;
   }
 
   .input-error {
-    @apply border-red-500 focus:ring-red-500;
+    @apply border-red-500 focus:ring-red-500 shadow-sm;
   }
 
   /* Card base */
   .card {
-    @apply rounded-xl border shadow-sm overflow-hidden transition-colors;
+    @apply rounded-2xl border shadow-sm overflow-hidden transition-all duration-300 hover:shadow-md;
   }
 
   .card-header {
@@ -50,51 +53,61 @@
   .card-content {
     @apply p-6 pt-0;
   }
+
+  /* Glass modal backdrop */
+  .glass-backdrop {
+    @apply fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center p-4 z-50 transition-all duration-300;
+  }
+
+  /* Glass modal panel */
+  .glass-panel {
+    @apply bg-white dark:bg-gray-900 rounded-2xl shadow-xl border border-gray-200 dark:border-gray-800 p-8 max-w-lg w-full transform transition-all duration-300;
+  }
 }
 
 /* Theme classes (Light/Dark Mode) */
 .theme-light {
-  background-color: #f9fafb; /* bg-gray-50 */
-  color: #111827; /* text-gray-900 */
+  background-color: #fafafa;
+  color: #111827;
 }
 
 .theme-dark {
-  background-color: #030712; /* bg-gray-950 */
-  color: #f9fafb; /* text-gray-50 */
+  background-color: #030712;
+  color: #f9fafb;
 }
 
 /* Card theme */
 .theme-light .card {
-  @apply bg-white border-gray-200;
+  @apply bg-white border-gray-200 shadow-[0_2px_10px_-3px_rgba(0,0,0,0.05)];
 }
 
 .theme-dark .card {
-  @apply bg-gray-900 border-gray-800;
+  @apply bg-gray-900 border-gray-800 shadow-[0_2px_10px_-3px_rgba(0,0,0,0.3)];
 }
 
 /* Base button colors for themes */
 .theme-light .btn-primary {
-  @apply bg-gray-900 text-white hover:bg-gray-800 focus-visible:ring-gray-900;
+  @apply bg-gray-900 text-white hover:bg-gray-800 focus-visible:ring-gray-900 shadow-md hover:shadow-lg;
 }
 
 .theme-dark .btn-primary {
-  @apply bg-gray-50 text-gray-900 hover:bg-gray-200 focus-visible:ring-gray-300;
+  @apply bg-white text-gray-900 hover:bg-gray-100 focus-visible:ring-gray-300 shadow-md hover:shadow-lg;
 }
 
 .theme-light .btn-secondary {
-  @apply bg-white text-gray-900 border border-gray-200 hover:bg-gray-100 focus-visible:ring-gray-900 shadow-sm;
+  @apply bg-white text-gray-900 border border-gray-200 hover:bg-gray-50 focus-visible:ring-gray-900 shadow-sm hover:shadow;
 }
 
 .theme-dark .btn-secondary {
-  @apply bg-gray-900 text-gray-100 border border-gray-800 hover:bg-gray-800 focus-visible:ring-gray-300 shadow-sm;
+  @apply bg-gray-800 text-gray-100 border border-gray-700 hover:bg-gray-700 focus-visible:ring-gray-300 shadow-sm hover:shadow;
 }
 
 .theme-light .btn-danger {
-  @apply bg-red-600 text-white hover:bg-red-700 focus-visible:ring-red-600;
+  @apply bg-red-600 text-white hover:bg-red-700 focus-visible:ring-red-600 shadow-md;
 }
 
 .theme-dark .btn-danger {
-  @apply bg-red-900 text-red-100 hover:bg-red-800 focus-visible:ring-red-900;
+  @apply bg-red-900 text-red-100 hover:bg-red-800 focus-visible:ring-red-900 shadow-md;
 }
 
 /* Inputs for themes */
@@ -107,31 +120,31 @@
 .theme-dark input,
 .theme-dark textarea,
 .theme-dark select {
-  @apply bg-gray-900 border-gray-700 text-white focus:ring-gray-300 focus:border-gray-300 placeholder-gray-500;
+  @apply bg-gray-800 border-gray-700 text-white focus:ring-gray-300 focus:border-gray-300 placeholder-gray-500;
 }
 
 /* Custom scrollbar */
 ::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+  width: 6px;
+  height: 6px;
 }
 
 .theme-light ::-webkit-scrollbar-track {
-  background: #f1f1f1;
+  background: transparent;
 }
 
 .theme-dark ::-webkit-scrollbar-track {
-  background: #111827;
+  background: transparent;
 }
 
 .theme-light ::-webkit-scrollbar-thumb {
   background: #cbd5e1;
-  border-radius: 4px;
+  border-radius: 8px;
 }
 
 .theme-dark ::-webkit-scrollbar-thumb {
   background: #475569;
-  border-radius: 4px;
+  border-radius: 8px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
@@ -144,5 +157,5 @@
 
 /* Theme transitions */
 .theme-transition {
-  transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease;
+  transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease, box-shadow 0.3s ease;
 }

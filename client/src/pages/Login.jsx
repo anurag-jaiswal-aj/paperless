@@ -3,6 +3,7 @@ import { Link, useNavigate } from 'react-router-dom';
 import { useDispatch, useSelector } from 'react-redux';
 import { loginStart, loginSuccess, loginFailure } from '../store/authSlice';
 import api from '../utils/api';
+import { FiAlertCircle } from 'react-icons/fi';
 
 const Login = () => {
   const navigate = useNavigate();
@@ -44,19 +45,21 @@ const Login = () => {
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center px-4">
+    <div className="min-h-screen flex items-center justify-center px-4 bg-gray-50 dark:bg-[#030712] theme-transition">
       <div className="max-w-md w-full">
         <div className="text-center mb-8">
-          <h1 className="text-4xl font-bold mb-2">Welcome Back</h1>
-          <p className="opacity-70">Sign in to your Paperless account</p>
+          <h1 className="text-4xl font-extrabold mb-3 tracking-tight">Welcome Back</h1>
+          <p className="opacity-70 text-lg">Sign in to your Paperless account</p>
         </div>
 
-        <form onSubmit={handleSubmit} className="space-y-6">
-          {error && (
-            <div className="p-4 border-2 border-red-500 rounded bg-red-50 text-red-700">
-              {error}
-            </div>
-          )}
+        <div className="card p-8 md:p-10">
+          <form onSubmit={handleSubmit} className="space-y-6">
+            {error && (
+              <div className="p-4 rounded-xl bg-red-50 text-red-700 dark:bg-red-900/20 dark:text-red-400 border border-red-200 dark:border-red-800 flex items-center gap-3">
+                <FiAlertCircle className="w-5 h-5 flex-shrink-0" />
+                <p className="text-sm">{error}</p>
+              </div>
+            )}
 
           <div>
             <label htmlFor="email" className="block mb-2 font-medium">
@@ -100,15 +103,16 @@ const Login = () => {
           <button
             type="submit"
             disabled={loading}
-            className="btn w-full btn-primary"
+            className="btn btn-lg w-full btn-primary mt-2"
           >
             {loading ? 'Signing in...' : 'Sign In'}
           </button>
         </form>
+        </div>
 
-        <p className="text-center mt-6 opacity-70">
+        <p className="text-center mt-8 opacity-70">
           Don&apos;t have an account?{' '}
-          <Link to="/register" className="font-medium hover:opacity-70 underline">
+          <Link to="/register" className="font-semibold text-gray-900 dark:text-gray-100 hover:underline">
             Sign up
           </Link>
         </p>

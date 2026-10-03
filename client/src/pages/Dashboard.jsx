@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom';
 import { useSelector, useDispatch } from 'react-redux';
 import { setForms, setLoading, setError, addForm, removeForm } from '../store/formSlice';
 import api from '../utils/api';
-import { FiPlus, FiEdit, FiTrash2, FiBarChart2, FiCopy } from 'react-icons/fi';
+import { FiPlus, FiEdit, FiTrash2, FiBarChart2, FiCopy, FiFileText, FiAlertCircle } from 'react-icons/fi';
 import Loader from '../components/Loader';
 
 const Dashboard = () => {
@@ -85,8 +85,9 @@ const Dashboard = () => {
 
         {/* Error Message */}
         {error && (
-          <div className="mb-6 p-4 border-2 border-red-500 rounded bg-red-50 text-red-700">
-            {error}
+          <div className="mb-6 p-4 rounded-xl bg-red-50 text-red-700 dark:bg-red-900/20 dark:text-red-400 border border-red-200 dark:border-red-800 flex items-center gap-3">
+            <FiAlertCircle className="w-5 h-5 flex-shrink-0" />
+            <p>{error}</p>
           </div>
         )}
 
@@ -94,54 +95,78 @@ const Dashboard = () => {
         {loading ? (
           <Loader size="lg" />
         ) : forms.length === 0 ? (
-          <div className="text-center py-16 opacity-70">
-            <p className="text-xl mb-4">No forms yet</p>
-            <p>Create your first form to get started</p>
+          <div className="text-center py-20 px-4 card flex flex-col items-center justify-center bg-transparent border-dashed">
+            <div className="bg-gray-100 dark:bg-gray-800 p-4 rounded-full mb-4">
+              <FiFileText className="w-8 h-8 opacity-50" />
+            </div>
+            <h3 className="text-xl font-bold mb-2">No forms yet</h3>
+            <p className="opacity-70 mb-6 max-w-sm mx-auto">Create your first form to start collecting responses and gathering insights.</p>
+            <button
+              onClick={() => setShowCreateModal(true)}
+              className="btn btn-primary"
+            >
+              <FiPlus /> Create New Form
+            </button>
           </div>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
             {forms.map((form) => (
               <div
                 key={form._id}
-                className={`card p-6 hover:shadow-lg transition theme-transition`}
+                className="card flex flex-col"
               >
-                <h3 className="text-xl font-bold mb-2">{form.title}</h3>
-                <p className="opacity-70 mb-4 line-clamp-2">
-                  {form.description || 'No description'}
-                </p>
-
-                <div className="text-sm opacity-70 mb-4">
-                  {form.responseCount || 0} responses
+                <div className="card-header border-b border-gray-100 dark:border-gray-800">
+                  <div className="flex justify-between items-start mb-1">
+                    <h3 className="text-xl font-bold line-clamp-1" title={form.title}>{form.title}</h3>
+                    <span className={`text-xs px-2 py-1 rounded-full font-medium ${
+                      form.status === 'published' ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400' :
+                      form.status === 'closed' ? 'bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-400' :
+                      'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400'
+                    }`}>
+                      {form.status ? form.status.charAt(0).toUpperCase() + form.status.slice(1) : 'Draft'}
+                    </span>
+                  </div>
+                  <p className="opacity-70 text-sm line-clamp-2 min-h-[2.5rem]">
+                    {form.description || 'No description'}
+                  </p>
                 </div>
 
-                <div className="flex gap-2 flex-wrap">
-                  <Link
-                    to={`/builder/${form._id}`}
-                    className="btn btn-secondary text-sm"
-                  >
-                    <FiEdit size={14} /> Edit
-                  </Link>
+                <div className="card-content mt-4 flex-1 flex flex-col justify-between">
+                  <div className="text-sm font-medium mb-4 flex items-center gap-2">
+                    <div className="bg-primary/10 text-primary px-2 py-1 rounded">
+                      {form.responseCount || 0} responses
+                    </div>
+                  </div>
 
-                  <Link
-                    to={`/responses/${form._id}`}
-                    className="btn btn-secondary text-sm"
-                  >
-                    <FiBarChart2 size={14} /> Responses
-                  </Link>
+                  <div className="grid grid-cols-2 gap-2 mt-auto pt-4 border-t border-gray-100 dark:border-gray-800">
+                    <Link
+                      to={`/builder/${form._id}`}
+                      className="btn btn-secondary text-sm w-full"
+                    >
+                      <FiEdit size={14} /> Edit
+                    </Link>
 
-                  <button
-                    onClick={() => copyShareLink(form._id)}
-                    className="btn btn-secondary text-sm"
-                  >
-                    <FiCopy size={14} /> Share
-                  </button>
+                    <Link
+                      to={`/responses/${form._id}`}
+                      className="btn btn-secondary text-sm w-full"
+                    >
+                      <FiBarChart2 size={14} /> Results
+                    </Link>
 
-                  <button
-                    onClick={() => handleDeleteForm(form._id)}
-                    className="btn btn-secondary text-sm text-red-600"
-                  >
-                    <FiTrash2 size={14} /> Delete
-                  </button>
+                    <button
+                      onClick={() => copyShareLink(form._id)}
+                      className="btn btn-secondary text-sm w-full"
+                    >
+                      <FiCopy size={14} /> Share
+                    </button>
+
+                    <button
+                      onClick={() => handleDeleteForm(form._id)}
+                      className="btn btn-secondary text-sm text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 w-full"
+                    >
+                      <FiTrash2 size={14} /> Delete
+                    </button>
+                  </div>
                 </div>
               </div>
             ))}
@@ -150,8 +175,8 @@ const Dashboard = () => {
 
         {/* Create Form Modal */}
         {showCreateModal && (
-          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
-            <div className={`card p-8 max-w-md w-full theme-transition`}>
+          <div className="glass-backdrop">
+            <div className="glass-panel">
               <h2 className="text-2xl font-bold mb-6">Create New Form</h2>
 
               <form onSubmit={handleCreateForm} className="space-y-4">
