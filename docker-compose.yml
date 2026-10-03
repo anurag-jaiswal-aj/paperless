@@ -1,0 +1,32 @@
+version: '3.8'
+services:
+  server:
+    build:
+      context: ./server
+    ports:
+      - "5000:5000"
+    environment:
+      - NODE_ENV=production
+      - PORT=5000
+      # Pass through required secrets from host environment
+      - MONGO_URI=${MONGO_URI}
+      - JWT_SECRET=${JWT_SECRET}
+      - JWT_REFRESH_SECRET=${JWT_REFRESH_SECRET}
+      - FRONTEND_URL=${FRONTEND_URL:-http://localhost:5173}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - RESEND_API_KEY=${RESEND_API_KEY}
+      - S3_REGION=${S3_REGION}
+      - S3_BUCKET=${S3_BUCKET}
+      - S3_ACCESS_KEY_ID=${S3_ACCESS_KEY_ID}
+      - S3_SECRET_ACCESS_KEY=${S3_SECRET_ACCESS_KEY}
+      - MAX_FILE_SIZE=${MAX_FILE_SIZE:-5242880}
+    restart: unless-stopped
+
+  client:
+    build:
+      context: ./client
+      args:
+        - VITE_API_URL=${VITE_API_URL:-http://localhost:5000}
+    ports:
+      - "80:80"
+    restart: unless-stopped

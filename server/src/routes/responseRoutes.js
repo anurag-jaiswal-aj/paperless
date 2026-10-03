@@ -20,8 +20,10 @@ const submissionLimiter = rateLimit({
 
 import multer from 'multer';
 
+import os from 'os';
+
 const upload = multer({
-  storage: multer.memoryStorage(),
+  dest: os.tmpdir(),
   limits: {
     fileSize: process.env.MAX_FILE_SIZE ? parseInt(process.env.MAX_FILE_SIZE, 10) : 5 * 1024 * 1024, // 5MB default
   }

@@ -216,12 +216,50 @@ describe('AI Controller (Phase 6)', () => {
     });
   });
 
-  it('handles AIService errors gracefully', async () => {
-    AIService.generateQuestions.mockRejectedValue(new Error('AI_RATE_LIMIT_EXCEEDED'));
-    const res = await request(app)
-      .post('/api/ai/questions/generate')
-      .send({ topic: 'Testing' });
+  describe('Error Handling and Rate Limiting', () => {
+    it('handles AI_RATE_LIMIT_EXCEEDED gracefully', async () => {
+      AIService.generateQuestions.mockRejectedValue(new Error('AI_RATE_LIMIT_EXCEEDED'));
+      const res = await request(app)
+        .post('/api/ai/questions/generate')
+        .send({ topic: 'Testing' });
+      expect(res.status).toBe(429);
+    });
 
-    expect(res.status).toBe(429);
+    it('handles AI_PROVIDER_UNAVAILABLE gracefully', async () => {
+      AIService.generateQuestions.mockRejectedValue(new Error('AI_PROVIDER_UNAVAILABLE'));
+      const res = await request(app).post('/api/ai/questions/generate').send({ topic: 'Testing' });
+      expect(res.status).toBe(503);
+    });
+
+    it('handles AI_TIMEOUT gracefully', async () => {
+      AIService.generateQuestions.mockRejectedValue(new Error('AI_TIMEOUT'));
+      const res = await request(app).post('/api/ai/questions/generate').send({ topic: 'Testing' });
+      expect(res.status).toBe(503);
+    });
+
+    it('handles AI_INPUT_TOO_LARGE gracefully', async () => {
+      AIService.generateQuestions.mockRejectedValue(new Error('AI_INPUT_TOO_LARGE'));
+      const res = await request(app).post('/api/ai/questions/generate').send({ topic: 'Testing' });
+      expect(res.status).toBe(400);
+    });
+
+    it('handles AI_PROVIDER_REFUSAL gracefully', async () => {
+      AIService.generateQuestions.mockRejectedValue(new Error('AI_PROVIDER_REFUSAL'));
+      const res = await request(app).post('/api/ai/questions/generate').send({ topic: 'Testing' });
+      expect(res.status).toBe(400);
+    });
+
+    it('enforces express-rate-limit on AI routes', async () => {
+      // Loop 21 times to trigger 429
+      AIService.improveWriting.mockResolvedValue({ improvedText: 'test' });
+      let finalStatus = 200;
+      for (let i = 0; i < 21; i++) {
+        const res = await request(app)
+          .post('/api/ai/writing/improve')
+          .send({ text: 'test', contentType: 'question' });
+        finalStatus = res.status;
+      }
+      expect(finalStatus).toBe(429);
+    });
   });
 });

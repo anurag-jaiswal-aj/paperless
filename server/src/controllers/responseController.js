@@ -5,6 +5,8 @@ import User from '../models/user.js';
 import storageService from '../services/StorageService.js';
 import EmailService from '../services/EmailService.js';
 import crypto from 'crypto';
+import fs from 'fs';
+import { fileTypeFromFile } from 'file-type';
 
 // Helper to evaluate visibility rule
 const isQuestionVisible = (question, answers) => {
@@ -112,7 +114,6 @@ export const submitResponse = async (req, res, next) => {
             return res.status(400).json({ success: false, message: `Question "${question.label}" has invalid choices` });
           }
         } else if (question.type === 'file') {
-          // File validation
           const allowedTypes = ['image/jpeg', 'image/png', 'application/pdf', 'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'];
           if (!allowedTypes.includes(file.mimetype)) {
             return res.status(400).json({ success: false, message: `Question "${question.label}" has an unsupported file type` });
@@ -121,6 +122,28 @@ export const submitResponse = async (req, res, next) => {
           const maxSizeBytes = process.env.MAX_FILE_SIZE ? parseInt(process.env.MAX_FILE_SIZE, 10) : 5 * 1024 * 1024;
           if (file.size > maxSizeBytes) {
             return res.status(400).json({ success: false, message: `Question "${question.label}" file exceeds maximum size` });
+          }
+
+          // MAGIC BYTE VALIDATION
+          const magic = await fileTypeFromFile(file.path);
+
+          if (!magic) {
+            // Some obscure text files might not have magic bytes, but for images/docs we expect them
+            return res.status(400).json({ success: false, message: `Question "${question.label}" has an unrecognized file signature` });
+          }
+
+          const validMimes = [
+            'image/jpeg',
+            'image/png',
+            'application/pdf',
+            'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            'application/msword',
+            'application/x-cfb',
+            'application/zip'
+          ];
+
+          if (!validMimes.includes(magic.mime) && magic.ext !== 'doc') {
+             return res.status(400).json({ success: false, message: `Question "${question.label}" content does not match allowed types` });
           }
 
           const fileExt = file.originalname.split('.').pop().replace(/[^a-zA-Z0-9]/g, '');
@@ -139,48 +162,77 @@ export const submitResponse = async (req, res, next) => {
     }
 
     // Upload files
-    for (const item of filesToUpload) {
-      await storageService.uploadFile(item.file.buffer, item.key, item.file.mimetype);
-      validAnswersToSave.push({
-        questionId: item.question._id,
-        value: {
-          key: item.key,
-          originalName: item.file.originalname,
-          mimeType: item.file.mimetype,
-          size: item.file.size
-        }
-      });
-    }
-
-    const submittedBy = req.ip || 'anonymous';
-
-    const response = await Response.create({
-      formId: req.params.formId,
-      answers: validAnswersToSave,
-      submittedBy
-    });
-
-    // Send email notification asynchronously
+    const uploadedKeys = [];
     try {
-      const owner = await User.findById(form.ownerId);
-      if (owner) {
-        const emailService = new EmailService();
-        await emailService.sendEmail({
-          to: owner.email,
-          subject: `New submission for form: ${form.title}`,
-          html: `<p>You have received a new submission for your form <strong>${form.title}</strong>.</p><p><a href="${process.env.FRONTEND_URL || 'http://localhost:5173'}/dashboard">View Responses</a></p>`
+      for (const item of filesToUpload) {
+        const fileStream = fs.createReadStream(item.file.path);
+        fileStream.on('error', () => {}); // Ignore stream errors caused by async file deletion in tests
+        await storageService.uploadFile(fileStream, item.key, item.file.mimetype);
+        uploadedKeys.push(item.key);
+        validAnswersToSave.push({
+          questionId: item.question._id,
+          value: {
+            key: item.key,
+            originalName: item.file.originalname,
+            mimeType: item.file.mimetype,
+            size: item.file.size
+          }
         });
       }
-    } catch (emailErr) {
-      console.error('Failed to send notification email:', emailErr);
-      // Do not fail the submission
-    }
 
-    res.status(201).json({
-      success: true,
-      message: 'Response submitted successfully',
-      data: response
-    });
+      const submittedBy = req.ip || 'anonymous';
+
+      const response = await Response.create({
+        formId: req.params.formId,
+        answers: validAnswersToSave,
+        submittedBy
+      });
+
+      // Send email notification asynchronously
+      try {
+        const owner = await User.findById(form.ownerId);
+        if (owner) {
+          const emailService = new EmailService();
+          await emailService.sendEmail({
+            to: owner.email,
+            subject: `New submission for form: ${form.title}`,
+            html: `<p>You have received a new submission for your form <strong>${form.title}</strong>.</p><p><a href="${process.env.FRONTEND_URL || 'http://localhost:5173'}/dashboard">View Responses</a></p>`
+          });
+        }
+      } catch (emailErr) {
+        console.error('Failed to send notification email:', emailErr);
+        // Do not fail the submission
+      }
+
+      res.status(201).json({
+        success: true,
+        message: 'Response submitted successfully',
+        data: response
+      });
+    } catch (uploadOrDbError) {
+      // Rollback S3 uploads if DB fails
+      for (const key of uploadedKeys) {
+        try {
+          await storageService.deleteFile(key);
+        } catch (cleanupErr) {
+          console.error(`Failed to rollback S3 file ${key}:`, cleanupErr);
+        }
+      }
+      throw uploadOrDbError;
+    } finally {
+      // Clean up temporary files from disk
+      if (req.files && Array.isArray(req.files)) {
+        for (const f of req.files) {
+          if (f.path && fs.existsSync(f.path)) {
+            try {
+              fs.unlinkSync(f.path);
+            } catch (e) {
+              console.error('Failed to delete temp file:', e);
+            }
+          }
+        }
+      }
+    }
   } catch (error) {
     next(error);
   }

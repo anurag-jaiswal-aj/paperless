@@ -31,6 +31,9 @@ class S3StorageProvider {
   async uploadFile(fileBuffer, path, mimeType) {
     if (!this.client) {
       console.log(`[Mock S3 Upload] Path: ${path}, Type: ${mimeType}`);
+      if (fileBuffer && typeof fileBuffer.destroy === 'function') {
+        fileBuffer.destroy();
+      }
       return `mock-s3-url/${path}`;
     }
 

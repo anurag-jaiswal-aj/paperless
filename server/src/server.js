@@ -9,6 +9,17 @@ import cookieParser from 'cookie-parser';
 // Load environment variables
 dotenv.config();
 
+// Require minimum environment variables in production
+if (process.env.NODE_ENV === 'production') {
+  const requiredEnvs = ['MONGO_URI', 'JWT_SECRET', 'JWT_REFRESH_SECRET', 'FRONTEND_URL', 'S3_REGION', 'S3_BUCKET', 'S3_ACCESS_KEY_ID', 'S3_SECRET_ACCESS_KEY'];
+  for (const env of requiredEnvs) {
+    if (!process.env[env]) {
+      console.error(`FATAL ERROR: Missing required production environment variable: ${env}`);
+      process.exit(1);
+    }
+  }
+}
+
 // Import routes
 import authRoutes from './routes/authRoutes.js';
 import formRoutes from './routes/formRoutes.js';
@@ -46,8 +57,8 @@ app.use(
     allowedHeaders: ['Content-Type', 'Authorization']
   })
 );
-app.use(express.json()); // Parse JSON bodies
-app.use(express.urlencoded({ extended: true })); // Parse URL-encoded bodies
+app.use(express.json({ limit: '100kb' })); // Explicit JSON limit
+app.use(express.urlencoded({ extended: true, limit: '100kb' })); // Explicit URL-encoded limit
 app.use(cookieParser()); // Parse cookies
 
 // Health check route

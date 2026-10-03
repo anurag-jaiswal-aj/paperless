@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeEach, beforeAll, afterAll, vi } from 'vitest';
 import request from 'supertest';
 import express from 'express';
 import cookieParser from 'cookie-parser';
@@ -184,7 +184,7 @@ describe('Response Controller - Phase 2', () => {
           { questionId: qEmail._id, value: 'test@test.com' },
           { questionId: qChoice._id, value: 'Blue' }
         ]))
-        .attach(`file_${qFile._id.toString()}`, Buffer.from('fake pdf content'), {
+        .attach(`file_${qFile._id.toString()}`, Buffer.from('%PDF-1.4\n%EOF\n'), {
           filename: 'resume.pdf',
           contentType: 'application/pdf'
         });
@@ -208,13 +208,71 @@ describe('Response Controller - Phase 2', () => {
           { questionId: qEmail._id, value: 'test@test.com' },
           { questionId: qChoice._id, value: 'Blue' }
         ]))
-        .attach(`file_${qFile._id.toString()}`, Buffer.from('fake exe content'), {
+        .attach(`file_${qFile._id.toString()}`, Buffer.from('%PDF-1.4\n'), {
           filename: 'virus.exe',
           contentType: 'application/x-msdownload'
         });
 
       expect(res.status).toBe(400);
       expect(res.body.message).toContain('unsupported file type');
+    });
+
+    it('should reject file with mismatched MIME/content', async () => {
+      const res = await request(app)
+        .post(`/api/responses/${form._id}`)
+        .field('answers', JSON.stringify([
+          { questionId: qText._id, value: 'John' },
+          { questionId: qEmail._id, value: 'test@test.com' },
+          { questionId: qChoice._id, value: 'Blue' }
+        ]))
+        .attach(`file_${qFile._id.toString()}`, Buffer.from('not really a pdf'), {
+          filename: 'virus.pdf',
+          contentType: 'application/pdf'
+        });
+
+      expect(res.status).toBe(400);
+      expect(res.body.message).toContain('unrecognized file signature');
+    });
+
+    it('should reject file with unrecognized signature', async () => {
+      const res = await request(app)
+        .post(`/api/responses/${form._id}`)
+        .field('answers', JSON.stringify([
+          { questionId: qText._id, value: 'John' },
+          { questionId: qEmail._id, value: 'test@test.com' },
+          { questionId: qChoice._id, value: 'Blue' }
+        ]))
+        .attach(`file_${qFile._id.toString()}`, Buffer.from('fake unrecognized content'), {
+          filename: 'resume.pdf',
+          contentType: 'application/pdf'
+        });
+
+      expect(res.status).toBe(400);
+      expect(res.body.message).toContain('unrecognized file signature');
+    });
+
+    it('should rollback S3 upload if database fails', async () => {
+      const storageService = await import('../services/StorageService.js');
+      const deleteSpy = vi.spyOn(storageService.default, 'deleteFile');
+      const createSpy = vi.spyOn(Response, 'create').mockRejectedValueOnce(new Error('Simulated DB Failure'));
+
+      const res = await request(app)
+        .post(`/api/responses/${form._id}`)
+        .field('answers', JSON.stringify([
+          { questionId: qText._id, value: 'John' },
+          { questionId: qEmail._id, value: 'test@test.com' },
+          { questionId: qChoice._id, value: 'Blue' }
+        ]))
+        .attach(`file_${qFile._id.toString()}`, Buffer.from('%PDF-1.4\n'), {
+          filename: 'valid.pdf',
+          contentType: 'application/pdf'
+        });
+
+      expect(res.status).toBe(500);
+      expect(deleteSpy).toHaveBeenCalled();
+
+      createSpy.mockRestore();
+      deleteSpy.mockRestore();
     });
   });
 

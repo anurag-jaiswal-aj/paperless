@@ -66,10 +66,14 @@ export const errorHandler = (err, req, res, next) => {
   }
 
   // Default error
-  res.status(err.statusCode || 500).json({
+  const statusCode = err.statusCode || 500;
+  const isProduction = process.env.NODE_ENV === 'production';
+  const message = (isProduction && statusCode === 500) ? 'Internal Server Error' : (err.message || 'Server Error');
+
+  res.status(statusCode).json({
     success: false,
-    message: err.message || 'Server Error',
-    ...(process.env.NODE_ENV === 'development' && { stack: err.stack })
+    message,
+    ...(!isProduction && { stack: err.stack })
   });
 };
 

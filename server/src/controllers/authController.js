@@ -27,9 +27,19 @@ const generateRefreshToken = (id) => {
 /**
  * Helper: Get token from model, create cookie and send response
  */
-const sendTokenResponse = (user, statusCode, res, message) => {
+const sendTokenResponse = async (user, statusCode, res, message) => {
   const token = generateToken(user._id);
   const refreshToken = generateRefreshToken(user._id);
+
+  // Store refresh token hash in DB
+  const tokenHash = crypto.createHash('sha256').update(refreshToken).digest('hex');
+  if (!user.refreshTokens) user.refreshTokens = [];
+  user.refreshTokens.push(tokenHash);
+  // Keep only the last 5 refresh sessions to prevent unbounded growth
+  if (user.refreshTokens.length > 5) {
+    user.refreshTokens = user.refreshTokens.slice(-5);
+  }
+  await user.save({ validateBeforeSave: false });
 
   const options = {
     httpOnly: true,
@@ -96,7 +106,7 @@ export const register = async (req, res, next) => {
       password: hashedPassword
     });
 
-    sendTokenResponse(user, 201, res, 'User registered successfully');
+    await sendTokenResponse(user, 201, res, 'User registered successfully');
   } catch (error) {
     next(error);
   }
@@ -125,7 +135,7 @@ export const login = async (req, res, next) => {
       return res.status(401).json({ success: false, message: 'Invalid credentials' });
     }
 
-    sendTokenResponse(user, 200, res, 'Login successful');
+    await sendTokenResponse(user, 200, res, 'Login successful');
   } catch (error) {
     next(error);
   }
@@ -136,7 +146,26 @@ export const login = async (req, res, next) => {
  * @desc    Log user out / clear cookie
  * @access  Private
  */
-export const logout = (req, res) => {
+export const logout = async (req, res) => {
+  try {
+    const token = req.cookies.refreshToken;
+    if (token) {
+      try {
+        const decoded = jwt.verify(token, process.env.JWT_REFRESH_SECRET);
+        const user = await User.findById(decoded.id);
+        if (user) {
+          const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+          user.refreshTokens = user.refreshTokens.filter(t => t !== tokenHash);
+          await user.save({ validateBeforeSave: false });
+        }
+      } catch (err) {
+        // ignore jwt verify error on logout
+      }
+    }
+  } catch (err) {
+    // ignore
+  }
+
   const options = {
     httpOnly: true,
     secure: process.env.NODE_ENV === 'production',
@@ -188,19 +217,16 @@ export const refreshToken = async (req, res) => {
       return res.status(401).json({ success: false, message: 'Invalid refresh token' });
     }
 
-    const newToken = generateToken(user._id);
-    const options = {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
-      path: '/',
-      expires: new Date(Date.now() + 15 * 60 * 1000)
-    };
+    const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+    if (!user.refreshTokens || !user.refreshTokens.includes(tokenHash)) {
+      return res.status(401).json({ success: false, message: 'Invalid or revoked refresh token' });
+    }
 
-    res
-      .status(200)
-      .cookie('token', newToken, options)
-      .json({ success: true, message: 'Token refreshed' });
+    // Rotate the refresh token by removing old hash
+    user.refreshTokens = user.refreshTokens.filter(t => t !== tokenHash);
+
+    // sendTokenResponse will generate a new token/refresh token and save it
+    await sendTokenResponse(user, 200, res, 'Token refreshed');
   } catch (error) {
     return res.status(401).json({ success: false, message: 'Invalid or expired refresh token' });
   }
@@ -296,7 +322,7 @@ export const resetPassword = async (req, res, next) => {
     user.resetPasswordExpire = undefined;
     await user.save();
 
-    sendTokenResponse(user, 200, res, 'Password reset successful');
+    await sendTokenResponse(user, 200, res, 'Password reset successful');
   } catch (error) {
     next(error);
   }
