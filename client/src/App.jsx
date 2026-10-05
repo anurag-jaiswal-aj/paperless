@@ -1,5 +1,5 @@
-import React, { Suspense } from 'react';
-import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
+import React, { Suspense, useEffect } from 'react';
+import { BrowserRouter as Router, Routes, Route, useLocation } from 'react-router-dom';
 import { useSelector } from 'react-redux';
 import Navbar from './components/Navbar';
 import PrivateRoute from './components/PrivateRoute';
@@ -19,17 +19,36 @@ import Loader from './components/Loader';
 
 // Simple loading fallback
 const SuspenseFallback = () => (
-  <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-[#030712] theme-transition">
+  <div className="flex-1 flex flex-col items-center justify-center theme-transition">
     <Loader size="lg" />
   </div>
 );
 
+const ScrollToTop = () => {
+  const { pathname, search } = useLocation();
+
+  useEffect(() => {
+    window.scrollTo(0, 0);
+  }, [pathname, search]);
+
+  return null;
+};
+
 function App() {
   const { theme } = useSelector((state) => state.theme);
 
+  useEffect(() => {
+    if (theme === 'dark') {
+      document.documentElement.classList.add('dark');
+    } else {
+      document.documentElement.classList.remove('dark');
+    }
+  }, [theme]);
+
   return (
-    <div className={`${theme === 'light' ? 'theme-light' : 'theme-dark'} theme-transition min-h-screen`}>
+    <div className="theme-transition min-h-screen flex flex-col bg-surface-app text-text-primary">
       <Router>
+        <ScrollToTop />
         <Navbar />
         <Suspense fallback={<SuspenseFallback />}>
           <Routes>

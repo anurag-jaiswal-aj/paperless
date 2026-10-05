@@ -220,7 +220,7 @@ export const addQuestion = async (req, res, next) => {
       });
     }
 
-    const { type, label, required, options } = req.body;
+    const { type, label, required, options, validation, visibilityRule } = req.body;
 
     if (!type || !label) {
       return res.status(400).json({
@@ -239,7 +239,9 @@ export const addQuestion = async (req, res, next) => {
       label,
       required: required || false,
       order: nextOrder,
-      options: options || []
+      options: options || [],
+      validation: validation || {},
+      visibilityRule: visibilityRule || null
     });
 
     res.status(201).json({
@@ -285,13 +287,15 @@ export const updateQuestion = async (req, res, next) => {
       });
     }
 
-    const { type, label, required, options, order } = req.body;
+    const { type, label, required, options, order, validation, visibilityRule } = req.body;
 
     if (type !== undefined) question.type = type;
     if (label !== undefined) question.label = label;
     if (required !== undefined) question.required = required;
     if (options !== undefined) question.options = options;
     if (order !== undefined) question.order = order;
+    if (validation !== undefined) question.validation = validation;
+    if (visibilityRule !== undefined) question.visibilityRule = visibilityRule;
 
     await question.save();
 

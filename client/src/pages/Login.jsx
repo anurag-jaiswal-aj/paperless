@@ -45,8 +45,8 @@ const Login = () => {
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center px-4 bg-gray-50 dark:bg-[#030712] theme-transition">
-      <div className="max-w-md w-full">
+    <div className="flex-1 flex flex-col justify-center items-center px-4">
+      <div className="max-w-md w-full my-8">
         <div className="text-center mb-8">
           <h1 className="text-4xl font-extrabold mb-3 tracking-tight">Welcome Back</h1>
           <p className="opacity-70 text-lg">Sign in to your Paperless account</p>
@@ -112,7 +112,7 @@ const Login = () => {
 
         <p className="text-center mt-8 opacity-70">
           Don&apos;t have an account?{' '}
-          <Link to="/register" className="font-semibold text-gray-900 dark:text-gray-100 hover:underline">
+          <Link to="/register" className="font-semibold text-gray-900 dark:text-text-primary hover:underline">
             Sign up
           </Link>
         </p>

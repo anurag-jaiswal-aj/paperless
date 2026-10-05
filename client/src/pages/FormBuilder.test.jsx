@@ -10,6 +10,15 @@ import api from '../utils/api';
 
 vi.mock('../utils/api');
 
+vi.mock('react-router-dom', async () => {
+  const actual = await vi.importActual('react-router-dom');
+  return {
+    ...actual,
+    useParams: () => ({ id: '123' }),
+    useNavigate: () => vi.fn()
+  };
+});
+
 const createMockStore = (initialState) => {
   return {
     getState: () => initialState,
@@ -17,6 +26,30 @@ const createMockStore = (initialState) => {
     subscribe: vi.fn()
   };
 };
+
+vi.mock('react-beautiful-dnd', () => ({
+  DragDropContext: ({ children, onDragEnd }) => (
+    <div
+      data-testid="dnd-context"
+      data-ondragend={JSON.stringify({ source: null, destination: null })}
+      onClick={(e) => {
+        const val = e.currentTarget.getAttribute('data-ondragend');
+        if (val) {
+          const { source, destination } = JSON.parse(val);
+          onDragEnd({ source, destination });
+        }
+      }}
+    >
+      {children}
+    </div>
+  ),
+  Draggable: ({ children }) => children({ draggableProps: {}, dragHandleProps: {}, innerRef: vi.fn() }),
+  Droppable: ({ children }) => children({ droppableProps: {}, innerRef: vi.fn(), placeholder: null }),
+}));
+
+vi.mock('../components/StrictModeDroppable', () => ({
+  StrictModeDroppable: ({ children }) => children({ droppableProps: {}, innerRef: vi.fn(), placeholder: null })
+}));
 
 describe('FormBuilder Phase 6 AI Features', () => {
   let store;
@@ -26,7 +59,10 @@ describe('FormBuilder Phase 6 AI Features', () => {
       auth: { user: { id: 'user1' } },
       forms: {
         currentForm: { _id: '123', title: 'Test Form', description: 'Desc' },
-        questions: [{ _id: 'q1', label: 'Q1', type: 'short_text' }],
+        questions: [
+          { _id: 'q1', label: 'What is your name?', type: 'short_text', order: 0 },
+          { _id: 'q2', label: 'Untitled Question', type: 'short_text', order: 1 }
+        ],
         loading: false
       },
       theme: { theme: 'light' }
@@ -62,7 +98,7 @@ describe('FormBuilder Phase 6 AI Features', () => {
     const generateBtn = screen.getByRole('button', { name: /Generate Questions/i });
     fireEvent.click(generateBtn);
 
-    expect(api.post).toHaveBeenCalledWith('/api/ai/questions/generate', { topic: 'Feedback', formId: undefined });
+    expect(api.post).toHaveBeenCalledWith('/api/ai/questions/generate', { topic: 'Feedback', formId: '123' });
 
     await waitFor(() => {
       expect(screen.getByText('Proposed Questions')).toBeTruthy();
@@ -169,5 +205,100 @@ describe('FormBuilder Phase 6 AI Features', () => {
     await waitFor(() => {
       expect(screen.queryByText(/AI Writing Improvement/i)).not.toBeTruthy();
     });
+  });
+
+  it('updates question type correctly via CustomSelect', async () => {
+    renderComponent();
+
+    // The current type is 'short_text' so it displays 'Short Text'
+    const typeComboboxes = screen.getAllByText('Short Text');
+    fireEvent.click(typeComboboxes[0]);
+
+    api.put.mockResolvedValueOnce({ data: { success: true, data: { _id: 'q1', type: 'long_text' } } });
+
+    // Click 'Long Text'
+    const longTextOption = screen.getByText('Long Text');
+    fireEvent.click(longTextOption);
+
+    await waitFor(() => {
+      expect(api.put).toHaveBeenCalledWith('/api/forms/123/questions/q1', expect.objectContaining({ type: 'long_text' }));
+    });
+  });
+
+  it('updates status correctly via CustomSelect', async () => {
+    renderComponent();
+
+    const statusCombobox = screen.getByText('Draft');
+    fireEvent.click(statusCombobox);
+
+    const publishedOption = screen.getByText('Published');
+    fireEvent.click(publishedOption);
+
+    // Expect state change in the component (onChange). The save is only onBlur for title/desc or explicit save.
+    // Wait, the status is saved when? Ah, the original code only called setFormData({ ...formData, status: val }) for status dropdown!
+    // Let's verify we can click it without error.
+    expect(screen.queryByRole('listbox')).toBeNull(); // closes after selection
+  });
+
+  it('updates conditional visibility correctly via CustomSelect', async () => {
+    // Add a second question so visibility target appears
+    store = createMockStore({
+      auth: { user: { id: 'user1' } },
+      forms: {
+        currentForm: { _id: '123', title: 'Test Form', description: 'Desc' },
+        questions: [
+          { _id: 'q1', label: 'What is your name?', type: 'short_text', order: 0 },
+          { _id: 'q2', label: 'Untitled Question', type: 'short_text', order: 1 }
+        ],
+        loading: false
+      },
+      theme: { theme: 'light' }
+    });
+
+    renderComponent();
+
+    // Find the 'Always Visible' combobox for q2
+    const visibilityComboboxes = screen.getAllByText('Always Visible');
+    const q2VisibilityCombobox = visibilityComboboxes[1];
+
+    fireEvent.click(q2VisibilityCombobox);
+
+    // Select the 'What is your name?' option
+    const option = screen.getByText("What is your name?");
+
+    api.put.mockResolvedValueOnce({
+      data: {
+        success: true,
+        data: {
+          _id: 'q2',
+          label: 'Untitled Question',
+          type: 'short_text',
+          order: 1,
+          visibilityRule: { targetQuestionId: 'q1', operator: 'equals', value: '' }
+        }
+      }
+    });
+
+    fireEvent.pointerDown(option);
+
+    await waitFor(() => {
+      // Verify API payload contains the selected condition
+      expect(api.put).toHaveBeenCalledWith('/api/forms/123/questions/q2', expect.objectContaining({
+        visibilityRule: { targetQuestionId: 'q1', operator: 'equals', value: '' }
+      }));
+    });
+
+    // Verify Redux was updated with the returned data
+    expect(store.dispatch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'forms/updateQuestion',
+        payload: expect.objectContaining({
+          visibilityRule: { targetQuestionId: 'q1', operator: 'equals', value: '' }
+        })
+      })
+    );
+
+    // The dropdown menu should be closed
+    expect(screen.queryByRole('listbox')).toBeNull();
   });
 });

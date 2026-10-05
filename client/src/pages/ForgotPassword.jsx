@@ -28,8 +28,8 @@ const ForgotPassword = () => {
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center px-4 bg-gray-50 dark:bg-[#030712] theme-transition">
-      <div className="max-w-md w-full">
+    <div className="flex-1 flex flex-col justify-center items-center px-4">
+      <div className="max-w-md w-full my-8">
         <div className="text-center mb-8">
           <h1 className="text-4xl font-extrabold mb-3 tracking-tight">Reset Password</h1>
           <p className="opacity-70 text-lg">Enter your email to receive a reset link</p>
@@ -78,7 +78,7 @@ const ForgotPassword = () => {
 
         <p className="text-center mt-8 opacity-70">
           Remember your password?{' '}
-          <Link to="/login" className="font-semibold text-gray-900 dark:text-gray-100 hover:underline">
+          <Link to="/login" className="font-semibold text-gray-900 dark:text-text-primary hover:underline">
             Sign in
           </Link>
         </p>

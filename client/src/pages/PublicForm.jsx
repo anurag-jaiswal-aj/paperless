@@ -160,7 +160,31 @@ const PublicForm = () => {
           />
         );
 
-      case 'multiple_choice':
+      case 'number':
+        return (
+          <input
+            type="number"
+            value={answers[questionId] || ''}
+            onChange={(e) => handleAnswerChange(questionId, e.target.value)}
+            required={question.required}
+            className="input"
+            placeholder="Your answer"
+          />
+        );
+
+      case 'email':
+        return (
+          <input
+            type="email"
+            value={answers[questionId] || ''}
+            onChange={(e) => handleAnswerChange(questionId, e.target.value)}
+            required={question.required}
+            className="input"
+            placeholder="Your answer"
+          />
+        );
+
+      case 'single_choice':
         return (
           <div className="space-y-2">
             {question.options.map((option, index) => (
@@ -180,6 +204,7 @@ const PublicForm = () => {
           </div>
         );
 
+      case 'multiple_choice':
       case 'checkbox':
         return (
           <div className="space-y-2">
@@ -231,8 +256,8 @@ const PublicForm = () => {
                 onClick={() => handleAnswerChange(questionId, rating)}
                 className={`w-12 h-12 rounded-xl border-2 font-bold transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 ${
                   answers[questionId] === rating
-                    ? 'border-gray-900 bg-gray-900 text-white dark:border-gray-100 dark:bg-gray-100 dark:text-gray-900 shadow-md scale-105'
-                    : 'border-gray-200 bg-transparent text-gray-700 dark:border-gray-700 dark:text-gray-300 hover:border-gray-400 dark:hover:border-gray-500 hover:bg-gray-50 dark:hover:bg-gray-800'
+                    ? 'border-gray-900 bg-gray-900 text-white dark:border-text-primary dark:bg-text-primary dark:text-surface-app shadow-md scale-105'
+                    : 'border-gray-200 bg-transparent text-gray-700 dark:border-border-default dark:text-text-secondary hover:border-gray-400 dark:hover:border-border-strong hover:bg-gray-50 dark:hover:bg-surface-hover'
                 }`}
               >
                 {rating}
@@ -258,7 +283,7 @@ const PublicForm = () => {
             type="file"
             onChange={(e) => handleAnswerChange(questionId, e.target.files[0])}
             required={question.required && !answers[questionId]}
-            className="input file:mr-4 file:py-2 file:px-4 file:rounded file:border-0 file:text-sm file:font-semibold file:bg-gray-100 dark:file:bg-gray-800 file:text-black dark:file:text-white"
+            className="input file:mr-4 file:py-2 file:px-4 file:rounded file:border-0 file:text-sm file:font-semibold file:bg-gray-100 dark:file:bg-surface-input file:text-black dark:file:text-text-primary"
           />
         );
 
@@ -269,7 +294,7 @@ const PublicForm = () => {
 
   if (loading) {
     return (
-      <div className="min-h-screen flex items-center justify-center">
+      <div className="flex-1 flex items-center justify-center">
         <Loader size="lg" />
       </div>
     );
@@ -277,7 +302,7 @@ const PublicForm = () => {
 
   if (error && !form) {
     return (
-      <div className="min-h-screen flex items-center justify-center px-4 bg-gray-50 dark:bg-[#030712] theme-transition">
+      <div className="flex-1 flex items-center justify-center px-4 theme-transition">
         <div className="text-center card p-10 max-w-md w-full">
           <div className="bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-6">
             <FiAlertCircle size={32} />
@@ -291,7 +316,7 @@ const PublicForm = () => {
 
   if (submitted) {
     return (
-      <div className="min-h-screen flex items-center justify-center px-4 bg-gray-50 dark:bg-[#030712] theme-transition">
+      <div className="flex-1 flex items-center justify-center px-4 theme-transition">
         <div className="text-center card p-12 max-w-md w-full">
           <div className="bg-green-100 dark:bg-green-900/30 text-green-600 dark:text-green-400 w-20 h-20 rounded-full flex items-center justify-center mx-auto mb-6">
             <FiCheckCircle size={40} />
@@ -304,9 +329,9 @@ const PublicForm = () => {
   }
 
   return (
-    <div className="min-h-screen py-16 md:py-24 px-4 bg-gray-50 dark:bg-[#030712] theme-transition">
+    <div className="flex-1 py-16 md:py-24 px-4 theme-transition">
       <div className="container mx-auto max-w-3xl">
-        <div className={`card p-8 md:p-10 mb-8 border-t-8 border-t-gray-900 dark:border-t-gray-100`}>
+        <div className={`card p-8 md:p-10 mb-8 border-t-8 border-t-gray-900 dark:border-t-text-primary`}>
           <h1 className="text-3xl md:text-4xl font-extrabold mb-4">{form.title}</h1>
           {form.description && (
             <p className="opacity-70 text-lg">{form.description}</p>

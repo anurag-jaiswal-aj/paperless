@@ -193,14 +193,14 @@ const Responses = () => {
 
   if (loading) {
     return (
-      <div className="min-h-screen flex items-center justify-center">
+      <div className="flex-1 flex items-center justify-center">
         <Loader size="lg" />
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen">
+    <div className="flex-1">
       <div className="container mx-auto px-4 py-8 max-w-6xl">
         {/* Header */}
         <div className="flex justify-between items-start mb-8">
@@ -229,7 +229,7 @@ const Responses = () => {
 
         {responses.length === 0 ? (
           <div className="text-center py-20 px-4 card flex flex-col items-center justify-center bg-transparent border-dashed">
-            <div className="bg-gray-100 dark:bg-gray-800 p-4 rounded-full mb-4">
+            <div className="bg-gray-100 dark:bg-surface-elevated p-4 rounded-full mb-4">
               <FiBarChart2 className="w-8 h-8 opacity-50" />
             </div>
             <h3 className="text-xl font-bold mb-2">No responses yet</h3>
@@ -297,14 +297,14 @@ const Responses = () => {
                   themes.length > 0 ? (
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                       {themes.map((themeItem, idx) => (
-                        <div key={idx} className="p-5 bg-gray-50 dark:bg-gray-800/50 rounded-xl border border-gray-100 dark:border-gray-800">
+                        <div key={idx} className="p-5 bg-gray-50 dark:bg-surface-hover rounded-xl border border-gray-100 dark:border-border-default">
                           <div className="flex justify-between items-start mb-3">
                             <h3 className="font-bold text-lg">{themeItem.name}</h3>
-                            {themeItem.sentiment && <span className="text-xs font-semibold px-2 py-1 rounded bg-white dark:bg-gray-900 shadow-sm uppercase">{themeItem.sentiment}</span>}
+                            {themeItem.sentiment && <span className="text-xs font-semibold px-2 py-1 rounded bg-white dark:bg-surface-card shadow-sm uppercase">{themeItem.sentiment}</span>}
                           </div>
                           <p className="text-sm opacity-90 mb-4">{themeItem.description}</p>
                           {themeItem.supportingResponses && themeItem.supportingResponses.length > 0 && (
-                            <div className="text-sm opacity-70 border-t border-gray-200 dark:border-gray-700 pt-3">
+                            <div className="text-sm opacity-70 border-t border-gray-200 dark:border-border-default pt-3">
                               <p className="font-semibold mb-2">Examples:</p>
                               <ul className="list-disc pl-4 space-y-1.5">
                                 {themeItem.supportingResponses.map((r, i) => <li key={i} className="italic">&quot;{r}&quot;</li>)}
@@ -339,8 +339,8 @@ const Responses = () => {
                     {categories.categories && categories.categories.length > 0 && (
                       <div className="space-y-4">
                         {categories.categories.map((cat, idx) => (
-                          <div key={idx} className="p-5 bg-gray-50 dark:bg-gray-800/50 rounded-xl border border-gray-100 dark:border-gray-800">
-                            <h3 className="font-bold text-lg mb-2">{cat.name} <span className="opacity-70 font-normal text-sm ml-2 bg-white dark:bg-gray-900 px-2 py-1 rounded-md shadow-sm">{(cat.responseIndexes || []).length} responses</span></h3>
+                          <div key={idx} className="p-5 bg-gray-50 dark:bg-surface-hover rounded-xl border border-gray-100 dark:border-border-default">
+                            <h3 className="font-bold text-lg mb-2">{cat.name} <span className="opacity-70 font-normal text-sm ml-2 bg-white dark:bg-surface-card px-2 py-1 rounded-md shadow-sm">{(cat.responseIndexes || []).length} responses</span></h3>
                             <p className="text-sm opacity-90 mb-3">{cat.description}</p>
                             {(cat.responseIndexes || []).length > 0 && (
                               <p className="text-xs opacity-70">
@@ -355,7 +355,7 @@ const Responses = () => {
                       </div>
                     )}
                     {categories.uncategorizedResponseIndexes && categories.uncategorizedResponseIndexes.length > 0 && (
-                      <div className="mt-4 p-5 bg-gray-50 dark:bg-gray-800/50 rounded-xl border border-gray-100 dark:border-gray-800">
+                      <div className="mt-4 p-5 bg-gray-50 dark:bg-surface-hover rounded-xl border border-gray-100 dark:border-border-default">
                         <h3 className="font-bold text-lg mb-2 opacity-70">Uncategorized</h3>
                         <p className="text-xs opacity-70">
                           Response IDs: {categories.uncategorizedResponseIndexes.map(i => {
@@ -419,7 +419,7 @@ const Responses = () => {
               ))}
 
               {totalPages > 1 && (
-                <div className="flex justify-between items-center mt-8 p-4 bg-white dark:bg-gray-900 rounded-xl border shadow-sm">
+                <div className="flex justify-between items-center mt-8 p-4 bg-white dark:bg-surface-card rounded-xl border shadow-sm">
                   <button
                     disabled={page === 1}
                     onClick={() => fetchResponses(page - 1)}

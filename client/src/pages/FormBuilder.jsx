@@ -1,20 +1,22 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useSelector, useDispatch } from 'react-redux';
-import { DragDropContext, Droppable, Draggable } from 'react-beautiful-dnd';
+import { DragDropContext, Draggable } from 'react-beautiful-dnd';
+import { StrictModeDroppable } from '../components/StrictModeDroppable';
 import { setCurrentForm, setQuestions, addQuestion, updateQuestion, removeQuestion, reorderQuestions, setLoading } from '../store/formSlice';
 import api from '../utils/api';
 import { FiPlus, FiTrash2, FiMove, FiZap } from 'react-icons/fi';
 import Loader from '../components/Loader';
+import CustomSelect from '../components/CustomSelect';
 
 const QUESTION_TYPES = [
   { value: 'short_text', label: 'Short Text' },
   { value: 'long_text', label: 'Long Text' },
+  { value: 'number', label: 'Number' },
+  { value: 'email', label: 'Email' },
+  { value: 'single_choice', label: 'Single Choice' },
   { value: 'multiple_choice', label: 'Multiple Choice' },
-  { value: 'checkbox', label: 'Checkbox' },
   { value: 'dropdown', label: 'Dropdown' },
-  { value: 'rating', label: 'Rating (1-5)' },
-  { value: 'date', label: 'Date' },
   { value: 'file', label: 'File Upload' }
 ];
 
@@ -232,7 +234,7 @@ const FormBuilder = () => {
   };
 
   return (
-    <div className="min-h-screen">
+    <div className="flex-1">
       <div className="container mx-auto px-4 py-8 max-w-4xl">
         {loading ? (
           <Loader size="lg" />
@@ -294,21 +296,22 @@ const FormBuilder = () => {
 
               <div className="ml-auto flex items-center gap-2">
                 <span className="text-sm opacity-70">Status:</span>
-                <select
+                <CustomSelect
                   value={formData.status}
-                  onChange={(e) => setFormData({ ...formData, status: e.target.value })}
-                  className="input py-1 px-2 text-sm max-w-[120px]"
-                >
-                  <option value="draft">Draft</option>
-                  <option value="published">Published</option>
-                  <option value="closed">Closed</option>
-                </select>
+                  onChange={(val) => setFormData({ ...formData, status: val })}
+                  options={[
+                    { value: 'draft', label: 'Draft' },
+                    { value: 'published', label: 'Published' },
+                    { value: 'closed', label: 'Closed' }
+                  ]}
+                  className="max-w-[120px]"
+                />
               </div>
             </div>
 
             {/* Questions */}
             <DragDropContext onDragEnd={handleDragEnd}>
-              <Droppable droppableId="questions">
+              <StrictModeDroppable droppableId="questions">
                 {(provided) => (
                   <div {...provided.droppableProps} ref={provided.innerRef} className="space-y-4">
                     {questions.map((question, index) => (
@@ -343,17 +346,11 @@ const FormBuilder = () => {
                                 </div>
 
                                 <div className="flex gap-3 flex-wrap items-center">
-                                  <select
+                                  <CustomSelect
                                     value={question.type}
-                                    onChange={(e) => handleUpdateQuestion(question._id, { type: e.target.value })}
-                                    className="px-3 py-1 rounded text-sm focus:outline-none theme-transition"
-                                  >
-                                    {QUESTION_TYPES.map((type) => (
-                                      <option key={type.value} value={type.value}>
-                                        {type.label}
-                                      </option>
-                                    ))}
-                                  </select>
+                                    onChange={(val) => handleUpdateQuestion(question._id, { type: val })}
+                                    options={QUESTION_TYPES}
+                                  />
 
                                   <label className="flex items-center gap-2 text-sm">
                                     <input
@@ -377,37 +374,37 @@ const FormBuilder = () => {
                                 <div className="mt-3 text-sm bg-gray-500 bg-opacity-10 p-3 rounded">
                                   <div className="font-semibold mb-2 opacity-70">Conditional Visibility</div>
                                   <div className="flex gap-2 flex-wrap">
-                                    <select
+                                    <CustomSelect
                                       value={question.visibilityRule?.targetQuestionId || ''}
-                                      onChange={(e) => {
-                                        const newRule = e.target.value
-                                          ? { targetQuestionId: e.target.value, operator: 'equals', value: '' }
+                                      onChange={(val) => {
+                                        console.log('[FormBuilder DEBUG] Conditional visibility onChange called with val:', val);
+                                        const newRule = val
+                                          ? { targetQuestionId: val, operator: 'equals', value: '' }
                                           : null;
+                                        console.log('[FormBuilder DEBUG] Calling handleUpdateQuestion with rule:', newRule);
                                         handleUpdateQuestion(question._id, { visibilityRule: newRule });
                                       }}
-                                      className="input px-2 py-1 text-black h-8 text-sm"
-                                    >
-                                      <option value="">Always Visible</option>
-                                      {questions
-                                        .filter(q => q._id !== question._id && q.order < question.order)
-                                        .map(q => (
-                                          <option key={q._id} value={q._id}>When &apos;{q.label}&apos;...</option>
-                                        ))}
-                                    </select>
+                                      options={[
+                                        { value: '', label: 'Always Visible' },
+                                        ...questions
+                                          .filter(q => q._id !== question._id && q.order < question.order)
+                                          .map(q => ({ value: q._id, label: q.label }))
+                                      ]}
+                                    />
 
                                     {question.visibilityRule && (
                                       <>
-                                        <select
+                                        <CustomSelect
                                           value={question.visibilityRule.operator || 'equals'}
-                                          onChange={(e) => handleUpdateQuestion(question._id, {
-                                            visibilityRule: { ...question.visibilityRule, operator: e.target.value }
+                                          onChange={(val) => handleUpdateQuestion(question._id, {
+                                            visibilityRule: { ...question.visibilityRule, operator: val }
                                           })}
-                                          className="input px-2 py-1 text-black h-8 text-sm"
-                                        >
-                                          <option value="equals">Equals</option>
-                                          <option value="not_equals">Does not equal</option>
-                                          <option value="contains">Contains</option>
-                                        </select>
+                                          options={[
+                                            { value: 'equals', label: 'Equals' },
+                                            { value: 'not_equals', label: 'Does not equal' },
+                                            { value: 'contains', label: 'Contains' }
+                                          ]}
+                                        />
                                         <input
                                           type="text"
                                           placeholder="Value"
@@ -423,7 +420,7 @@ const FormBuilder = () => {
                                 </div>
 
                                 {/* Options for choice questions */}
-                                {['multiple_choice', 'checkbox', 'dropdown'].includes(question.type) && (
+                                {['single_choice', 'multiple_choice', 'checkbox', 'dropdown'].includes(question.type) && (
                                   <div className="mt-4 space-y-2">
                                     {(question.options || []).map((option, optIndex) => (
                                       <div key={optIndex} className="flex gap-2">
@@ -469,13 +466,13 @@ const FormBuilder = () => {
                     {provided.placeholder}
                   </div>
                 )}
-              </Droppable>
+              </StrictModeDroppable>
             </DragDropContext>
 
             {/* Add Question Button */}
             <button
               onClick={() => handleAddQuestion()}
-              className="w-full border-2 border-dashed border-gray-300 dark:border-gray-700 rounded-2xl p-6 hover:bg-gray-50 dark:hover:bg-gray-800/50 hover:border-gray-400 dark:hover:border-gray-600 transition-all duration-200 mt-6 text-gray-600 dark:text-gray-400 font-medium flex items-center justify-center gap-2"
+              className="w-full border-2 border-dashed border-gray-300 dark:border-border-default rounded-2xl p-6 hover:bg-gray-50 dark:hover:bg-surface-hover hover:border-gray-400 dark:hover:border-border-strong transition-all duration-200 mt-6 text-gray-600 dark:text-text-secondary font-medium flex items-center justify-center gap-2"
             >
               <FiPlus className="w-5 h-5" /> Add Question
             </button>

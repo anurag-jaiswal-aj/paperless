@@ -67,7 +67,7 @@ const Dashboard = () => {
   };
 
   return (
-    <div className="min-h-screen">
+    <div className="flex-1">
       <div className="container mx-auto px-4 py-8">
         {/* Header */}
         <div className="flex justify-between items-center mb-8">
@@ -96,7 +96,7 @@ const Dashboard = () => {
           <Loader size="lg" />
         ) : forms.length === 0 ? (
           <div className="text-center py-20 px-4 card flex flex-col items-center justify-center bg-transparent border-dashed">
-            <div className="bg-gray-100 dark:bg-gray-800 p-4 rounded-full mb-4">
+            <div className="bg-surface-elevated p-4 rounded-full mb-4">
               <FiFileText className="w-8 h-8 opacity-50" />
             </div>
             <h3 className="text-xl font-bold mb-2">No forms yet</h3>
@@ -115,12 +115,12 @@ const Dashboard = () => {
                 key={form._id}
                 className="card flex flex-col"
               >
-                <div className="card-header border-b border-gray-100 dark:border-gray-800">
+                <div className="card-header border-b border-border-default">
                   <div className="flex justify-between items-start mb-1">
                     <h3 className="text-xl font-bold line-clamp-1" title={form.title}>{form.title}</h3>
                     <span className={`text-xs px-2 py-1 rounded-full font-medium ${
                       form.status === 'published' ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400' :
-                      form.status === 'closed' ? 'bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-400' :
+                      form.status === 'closed' ? 'bg-surface-hover text-text-secondary' :
                       'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400'
                     }`}>
                       {form.status ? form.status.charAt(0).toUpperCase() + form.status.slice(1) : 'Draft'}
@@ -138,7 +138,7 @@ const Dashboard = () => {
                     </div>
                   </div>
 
-                  <div className="grid grid-cols-2 gap-2 mt-auto pt-4 border-t border-gray-100 dark:border-gray-800">
+                  <div className="grid grid-cols-2 gap-2 mt-auto pt-4 border-t border-border-default">
                     <Link
                       to={`/builder/${form._id}`}
                       className="btn btn-secondary text-sm w-full"
