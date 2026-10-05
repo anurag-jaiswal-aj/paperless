@@ -1,470 +1,336 @@
-# 📝 Paperless
+<h1 align="center">
+  <br>
+  📝 Paperless
+  <br>
+</h1>
 
-**A modern, AI-powered form builder built with the MERN stack**
+<h4 align="center">A modern, AI-powered form builder and response intelligence platform built with the MERN stack.</h4>
 
-Paperless is a production-ready Google Forms alternative featuring drag-and-drop form creation, AI-powered question suggestions, real-time analytics, and a beautiful minimal design with dark/light theme support.
-
----
-
-## ✨ Features
-
-### Core Functionality
-- 🔐 **JWT Authentication** - Secure user registration and login
-- 📋 **Form Builder** - Intuitive drag-and-drop interface
-- 🎨 **8 Question Types** - Short text, long text, multiple choice, checkboxes, dropdown, rating, date, and file upload
-- 📊 **Analytics Dashboard** - Beautiful charts and insights with Recharts
-- 📤 **Export Data** - Download responses as CSV or JSON
-- 🔗 **Public Sharing** - Generate shareable links for form submissions
-- 🌓 **Theme Toggle** - Seamless light/dark mode switching
-
-### AI-Powered Features
-- 🤖 **AI Question Suggestions** - Generate relevant questions from any topic
-- ✍️ **Improve Wording** - Get AI-enhanced question variants
-- 📈 **Auto Summary** - Intelligent response analysis and insights
+<p align="center">
+  <a href="#overview">Overview</a> •
+  <a href="#features">Features</a> •
+  <a href="#the-core-workflow">Workflow</a> •
+  <a href="#engineering-decisions">Engineering</a> •
+  <a href="#tech-stack">Tech Stack</a> •
+  <a href="#getting-started">Getting Started</a>
+</p>
 
 ---
 
-## 🛠️ Tech Stack
+## Overview
 
-### Frontend
-- **React 18** with Vite
-- **Redux Toolkit** for state management
-- **React Router DOM** for navigation
-- **TailwindCSS** for styling
-- **Recharts** for data visualization
-- **React Beautiful DnD** for drag-and-drop
-- **React Icons** for UI icons
-- **Axios** for API calls
+Paperless is a production-ready alternative to Google Forms that brings AI directly into the form creation and response analysis workflows. Built with a minimalist, high-performance React frontend and a secure Express/MongoDB backend, Paperless removes the friction from collecting and understanding data.
 
-### Backend
-- **Node.js** + **Express.js**
-- **MongoDB** with Mongoose ODM
-- **JWT** for authentication
-- **bcryptjs** for password hashing
-- **OpenAI API** for AI features
-- **Helmet** for security
-- **Morgan** for logging
-- **CORS** enabled
+The platform follows a clear four-step central workflow:
+**CREATE** forms with a drag-and-drop builder → **PUBLISH** them to the web → **COLLECT** structured responses and files → **UNDERSTAND** the results through automated analytics and AI-generated insights.
 
 ---
 
-## 📁 Project Structure
+## Why Paperless?
 
+Most form builders stop working for you the moment a user hits "Submit." You are left exporting spreadsheets and manually searching for trends.
+
+Paperless is built on the philosophy that:
+1. Forms should be frictionless to create.
+2. AI should act as a consultant during creation, not a black-box replacement for the user.
+3. Useful insights should be generated from collected responses automatically.
+4. Humans must always remain in control of AI-generated changes (Human-in-the-Loop).
+
+---
+
+## Features
+
+### 📋 Form Builder
+- **Drag-and-Drop Interface:** Built with `react-beautiful-dnd` with strict-mode compatibility.
+- **8 Question Types:** Short text, long text, number, email, single choice, multiple choice, dropdown, and file upload.
+- **Advanced Logic:** Conditional visibility rules and required field validation.
+- **Lifecycle Management:** Draft, published, and closed form states.
+
+### 🤖 Creation Intelligence
+- **AI Question Generation:** Enter a topic to receive a proposed list of relevant questions.
+- **Writing Improvement:** Ask the AI to rephrase or clarify existing questions.
+- **Human-in-the-Loop:** AI suggestions are presented as proposals that the user can preview, accept, or reject without mutating the actual form state behind the scenes.
+
+### 🧠 Response Intelligence
+- **Automated Summaries:** AI-generated executive summaries of collected response datasets.
+- **Theme Extraction:** Automated categorization and thematic analysis of text-heavy submissions.
+- **Privacy-Safe Payloads:** The backend securely constructs limited context windows to prevent token exhaustion and data leakage during AI analysis.
+
+### 📊 Analytics & Responses
+- **Real-Time Aggregation:** MongoDB aggregation pipelines calculate response statistics, charts, and timelines without loading massive datasets into memory.
+- **Export:** Download raw response data as JSON or CSV.
+- **Pagination:** Cursor-based pagination for reviewing individual submissions.
+
+### 📁 Secure File Uploads
+- **S3-Compatible Storage:** Files are securely uploaded to AWS S3 (or compatible object storage).
+- **Protected Downloads:** Files are never public; downloads use short-lived presigned URLs.
+- **Validation:** Upload limits, MIME-type verification, and disk-backed temporary staging.
+
+### 🔒 Authentication & Security
+- **Secure Sessions:** HttpOnly cookies for both access and refresh tokens to prevent XSS.
+- **Token Architecture:** Stateful, hashed refresh tokens with rotation and revocation capabilities.
+- **Rate Limiting:** IP-based rate limiting on authentication and AI endpoints.
+- **Authorization:** Strict ownership checks on all protected resources.
+
+---
+
+## The Core Workflow
+
+### 1. CREATE
+Users build forms using a modern, minimalist editor. The AI Form Consultant can suggest new questions or refine existing ones. All AI interactions use a proposal workflow, ensuring the user remains in absolute control of the form structure.
+
+### 2. PUBLISH
+Once finalized, forms transition from `draft` to `published`. A public link is generated. Published forms enforce structural immutability to ensure response data integrity.
+
+### 3. COLLECT
+Respondents submit data through a clean, responsive public view. Submissions handle complex validations, multi-part form data, and secure file uploads to an S3 bucket.
+
+### 4. UNDERSTAND
+Instead of just viewing a table of answers, form owners see an analytics dashboard powered by MongoDB aggregation. For deeper insights, owners can trigger the Response Intelligence engine to summarize qualitative data and extract key themes.
+
+---
+
+## AI Architecture
+
+Paperless implements AI features through a robust, abstracted service layer:
+
+```mermaid
+graph TD
+    Controller[API Controllers] --> AIService[AI Service Interface]
+    AIService --> Provider[OpenAI Provider]
+    Provider --> OpenAI[OpenAI API]
 ```
+
+- **Provider Abstraction:** The core logic is decoupled from specific LLM vendors.
+- **Structured Outputs:** The backend uses precise schemas (via Zod) to ensure the AI returns strictly formatted JSON proposals.
+- **Input Limits & Guardrails:** Response Intelligence features use carefully truncated datasets to respect context windows and manage API costs.
+
+---
+
+## Engineering Decisions
+
+### Service Abstractions
+**Decision:** Critical external dependencies (LLMs, Storage, Email) are wrapped in dedicated service classes (`AIService.js`, `StorageService.js`, `EmailService.js`).
+**Why:** This isolates third-party SDKs from business logic, allows for seamless local mocking during development without spinning up external resources, and makes future provider migrations (e.g., migrating from OpenAI to Anthropic) nearly trivial.
+
+### Stateful Refresh Tokens
+**Decision:** Paperless uses short-lived JWT access tokens alongside long-lived, stateful refresh tokens stored in the database.
+**Why:** This architecture allows users to maintain multiple active sessions (e.g., mobile and desktop concurrently) while preserving the ability to forcefully revoke specific sessions upon logout or suspected compromise. It balances UX convenience with strict security.
+
+### MongoDB Aggregation
+**Decision:** Analytics are processed entirely inside the database using aggregation pipelines (`$match`, `$group`, `$unwind`).
+**Why:** Loading massive datasets into Node.js memory just to compute counts and averages is unsafe. Aggregation pipelines offload this computational burden to the database engine, ensuring the API remains highly responsive even when a form receives thousands of submissions.
+
+### Secure File Handling
+**Decision:** Uploads are processed through Multer, temporarily staged to disk, validated (size, MIME type), and pushed to a private S3 bucket. Access is exclusively brokered via short-lived presigned URLs.
+**Why:** This prevents malicious file execution on the server, avoids publicly exposing the storage bucket, and ensures that only authorized form owners can access submitted documents.
+
+---
+
+## Tech Stack
+
+| Domain | Technologies |
+|---|---|
+| **Frontend** | React 18, Vite, Redux Toolkit, React Router, TailwindCSS, Recharts, React Beautiful DnD |
+| **Backend** | Node.js, Express.js, JWT, bcryptjs, Helmet, Zod, Multer |
+| **Database** | MongoDB, Mongoose ODM |
+| **AI** | OpenAI API |
+| **Storage** | AWS S3 SDK (Client-S3, Presigner) |
+| **Email** | Resend |
+| **Testing** | Vitest, Supertest, MongoDB Memory Server |
+
+---
+
+## Project Structure
+
+```text
 paperless/
-├── client/                    # React frontend
+├── client/                 # React Frontend
 │   ├── src/
-│   │   ├── components/       # Reusable components
-│   │   │   ├── Navbar.jsx
-│   │   │   ├── PrivateRoute.jsx
-│   │   │   └── Loader.jsx
-│   │   ├── pages/            # Page components
-│   │   │   ├── Home.jsx
-│   │   │   ├── Login.jsx
-│   │   │   ├── Register.jsx
-│   │   │   ├── Dashboard.jsx
-│   │   │   ├── FormBuilder.jsx
-│   │   │   ├── PublicForm.jsx
-│   │   │   └── Responses.jsx
-│   │   ├── store/            # Redux state management
-│   │   │   ├── authSlice.js
-│   │   │   ├── formSlice.js
-│   │   │   ├── themeSlice.js
-│   │   │   └── store.js
-│   │   ├── utils/
-│   │   │   └── api.js        # Axios instance
-│   │   ├── App.jsx
-│   │   ├── main.jsx
-│   │   └── index.css
-│   ├── package.json
-│   ├── vite.config.js
-│   └── tailwind.config.js
+│   │   ├── components/     # Reusable UI components
+│   │   ├── pages/          # Full page views
+│   │   ├── store/          # Redux slices
+│   │   └── utils/          # Axios configuration and API helpers
+│   └── package.json
 │
-├── server/                   # Express backend
+├── server/                 # Express Backend
 │   ├── src/
-│   │   ├── models/          # Mongoose schemas
-│   │   │   ├── user.js
-│   │   │   ├── form.js
-│   │   │   ├── question.js
-│   │   │   └── response.js
-│   │   ├── routes/          # API routes
-│   │   │   ├── authRoutes.js
-│   │   │   ├── formRoutes.js
-│   │   │   ├── responseRoutes.js
-│   │   │   └── aiRoutes.js
-│   │   ├── controllers/     # Business logic
-│   │   │   ├── authController.js
-│   │   │   ├── formController.js
-│   │   │   ├── responseController.js
-│   │   │   └── aiController.js
-│   │   ├── middleware/
-│   │   │   ├── authMiddleware.js
-│   │   │   └── errorHandler.js
-│   │   ├── services/
-│   │   │   └── openaiService.js
-│   │   ├── utils/
-│   │   │   └── helpers.js
-│   │   └── server.js
-│   ├── package.json
-│   └── .env.example
+│   │   ├── controllers/    # Route handlers & business logic
+│   │   ├── middleware/     # Auth, error handling, file uploads
+│   │   ├── models/         # Mongoose schemas
+│   │   ├── routes/         # Express route definitions
+│   │   └── services/       # Abstractions (AI, Storage, Email)
+│   └── package.json
 │
-└── README.md
+└── package.json            # Root workspace config
 ```
 
 ---
 
-## 🚀 Local Setup
+## Getting Started
 
 ### Prerequisites
-- **Node.js** (v18 or higher)
-- **MongoDB** (local or cloud instance)
-- **OpenAI API Key** (for AI features)
+- **Node.js** (v20+ recommended)
+- **MongoDB** (Local instance or Atlas cluster)
+- **OpenAI API Key** (Required for AI features)
+- **AWS S3 / Compatible Object Storage** (Required for file uploads)
+- **Resend API Key** (Optional, for emails)
 
-### 1️⃣ Clone Repository
+### 1. Clone & Install
 ```bash
-git clone <your-repo-url>
+git clone https://github.com/anurag-jaiswal-aj/paperless.git
 cd paperless
+
+# Install dependencies for both client and server
+npm run install:all
 ```
 
-### 2️⃣ Backend Setup
+### 2. Environment Variables
+Create a `.env` file in the `server` directory:
 
 ```bash
-# Navigate to server directory
 cd server
-
-# Install dependencies
-npm install
-
-# Create .env file
 cp .env.example .env
-
-# Edit .env with your credentials
-nano .env
 ```
 
-**Required Environment Variables:**
+Required variables (use secure, random strings for secrets):
 ```env
 PORT=5000
 NODE_ENV=development
-
-# MongoDB Connection (Railway, MongoDB Atlas, or local)
-MONGO_URI=mongodb+srv://<username>:<password>@cluster.mongodb.net/paperless
-
-# JWT Secrets (generate strong random strings)
-JWT_SECRET=your_super_secret_jwt_key_here
-JWT_EXPIRE=7d
-JWT_REFRESH_SECRET=your_refresh_secret_key_here
-JWT_REFRESH_EXPIRE=30d
-
-# OpenAI API Key
-OPENAI_API_KEY=sk-your-openai-api-key-here
-
-# Frontend URL for CORS
 FRONTEND_URL=http://localhost:5173
+
+# MongoDB
+MONGO_URI=mongodb://localhost:27017/paperless
+
+# JWT Authentication
+JWT_SECRET=your_super_secret_jwt_key
+JWT_EXPIRE=15m
+JWT_REFRESH_SECRET=your_refresh_secret_key
+JWT_REFRESH_EXPIRE=7d
+
+# OpenAI
+OPENAI_API_KEY=sk-...
+
+# Storage (S3 Compatible)
+S3_REGION=us-east-1
+S3_BUCKET=paperless-uploads
+S3_ACCESS_KEY_ID=...
+S3_SECRET_ACCESS_KEY=...
+# S3_ENDPOINT=https://your-custom-endpoint.com (Optional)
+
+# Email (Resend)
+RESEND_API_KEY=re_...
+EMAIL_FROM=noreply@yourdomain.com
 ```
+*Note: If S3 or Resend credentials are omitted in development, the backend will gracefully fallback to local mocking and console logging.*
 
-**Start the backend:**
-```bash
-npm run dev
-```
-
-Server will run on `http://localhost:5000`
-
-### 3️⃣ Frontend Setup
-
-```bash
-# Navigate to client directory
-cd ../client
-
-# Install dependencies
-npm install
-
-# Create .env file
-cp .env.example .env
-
-# Edit .env
-nano .env
-```
-
-**Frontend Environment Variable:**
+For the frontend, create a `.env` file in the `client` directory:
 ```env
 VITE_BACKEND_URL=http://localhost:5000
 ```
 
-**Start the frontend:**
+### 3. Development
+You can run the development servers concurrently from the root directory, or in separate terminal windows:
+
 ```bash
-npm run dev
-```
+# Terminal 1: Start Backend
+npm run server
 
-Application will open at `http://localhost:5173`
-
----
-
-## 🗄️ Database Setup
-
-### Option 1: MongoDB Atlas (Free Tier)
-1. Go to [MongoDB Atlas](https://www.mongodb.com/cloud/atlas)
-2. Create free cluster
-3. Create database user
-4. Whitelist IP (0.0.0.0/0 for development)
-5. Get connection string and add to `MONGO_URI`
-
-### Option 2: Railway MongoDB
-1. Create project on [Railway](https://railway.app)
-2. Add MongoDB plugin
-3. Copy connection string to `MONGO_URI`
-
-### Option 3: Local MongoDB
-```bash
-# Install MongoDB locally
-brew install mongodb-community  # macOS
-# or download from mongodb.com
-
-# Start MongoDB
-brew services start mongodb-community
-
-# Use in .env
-MONGO_URI=mongodb://localhost:27017/paperless
+# Terminal 2: Start Frontend
+npm run client
 ```
 
 ---
 
-## 🤖 OpenAI API Setup
+## Testing
 
-1. Go to [OpenAI Platform](https://platform.openai.com)
-2. Create account / Sign in
-3. Navigate to API Keys
-4. Create new secret key
-5. Copy to `.env` as `OPENAI_API_KEY`
+The backend includes a comprehensive Vitest suite using `mongodb-memory-server` to execute true integration tests against the database without mocking the ODM.
 
-**Note:** AI features require credits. Start with $5-10 credit for testing.
+**Current Coverage:** 14 Test Suites, 118 Passing Tests.
 
----
+```bash
+# Run tests
+npm run test
 
-## 📊 API Endpoints
+# Run linter
+npm run lint
 
-### Authentication
-- `POST /api/auth/register` - Register new user
-- `POST /api/auth/login` - Login user
-- `GET /api/auth/me` - Get current user (protected)
-- `POST /api/auth/refresh` - Refresh access token
-
-### Forms
-- `GET /api/forms` - Get all forms (protected)
-- `POST /api/forms` - Create form (protected)
-- `GET /api/forms/:id` - Get single form
-- `PUT /api/forms/:id` - Update form (protected)
-- `DELETE /api/forms/:id` - Delete form (protected)
-
-### Questions
-- `POST /api/forms/:id/questions` - Add question (protected)
-- `PUT /api/forms/:formId/questions/:questionId` - Update question (protected)
-- `DELETE /api/forms/:formId/questions/:questionId` - Delete question (protected)
-- `PUT /api/forms/:formId/questions/reorder` - Reorder questions (protected)
-
-### Responses
-- `POST /api/responses/:formId` - Submit response (public)
-- `GET /api/responses/:formId` - Get responses (protected)
-- `GET /api/responses/:formId/analytics` - Get analytics (protected)
-- `GET /api/responses/:formId/export` - Export responses (protected)
-- `DELETE /api/responses/:formId/:responseId` - Delete response (protected)
-
-### AI Features
-- `POST /api/ai/suggest` - Suggest questions from topic (protected)
-- `POST /api/ai/improve` - Improve question wording (protected)
-- `POST /api/ai/summary/:formId` - Generate response summary (protected)
+# Build client for production
+npm run build:client
+```
 
 ---
 
-## 🌐 Deployment
+## Security
 
-### Backend - Railway
+Paperless is built with modern web security practices:
+- **Authentication:** Uses strictly `HttpOnly`, `Secure`, and `SameSite` cookies. Tokens are never exposed to JavaScript/localStorage.
+- **Brute Force Protection:** Uses `express-rate-limit` on authentication, password reset, and AI endpoints.
+- **Data Integrity:** Forms transition states securely. Question options and constraints are strictly validated via Mongoose and Zod.
+- **File Security:** Uploads are constrained by size limits and MIME types. S3 objects are kept private and accessed exclusively via short-lived presigned URLs.
+- **Error Masking:** Development stack traces are never leaked in the production environment.
 
-1. **Create Railway Account**
-   - Go to [Railway](https://railway.app)
-   - Sign up / Login with GitHub
-
-2. **Deploy Backend**
-   ```bash
-   cd server
-   railway login
-   railway init
-   railway up
-   ```
-
-3. **Add MongoDB**
-   - In Railway dashboard, click "New"
-   - Select "Database" → "MongoDB"
-   - Copy connection string
-
-4. **Set Environment Variables**
-   - In Railway dashboard, go to Variables
-   - Add all variables from `.env`
-   - Update `MONGO_URI` with Railway MongoDB string
-   - Update `FRONTEND_URL` with Vercel URL (after frontend deploy)
-
-5. **Get Backend URL**
-   - Railway will provide a URL like `https://yourapp.railway.app`
-
-### Frontend - Vercel
-
-1. **Create Vercel Account**
-   - Go to [Vercel](https://vercel.com)
-   - Sign up / Login with GitHub
-
-2. **Deploy Frontend**
-   ```bash
-   cd client
-   npm run build  # Test build locally
-
-   # Install Vercel CLI
-   npm install -g vercel
-
-   # Deploy
-   vercel
-   ```
-
-3. **Set Environment Variable**
-   - In Vercel dashboard, go to Settings → Environment Variables
-   - Add: `VITE_BACKEND_URL` = `https://yourapp.railway.app`
-
-4. **Redeploy**
-   - Redeploy to apply environment variable
-   - Get your production URL
-
-5. **Update Backend CORS**
-   - Go back to Railway backend variables
-   - Update `FRONTEND_URL` to your Vercel URL
-   - Redeploy backend
+*Security limitations:* The current implementation does not support 2FA or organization-level SSO. It has not been formally audited for enterprise compliance (e.g., SOC2, HIPAA).
 
 ---
 
-## 🎨 Theme System
+## API Overview
 
-The app features a minimal black-and-white theme with toggle support:
+The Express backend exposes a structured REST API:
 
-- **Light Mode**: White background, black text, black borders
-- **Dark Mode**: Black background, white text, white borders
-
-Theme persists in localStorage and applies CSS classes dynamically.
-
----
-
-## 🔒 Security Features
-
-- Password hashing with bcrypt (10 salt rounds)
-- JWT token authentication
-- Protected API routes
-- Helmet for security headers
-- CORS configuration
-- Input validation
-- XSS protection
+- **`/api/auth`** - Register, login, logout, session refresh, and password reset.
+- **`/api/forms`** - CRUD operations for forms. Enforces ownership authorization.
+- **`/api/forms/:id/questions`** - Sub-resource routing for managing form questions and ordering.
+- **`/api/responses`** - Public submission endpoint and protected response retrieval/analytics.
+- **`/api/ai`** - Endpoints for triggering Creation Intelligence and Response Intelligence tasks.
 
 ---
 
-## 📝 Usage Guide
+## Roadmap
 
-### Creating a Form
-1. Register/Login to your account
-2. Click "Create New Form" on dashboard
-3. Add title and description
-4. Click "AI Suggest Questions" or add manually
-5. Drag to reorder questions
-6. Set question types and requirements
-7. Click "Save Changes"
+**✅ Implemented**
+- Drag-and-drop form builder
+- MongoDB aggregation analytics
+- AI Form Consultant (Question suggestion & refinement)
+- Secure S3 file uploads
+- HttpOnly JWT authentication
 
-### Sharing a Form
-1. On Dashboard, click "Share" on any form
-2. Copy the public link
-3. Share with respondents
-4. Anyone can submit (no login required)
-
-### Viewing Responses
-1. Click "Responses" on any form
-2. View analytics charts
-3. Generate AI summary
-4. Export as CSV or JSON
-5. Review individual submissions
-
-### Using AI Features
-1. **Suggest Questions**: Enter topic → Get 5-10 relevant questions
-2. **Improve Wording**: Select question → Get 3 enhanced versions
-3. **Auto Summary**: Click button → Get AI analysis of responses
+**🔭 Planned Scope**
+- Custom branding and themes per form
+- Webhook integrations for form submissions
+- Multi-user collaboration on draft forms
 
 ---
 
-## 🐛 Troubleshooting
+## Current Scope / Non-Goals
 
-### Backend won't start
-- Check MongoDB connection string
-- Ensure port 5000 is available
-- Verify all environment variables are set
-
-### Frontend won't connect to backend
-- Check `VITE_BACKEND_URL` in client/.env
-- Ensure backend is running
-- Check browser console for CORS errors
-
-### AI features not working
-- Verify `OPENAI_API_KEY` is correct
-- Check OpenAI account has credits
-- Review server logs for API errors
-
-### Database connection failed
-- Check MongoDB URI format
-- Whitelist IP address in MongoDB Atlas
-- Verify database user credentials
+Paperless is an excellent solution for general data collection, surveys, and applications. However, to keep the codebase maintainable and focused, the following are explicitly **not** goals for the current project phase:
+- Complex multi-page branching logic.
+- HIPAA/PCI compliant storage environments.
+- Custom domain mapping.
+- Native mobile applications.
+- Payment gateway integration (e.g., Stripe/PayPal) for form submissions.
 
 ---
 
-## 🤝 Contributing
+## Project Status
 
-This is a demonstration project. Feel free to:
-- Fork the repository
-- Create feature branches
-- Submit pull requests
-- Report issues
+Paperless is currently in active development. The core features, intelligence layer, and authentication mechanisms are stable and fully tested.
 
 ---
 
-## 📄 License
+## Contributing
 
-MIT License - feel free to use this project for learning or commercial purposes.
-
----
-
-## 👨‍💻 Developer
-
-Built as a complete MERN stack demonstration project showcasing:
-- Modern React patterns (hooks, Redux Toolkit)
-- RESTful API design
-- MongoDB database modeling
-- JWT authentication
-- OpenAI integration
-- Responsive UI/UX
-- Production-ready deployment
+Contributions are welcome! Please follow this workflow:
+1. Fork the repository.
+2. Create a feature branch (`git checkout -b feature/amazing-feature`).
+3. Ensure all tests and linters pass (`npm run test && npm run lint`).
+4. Commit your changes (`git commit -m 'feat: add amazing feature'`).
+5. Push to the branch (`git push origin feature/amazing-feature`).
+6. Open a Pull Request.
 
 ---
 
-## 🙏 Acknowledgments
+## License
 
-- **React** team for the amazing framework
-- **MongoDB** for flexible NoSQL database
-- **OpenAI** for powerful AI capabilities
-- **Tailwind CSS** for utility-first styling
-- **Recharts** for beautiful charts
-- **Railway** and **Vercel** for easy deployment
-
----
-
-## 📞 Support
-
-For questions or issues:
-- Open a GitHub issue
-- Check the troubleshooting section
-- Review API documentation above
-
----
-
-**Built with ❤️ using the MERN Stack**
-
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
