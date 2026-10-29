@@ -35,6 +35,7 @@ const Login = () => {
         dispatch(loginSuccess({
           user: response.data.data.user
         }));
+        api.notifyAuthLogin?.(response.data.data.user);
         navigate('/dashboard');
       }
     } catch (err) {

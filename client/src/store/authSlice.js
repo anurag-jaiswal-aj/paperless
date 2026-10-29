@@ -42,6 +42,7 @@ const authSlice = createSlice({
 
       // Clear localStorage
       localStorage.removeItem('user');
+      localStorage.removeItem('auth_session_id');
     },
     clearError: (state) => {
       state.error = null;

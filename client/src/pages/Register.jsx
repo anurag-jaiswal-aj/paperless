@@ -55,6 +55,7 @@ const Register = () => {
           user: response.data.data.user,
           token: response.data.data.token
         }));
+        api.notifyAuthLogin?.(response.data.data.user);
         navigate('/dashboard');
       }
     } catch (err) {

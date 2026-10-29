@@ -18,12 +18,14 @@ const Navbar = () => {
     if (isLoggingOut) return;
     setIsLoggingOut(true);
     api.invalidateAuthSession?.();
+    api.broadcastAuthLogout?.();
     try {
       await api.post('/api/auth/logout');
     } catch (err) {
       console.error('Logout error:', err.response?.data?.message || err.message);
     } finally {
       api.invalidateAuthSession?.();
+      api.broadcastAuthLogout?.();
       dispatch(logout());
       setIsLoggingOut(false);
     }

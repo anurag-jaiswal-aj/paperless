@@ -1,6 +1,8 @@
 import React, { Suspense, useEffect } from 'react';
 import { BrowserRouter as Router, Routes, Route, useLocation } from 'react-router-dom';
-import { useSelector } from 'react-redux';
+import { useSelector, useDispatch } from 'react-redux';
+import { logout as logoutAction, loginSuccess } from './store/authSlice';
+import { onAuthSessionChange } from './utils/api';
 import Navbar from './components/Navbar';
 import PrivateRoute from './components/PrivateRoute';
 
@@ -35,7 +37,21 @@ const ScrollToTop = () => {
 };
 
 function App() {
+  const dispatch = useDispatch();
   const { theme } = useSelector((state) => state.theme);
+
+  useEffect(() => {
+    const unsubscribe = onAuthSessionChange?.((event) => {
+      if (event.type === 'LOGOUT') {
+        dispatch(logoutAction());
+      } else if (event.type === 'LOGIN' && event.user) {
+        dispatch(loginSuccess({ user: event.user }));
+      }
+    });
+    return () => {
+      if (typeof unsubscribe === 'function') unsubscribe();
+    };
+  }, [dispatch]);
 
   useEffect(() => {
     if (theme === 'dark') {

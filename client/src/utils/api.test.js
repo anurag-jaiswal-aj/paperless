@@ -2,7 +2,20 @@
  * @vitest-environment jsdom
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import api, { isAuthEndpoint, invalidateAuthSession, _resetRefreshState } from './api';
+import api, {
+  isAuthEndpoint,
+  invalidateAuthSession,
+  _resetRefreshState,
+  AUTH_LOCK_NAME,
+  getActiveSessionId,
+  setActiveSessionId,
+  getSharedRefreshSeq,
+  setSharedRefreshSeq,
+  clearLocalAuthState,
+  onAuthSessionChange,
+  notifyAuthLogin,
+  broadcastAuthLogout
+} from './api';
 
 describe('API Client and Token Refresh Interceptor', () => {
   let originalLocation;
@@ -20,6 +33,11 @@ describe('API Client and Token Refresh Interceptor', () => {
 
   afterEach(() => {
     window.location = originalLocation;
+    try {
+      delete navigator.locks;
+    } catch (e) {
+      navigator.locks = undefined;
+    }
     vi.restoreAllMocks();
   });
 
@@ -452,6 +470,284 @@ describe('API Client and Token Refresh Interceptor', () => {
 
     // Confirm that non-401 failure did not cause an auth redirect to /login
     expect(window.location.href).toBe('http://localhost:5173/dashboard');
+  });
+
+  it('manages shared refresh sequence counter in localStorage', () => {
+    expect(getSharedRefreshSeq()).toBe(0);
+    setSharedRefreshSeq(5);
+    expect(getSharedRefreshSeq()).toBe(5);
+    expect(localStorage.getItem('auth_refresh_seq')).toBe('5');
+  });
+
+  it('manages active session ID in localStorage', () => {
+    expect(getActiveSessionId()).toBeNull();
+    setActiveSessionId('sess-xyz');
+    expect(getActiveSessionId()).toBe('sess-xyz');
+    expect(localStorage.getItem('auth_session_id')).toBe('sess-xyz');
+    setActiveSessionId(null);
+    expect(getActiveSessionId()).toBeNull();
+    expect(localStorage.getItem('auth_session_id')).toBeNull();
+  });
+
+  it('clears local auth state including user and auth_session_id', () => {
+    localStorage.setItem('user', JSON.stringify({ id: 'u1' }));
+    localStorage.setItem('auth_session_id', 'sess-123');
+    clearLocalAuthState();
+    expect(localStorage.getItem('user')).toBeNull();
+    expect(localStorage.getItem('auth_session_id')).toBeNull();
+  });
+
+  it('uses Web Locks API to coordinate cross-tab refresh and bypasses refresh call if another tab already bumped sequence', async () => {
+    let refreshCallCount = 0;
+    let formsCallCount = 0;
+
+    const mockRequest = vi.fn(async (lockName, callback) => {
+      // Simulate another tab acquiring the lock first and incrementing the sequence
+      setSharedRefreshSeq(getSharedRefreshSeq() + 1);
+      return callback();
+    });
+    Object.defineProperty(navigator, 'locks', {
+      value: { request: mockRequest },
+      configurable: true,
+      writable: true
+    });
+
+    api.defaults.adapter = async (config) => {
+      if (config.url.includes('/api/forms')) {
+        formsCallCount++;
+        if (formsCallCount === 1) {
+          const error = new Error('401');
+          error.config = config;
+          error.response = { status: 401, data: {} };
+          throw error;
+        }
+        return {
+          data: { success: true, data: 'forms-after-cross-tab-refresh' },
+          status: 200,
+          statusText: 'OK',
+          headers: {},
+          config
+        };
+      }
+
+      if (config.url.includes('/api/auth/refresh')) {
+        refreshCallCount++;
+        return { data: {}, status: 200, statusText: 'OK', headers: {}, config };
+      }
+
+      return { data: {}, status: 200, statusText: 'OK', headers: {}, config };
+    };
+
+    const res = await api.get('/api/forms');
+    expect(res.data.data).toBe('forms-after-cross-tab-refresh');
+    expect(mockRequest).toHaveBeenCalledWith(AUTH_LOCK_NAME, expect.any(Function));
+    expect(refreshCallCount).toBe(0);
+    expect(formsCallCount).toBe(2);
+  });
+
+  it('falls back gracefully and refreshes normally when navigator.locks is unavailable', async () => {
+    Object.defineProperty(navigator, 'locks', {
+      value: undefined,
+      configurable: true,
+      writable: true
+    });
+
+    let formsCallCount = 0;
+    let refreshCallCount = 0;
+
+    api.defaults.adapter = async (config) => {
+      if (config.url.includes('/api/forms')) {
+        formsCallCount++;
+        if (formsCallCount === 1) {
+          const error = new Error('401');
+          error.config = config;
+          error.response = { status: 401, data: {} };
+          throw error;
+        }
+        return {
+          data: { success: true, data: 'forms-fallback-ok' },
+          status: 200,
+          statusText: 'OK',
+          headers: {},
+          config
+        };
+      }
+
+      if (config.url.includes('/api/auth/refresh')) {
+        refreshCallCount++;
+        return {
+          data: { success: true, data: { user: { id: 'u1' } } },
+          status: 200,
+          statusText: 'OK',
+          headers: {},
+          config
+        };
+      }
+
+      return { data: {}, status: 200, statusText: 'OK', headers: {}, config };
+    };
+
+    const res = await api.get('/api/forms');
+    expect(res.data.data).toBe('forms-fallback-ok');
+    expect(refreshCallCount).toBe(1);
+    expect(formsCallCount).toBe(2);
+  });
+
+  it('recovers by retrying request when refresh endpoint fails but another tab refreshed concurrently', async () => {
+    let formsCallCount = 0;
+    let refreshCallCount = 0;
+
+    api.defaults.adapter = async (config) => {
+      if (config.url.includes('/api/forms')) {
+        formsCallCount++;
+        if (formsCallCount === 1) {
+          const error = new Error('401');
+          error.config = config;
+          error.response = { status: 401, data: {} };
+          throw error;
+        }
+        return {
+          data: { success: true, data: 'forms-recovered' },
+          status: 200,
+          statusText: 'OK',
+          headers: {},
+          config
+        };
+      }
+
+      if (config.url.includes('/api/auth/refresh')) {
+        refreshCallCount++;
+        // Simulate that another tab refreshed concurrently and bumped the sequence
+        setSharedRefreshSeq(getSharedRefreshSeq() + 1);
+        const error = new Error('Refresh rejected due to concurrent rotation');
+        error.config = config;
+        error.response = { status: 401, data: { message: 'Token rotated' } };
+        throw error;
+      }
+
+      return { data: {}, status: 200, statusText: 'OK', headers: {}, config };
+    };
+
+    const res = await api.get('/api/forms');
+    expect(res.data.data).toBe('forms-recovered');
+    expect(refreshCallCount).toBe(1);
+    expect(formsCallCount).toBe(2);
+    // Did not redirect to login because recovery succeeded
+    expect(window.location.href).toBe('http://localhost:5173/dashboard');
+  });
+
+  it('broadcasts and handles cross-tab logout', async () => {
+    localStorage.setItem('user', JSON.stringify({ id: 'u1', name: 'User 1' }));
+    setActiveSessionId('sess-1');
+
+    const listener = vi.fn();
+    const unsubscribe = onAuthSessionChange(listener);
+
+    broadcastAuthLogout();
+
+    expect(listener).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'LOGOUT' })
+    );
+    expect(localStorage.getItem('user')).toBeNull();
+    expect(getActiveSessionId()).toBeNull();
+
+    unsubscribe();
+  });
+
+  it('broadcasts and handles cross-tab login', () => {
+    const listener = vi.fn();
+    const unsubscribe = onAuthSessionChange(listener);
+
+    notifyAuthLogin({ id: 'u2', name: 'New User' });
+
+    expect(getActiveSessionId()).toBeTruthy();
+    expect(listener).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'LOGIN',
+        user: { id: 'u2', name: 'New User' }
+      })
+    );
+
+    unsubscribe();
+  });
+
+  it('isolates and aborts in-flight refresh when active session ID changes due to cross-tab login', async () => {
+    setActiveSessionId('sess-tab1');
+    localStorage.setItem('user', JSON.stringify({ id: 'u1', name: 'User 1' }));
+
+    let resolveRefresh;
+    const refreshPromise = new Promise((resolve) => {
+      resolveRefresh = resolve;
+    });
+
+    let formsCallCount = 0;
+    let refreshCallCount = 0;
+
+    api.defaults.adapter = async (config) => {
+      if (config.url.includes('/api/forms')) {
+        formsCallCount++;
+        const error = new Error('401');
+        error.config = config;
+        error.response = { status: 401, data: {} };
+        throw error;
+      }
+
+      if (config.url.includes('/api/auth/refresh')) {
+        refreshCallCount++;
+        return refreshPromise;
+      }
+
+      return { data: {}, status: 200, statusText: 'OK', headers: {}, config };
+    };
+
+    const formsPromise = api.get('/api/forms');
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(refreshCallCount).toBe(1);
+
+    // Another tab logs in as a different user
+    notifyAuthLogin({ id: 'u2', name: 'User 2' });
+
+    // Now resolve the old in-flight refresh
+    resolveRefresh({
+      data: {
+        success: true,
+        data: { user: { id: 'u1', name: 'Stale User 1' } }
+      },
+      status: 200,
+      statusText: 'OK',
+      headers: {},
+      config: { url: '/api/auth/refresh' }
+    });
+
+    await expect(formsPromise).rejects.toThrow('Session invalidated');
+    // Stale user was NOT written back to localStorage
+    expect(JSON.parse(localStorage.getItem('user')).name).not.toBe('Stale User 1');
+    expect(formsCallCount).toBe(1);
+  });
+
+  it('handles incoming storage event fallback for cross-tab sync', () => {
+    const listener = vi.fn();
+    const unsubscribe = onAuthSessionChange(listener);
+    localStorage.setItem('user', JSON.stringify({ id: 'u1' }));
+
+    const storagePayload = JSON.stringify({
+      type: 'LOGOUT',
+      timestamp: Date.now()
+    });
+    window.dispatchEvent(
+      new StorageEvent('storage', {
+        key: 'auth_sync_event',
+        newValue: storagePayload
+      })
+    );
+
+    expect(listener).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'LOGOUT' })
+    );
+    expect(localStorage.getItem('user')).toBeNull();
+
+    unsubscribe();
   });
 });
 
