@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeEach, beforeAll, afterAll, vi } from 'vitest';
 import request from 'supertest';
 import express from 'express';
 import cookieParser from 'cookie-parser';
@@ -159,6 +159,255 @@ describe('Form Controller - Phase 2', () => {
       const updatedQ2 = await Question.findById(q2._id);
       expect(updatedQ1.order).toBe(1);
       expect(updatedQ2.order).toBe(0);
+    });
+  });
+  describe('Question Deletion and Orphaned Visibility Rule Cleanup', () => {
+    let form;
+    let otherForm;
+
+    beforeEach(async () => {
+      form = await Form.create({ ownerId: user1Id, title: 'Test Form', status: 'published' });
+      otherForm = await Form.create({ ownerId: user1Id, title: 'Other Form', status: 'published' });
+    });
+
+    it('clears visibility rule when referenced question is deleted', async () => {
+      const qTarget = await Question.create({
+        formId: form._id,
+        type: 'short_text',
+        label: 'Do you have pets?',
+        order: 0
+      });
+
+      const qDependent = await Question.create({
+        formId: form._id,
+        type: 'short_text',
+        label: 'What kind of pet?',
+        order: 1,
+        visibilityRule: {
+          targetQuestionId: qTarget._id,
+          operator: 'equals',
+          value: 'Yes'
+        }
+      });
+
+      const res = await request(app)
+        .delete(`/api/forms/${form._id}/questions/${qTarget._id}`)
+        .set('Cookie', [`token=${user1Token}`]);
+
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+
+      // Verify qTarget is deleted
+      const deletedCheck = await Question.findById(qTarget._id);
+      expect(deletedCheck).toBeNull();
+
+      // Verify qDependent's visibilityRule is cleared to null
+      const updatedDependent = await Question.findById(qDependent._id);
+      expect(updatedDependent.visibilityRule).toBeNull();
+      // Other fields on qDependent remain intact
+      expect(updatedDependent.label).toBe('What kind of pet?');
+      expect(updatedDependent.order).toBe(1);
+    });
+
+    it('preserves unrelated visibility rules when an unreferenced question is deleted', async () => {
+      const q1 = await Question.create({ formId: form._id, type: 'short_text', label: 'Q1', order: 0 });
+      const q2 = await Question.create({ formId: form._id, type: 'short_text', label: 'Q2', order: 1 });
+      const q3 = await Question.create({
+        formId: form._id,
+        type: 'short_text',
+        label: 'Q3',
+        order: 2,
+        visibilityRule: {
+          targetQuestionId: q2._id.toString(),
+          operator: 'equals',
+          value: 'Special'
+        }
+      });
+
+      // Delete q1 (unreferenced by q3)
+      const res = await request(app)
+        .delete(`/api/forms/${form._id}/questions/${q1._id}`)
+        .set('Cookie', [`token=${user1Token}`]);
+
+      expect(res.status).toBe(200);
+
+      // Verify q1 is deleted
+      expect(await Question.findById(q1._id)).toBeNull();
+
+      // Verify q3's visibilityRule still references q2
+      const updatedQ3 = await Question.findById(q3._id);
+      expect(updatedQ3.visibilityRule).not.toBeNull();
+      expect(updatedQ3.visibilityRule.targetQuestionId).toBe(q2._id.toString());
+      expect(updatedQ3.visibilityRule.operator).toBe('equals');
+      expect(updatedQ3.visibilityRule.value).toBe('Special');
+    });
+
+    it('deletes a question that has no visibility rules and no references safely', async () => {
+      const qStandalone = await Question.create({
+        formId: form._id,
+        type: 'short_text',
+        label: 'Standalone Question',
+        order: 0,
+        visibilityRule: null
+      });
+
+      const res = await request(app)
+        .delete(`/api/forms/${form._id}/questions/${qStandalone._id}`)
+        .set('Cookie', [`token=${user1Token}`]);
+
+      expect(res.status).toBe(200);
+      expect(await Question.findById(qStandalone._id)).toBeNull();
+    });
+
+    it('cleans up multiple rules that reference the same deleted question', async () => {
+      const qParent = await Question.create({
+        formId: form._id,
+        type: 'single_choice',
+        label: 'Parent Question',
+        order: 0
+      });
+
+      const qChild1 = await Question.create({
+        formId: form._id,
+        type: 'short_text',
+        label: 'Child 1',
+        order: 1,
+        visibilityRule: { targetQuestionId: qParent._id, operator: 'equals', value: 'Option A' }
+      });
+
+      const qChild2 = await Question.create({
+        formId: form._id,
+        type: 'short_text',
+        label: 'Child 2',
+        order: 2,
+        visibilityRule: { targetQuestionId: qParent._id.toString(), operator: 'equals', value: 'Option B' }
+      });
+
+      const res = await request(app)
+        .delete(`/api/forms/${form._id}/questions/${qParent._id}`)
+        .set('Cookie', [`token=${user1Token}`]);
+
+      expect(res.status).toBe(200);
+
+      const updatedChild1 = await Question.findById(qChild1._id);
+      const updatedChild2 = await Question.findById(qChild2._id);
+      expect(updatedChild1.visibilityRule).toBeNull();
+      expect(updatedChild2.visibilityRule).toBeNull();
+    });
+
+    it('handles missing, null, or malformed visibility rules without crashing', async () => {
+      const qTarget = await Question.create({
+        formId: form._id,
+        type: 'short_text',
+        label: 'Target',
+        order: 0
+      });
+
+      const qNullRule = await Question.create({
+        formId: form._id,
+        type: 'short_text',
+        label: 'Null Rule',
+        order: 1,
+        visibilityRule: null
+      });
+
+      const qEmptyObjRule = await Question.create({
+        formId: form._id,
+        type: 'short_text',
+        label: 'Custom Prop Rule',
+        order: 2,
+        visibilityRule: { otherProp: 'test' }
+      });
+
+      const qMalformedStringRule = await Question.create({
+        formId: form._id,
+        type: 'short_text',
+        label: 'String Rule',
+        order: 3,
+        visibilityRule: 'malformed_rule_string'
+      });
+
+      const res = await request(app)
+        .delete(`/api/forms/${form._id}/questions/${qTarget._id}`)
+        .set('Cookie', [`token=${user1Token}`]);
+
+      expect(res.status).toBe(200);
+      expect(await Question.findById(qTarget._id)).toBeNull();
+
+      // Ensure other questions are completely unchanged
+      const checkNull = await Question.findById(qNullRule._id);
+      const checkEmpty = await Question.findById(qEmptyObjRule._id);
+      const checkString = await Question.findById(qMalformedStringRule._id);
+      expect(checkNull.visibilityRule).toBeNull();
+      expect(checkEmpty.visibilityRule).toEqual({ otherProp: 'test' });
+      expect(checkString.visibilityRule).toBe('malformed_rule_string');
+    });
+
+    it('strictly scopes cleanup to the form containing the deleted question', async () => {
+      const qTarget = await Question.create({
+        formId: form._id,
+        type: 'short_text',
+        label: 'Form 1 Question',
+        order: 0
+      });
+
+      // Question in another form that happens to reference qTarget's ID
+      const qOtherForm = await Question.create({
+        formId: otherForm._id,
+        type: 'short_text',
+        label: 'Form 2 Question',
+        order: 0,
+        visibilityRule: { targetQuestionId: qTarget._id, operator: 'equals', value: 'Test' }
+      });
+
+      const res = await request(app)
+        .delete(`/api/forms/${form._id}/questions/${qTarget._id}`)
+        .set('Cookie', [`token=${user1Token}`]);
+
+      expect(res.status).toBe(200);
+      expect(await Question.findById(qTarget._id)).toBeNull();
+
+      // Verify qOtherForm was NOT modified because it belongs to otherForm
+      const checkOther = await Question.findById(qOtherForm._id);
+      expect(checkOther.visibilityRule).not.toBeNull();
+      expect(checkOther.visibilityRule.targetQuestionId.toString()).toBe(qTarget._id.toString());
+    });
+
+    it('handles database persistence failure cleanly with standard error handling', async () => {
+      const qTarget = await Question.create({
+        formId: form._id,
+        type: 'short_text',
+        label: 'Target Q',
+        order: 0
+      });
+
+      const qDependent = await Question.create({
+        formId: form._id,
+        type: 'short_text',
+        label: 'Dependent Q',
+        order: 1,
+        visibilityRule: { targetQuestionId: qTarget._id, operator: 'equals', value: 'Yes' }
+      });
+
+      // Mock deleteOne on Question to simulate a persistence failure during deletion
+      const deleteSpy = vi.spyOn(Question, 'deleteOne').mockRejectedValueOnce(new Error('Simulated DB Failure on delete'));
+
+      const res = await request(app)
+        .delete(`/api/forms/${form._id}/questions/${qTarget._id}`)
+        .set('Cookie', [`token=${user1Token}`]);
+
+      expect(res.status).toBe(500);
+
+      // Verify question was NOT deleted
+      const checkTarget = await Question.findById(qTarget._id);
+      expect(checkTarget).not.toBeNull();
+
+      // Verify compensating rollback restored the visibility rule on dependent question
+      const checkDependent = await Question.findById(qDependent._id);
+      expect(checkDependent.visibilityRule).not.toBeNull();
+      expect(checkDependent.visibilityRule.targetQuestionId.toString()).toBe(qTarget._id.toString());
+
+      deleteSpy.mockRestore();
     });
   });
 });

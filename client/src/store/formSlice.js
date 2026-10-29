@@ -56,7 +56,14 @@ const formSlice = createSlice({
       }
     },
     removeQuestion: (state, action) => {
-      state.questions = state.questions.filter(q => q._id !== action.payload);
+      state.questions = state.questions
+        .filter((q) => q._id !== action.payload)
+        .map((q) => {
+          if (q.visibilityRule && q.visibilityRule.targetQuestionId === action.payload) {
+            return { ...q, visibilityRule: null };
+          }
+          return q;
+        });
     },
     reorderQuestions: (state, action) => {
       state.questions = action.payload;

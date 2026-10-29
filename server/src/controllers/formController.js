@@ -1,3 +1,4 @@
+import mongoose from 'mongoose';
 import Form from '../models/form.js';
 import Question from '../models/question.js';
 import Response from '../models/response.js';
@@ -315,6 +316,7 @@ export const updateQuestion = async (req, res, next) => {
  * @access  Private (owner only)
  */
 export const deleteQuestion = async (req, res, next) => {
+  let session = null;
   try {
     const form = await Form.findById(req.params.formId);
 
@@ -342,7 +344,71 @@ export const deleteQuestion = async (req, res, next) => {
       });
     }
 
-    await question.deleteOne();
+    const targetIdStr = question._id.toString();
+    const targetIdObj = mongoose.Types.ObjectId.isValid(targetIdStr)
+      ? new mongoose.Types.ObjectId(targetIdStr)
+      : question._id;
+
+    const cleanupFilter = {
+      formId: req.params.formId,
+      $or: [
+        { 'visibilityRule.targetQuestionId': targetIdObj },
+        { 'visibilityRule.targetQuestionId': targetIdStr }
+      ]
+    };
+
+    const topologyType = mongoose.connection.client?.topology?.description?.type;
+    const canUseTransaction =
+      topologyType === 'ReplicaSetWithPrimary' || topologyType === 'Sharded';
+
+    if (canUseTransaction) {
+      try {
+        session = await mongoose.startSession();
+        session.startTransaction();
+      } catch {
+        session = null;
+      }
+    }
+
+    let previousRules = null;
+    if (!session) {
+      // In standalone Mongo environments without replica sets / transactions,
+      // record previous rules so we can compensate if question deletion fails
+      previousRules = await Question.find(cleanupFilter).select('_id visibilityRule');
+    }
+
+    try {
+      // 1. Remove orphaned visibility rules referencing the deleted question in this form
+      await Question.updateMany(
+        cleanupFilter,
+        { $set: { visibilityRule: null } },
+        session ? { session } : {}
+      );
+
+      // 2. Delete the question itself
+      await Question.deleteOne({ _id: question._id }, session ? { session } : {});
+
+      if (session) {
+        await session.commitTransaction();
+      }
+    } catch (dbErr) {
+      if (session) {
+        await session.abortTransaction();
+      } else if (previousRules && previousRules.length > 0) {
+        // Compensating rollback for standalone MongoDB
+        for (const pr of previousRules) {
+          await Question.updateOne(
+            { _id: pr._id },
+            { $set: { visibilityRule: pr.visibilityRule } }
+          ).catch(() => {});
+        }
+      }
+      throw dbErr;
+    } finally {
+      if (session) {
+        session.endSession();
+      }
+    }
 
     res.status(200).json({
       success: true,
