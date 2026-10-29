@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useSelector, useDispatch } from 'react-redux';
 import { DragDropContext, Draggable } from 'react-beautiful-dnd';
@@ -27,6 +27,7 @@ const FormBuilder = () => {
   const { questions, loading } = useSelector((state) => state.forms);
 
   const [formData, setFormData] = useState({ title: '', description: '', status: 'draft' });
+  const statusUpdateSeqRef = useRef(0);
   const [showAIModal, setShowAIModal] = useState(false);
   const [aiTopic, setAiTopic] = useState('');
   const [aiLoading, setAiLoading] = useState(false);
@@ -67,6 +68,33 @@ const FormBuilder = () => {
       alert('Form updated successfully');
     } catch (err) {
       alert('Failed to update form');
+    }
+  };
+
+  const handleStatusChange = async (newStatus) => {
+    if (!newStatus || newStatus === formData.status) return;
+
+    const previousStatus = formData.status;
+    const currentSeq = ++statusUpdateSeqRef.current;
+
+    setFormData((prev) => ({ ...prev, status: newStatus }));
+
+    try {
+      const response = await api.put(`/api/forms/${id}`, { status: newStatus });
+      if (currentSeq === statusUpdateSeqRef.current) {
+        if (response.data?.success && response.data?.data) {
+          dispatch(setCurrentForm(response.data.data));
+          setFormData((prev) => ({
+            ...prev,
+            status: response.data.data.status || newStatus
+          }));
+        }
+      }
+    } catch (err) {
+      if (currentSeq === statusUpdateSeqRef.current) {
+        setFormData((prev) => ({ ...prev, status: previousStatus }));
+        alert(err.response?.data?.message || 'Failed to update form status');
+      }
     }
   };
 
@@ -298,7 +326,7 @@ const FormBuilder = () => {
                 <span className="text-sm opacity-70">Status:</span>
                 <CustomSelect
                   value={formData.status}
-                  onChange={(val) => setFormData({ ...formData, status: val })}
+                  onChange={handleStatusChange}
                   options={[
                     { value: 'draft', label: 'Draft' },
                     { value: 'published', label: 'Published' },

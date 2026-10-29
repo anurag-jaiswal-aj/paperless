@@ -225,7 +225,11 @@ describe('FormBuilder Phase 6 AI Features', () => {
     });
   });
 
-  it('updates status correctly via CustomSelect', async () => {
+  it('persists status change to published immediately via CustomSelect', async () => {
+    api.put.mockResolvedValueOnce({
+      data: { success: true, data: { _id: '123', title: 'Test Form', status: 'published' } }
+    });
+
     renderComponent();
 
     const statusCombobox = screen.getByText('Draft');
@@ -234,10 +238,119 @@ describe('FormBuilder Phase 6 AI Features', () => {
     const publishedOption = screen.getByText('Published');
     fireEvent.click(publishedOption);
 
-    // Expect state change in the component (onChange). The save is only onBlur for title/desc or explicit save.
-    // Wait, the status is saved when? Ah, the original code only called setFormData({ ...formData, status: val }) for status dropdown!
-    // Let's verify we can click it without error.
-    expect(screen.queryByRole('listbox')).toBeNull(); // closes after selection
+    await waitFor(() => {
+      expect(api.put).toHaveBeenCalledWith('/api/forms/123', { status: 'published' });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText('Published')).toBeTruthy();
+    });
+  });
+
+  it('persists status changes to closed and draft correctly', async () => {
+    api.put.mockResolvedValueOnce({
+      data: { success: true, data: { _id: '123', title: 'Test Form', status: 'closed' } }
+    });
+
+    renderComponent();
+
+    const statusCombobox = screen.getByText('Draft');
+    fireEvent.click(statusCombobox);
+
+    const closedOption = screen.getByText('Closed');
+    fireEvent.click(closedOption);
+
+    await waitFor(() => {
+      expect(api.put).toHaveBeenCalledWith('/api/forms/123', { status: 'closed' });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText('Closed')).toBeTruthy();
+    });
+
+    // Switch back to draft
+    api.put.mockResolvedValueOnce({
+      data: { success: true, data: { _id: '123', title: 'Test Form', status: 'draft' } }
+    });
+
+    fireEvent.click(screen.getByText('Closed'));
+    fireEvent.click(screen.getByText('Draft'));
+
+    await waitFor(() => {
+      expect(api.put).toHaveBeenCalledWith('/api/forms/123', { status: 'draft' });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText('Draft')).toBeTruthy();
+    });
+  });
+
+  it('reverts status and displays alert when status update API fails', async () => {
+    const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {});
+    api.put.mockRejectedValueOnce({
+      response: { data: { message: 'Database failure' } }
+    });
+
+    renderComponent();
+
+    const statusCombobox = screen.getByText('Draft');
+    fireEvent.click(statusCombobox);
+
+    const publishedOption = screen.getByText('Published');
+    fireEvent.click(publishedOption);
+
+    await waitFor(() => {
+      expect(api.put).toHaveBeenCalledWith('/api/forms/123', { status: 'published' });
+    });
+
+    await waitFor(() => {
+      expect(alertSpy).toHaveBeenCalledWith('Database failure');
+      expect(screen.getByText('Draft')).toBeTruthy();
+    });
+
+    alertSpy.mockRestore();
+  });
+
+  it('guards against stale responses overwriting newer status during rapid changes', async () => {
+    let resolveFirst;
+    const firstPromise = new Promise((resolve) => {
+      resolveFirst = resolve;
+    });
+
+    api.put.mockImplementation((url, body) => {
+      if (body.status === 'published') {
+        return firstPromise;
+      }
+      if (body.status === 'closed') {
+        return Promise.resolve({
+          data: { success: true, data: { _id: '123', title: 'Test Form', status: 'closed' } }
+        });
+      }
+      return Promise.resolve({ data: { success: true } });
+    });
+
+    renderComponent();
+
+    // Select published first
+    fireEvent.click(screen.getByText('Draft'));
+    fireEvent.click(screen.getByText('Published'));
+
+    // Rapidly select closed second
+    fireEvent.click(screen.getByText('Published'));
+    fireEvent.click(screen.getByText('Closed'));
+
+    await waitFor(() => {
+      expect(screen.getByText('Closed')).toBeTruthy();
+    });
+
+    // Now the slow first request completes with stale 'published'
+    resolveFirst({
+      data: { success: true, data: { _id: '123', title: 'Test Form', status: 'published' } }
+    });
+
+    await new Promise((r) => setTimeout(r, 20));
+    expect(screen.getByText('Closed')).toBeTruthy();
+    expect(screen.queryByText('Published')).toBeNull();
   });
 
   it('updates conditional visibility correctly via CustomSelect', async () => {

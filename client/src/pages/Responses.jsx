@@ -6,6 +6,101 @@ import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContaine
 import { FiDownload, FiZap, FiArrowLeft, FiBarChart2 } from 'react-icons/fi';
 import Loader from '../components/Loader';
 
+const getQuestionId = (questionRef) => {
+  if (!questionRef) return null;
+  if (typeof questionRef === 'string') return questionRef;
+  if (typeof questionRef === 'object') {
+    if (questionRef._id) return String(questionRef._id);
+    if (questionRef.id) return String(questionRef.id);
+  }
+  return null;
+};
+
+const formatFileSize = (bytes) => {
+  if (typeof bytes !== 'number' || isNaN(bytes) || bytes < 0) return null;
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+};
+
+const renderAnswerContent = (answer, response, formId) => {
+  if (answer == null || answer.value == null) {
+    return null;
+  }
+
+  const { value } = answer;
+
+  if (Array.isArray(value)) {
+    return <span>{value.join(', ')}</span>;
+  }
+
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+    return <span>{String(value)}</span>;
+  }
+
+  if (typeof value === 'object') {
+    const isFileAnswer =
+      Boolean(value.originalName) ||
+      Boolean(value.key) ||
+      Boolean(value.mimeType) ||
+      Boolean(value.fileName) ||
+      Boolean(value.filename) ||
+      answer.questionId?.type === 'file' ||
+      answer.questionId?.type === 'file_upload';
+
+    if (isFileAnswer) {
+      const fileName =
+        value.originalName ||
+        value.fileName ||
+        value.filename ||
+        (typeof value.key === 'string' ? value.key.split('/').pop() : null) ||
+        'Download file';
+
+      const questionId = getQuestionId(answer.questionId);
+      const respId = response?._id;
+      const fileSizeText = formatFileSize(value.size);
+
+      if (formId && respId && questionId) {
+        const downloadUrl = `/api/responses/${encodeURIComponent(formId)}/${encodeURIComponent(respId)}/file/${encodeURIComponent(questionId)}`;
+        return (
+          <a
+            href={downloadUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-1.5 text-primary hover:underline font-medium break-all"
+            aria-label={`Download ${fileName}`}
+          >
+            <FiDownload className="shrink-0" size={16} />
+            <span>{fileName}</span>
+            {fileSizeText && (
+              <span className="text-xs opacity-60 font-normal">({fileSizeText})</span>
+            )}
+          </a>
+        );
+      }
+
+      return (
+        <span className="inline-flex items-center gap-1.5 text-sm opacity-80 break-all">
+          <FiDownload className="shrink-0" size={16} />
+          <span>{fileName}</span>
+          {fileSizeText && (
+            <span className="text-xs opacity-60 font-normal">({fileSizeText})</span>
+          )}
+        </span>
+      );
+    }
+
+    try {
+      const json = JSON.stringify(value);
+      return <span>{json === '{}' ? '' : json}</span>;
+    } catch (e) {
+      return <span>[Object]</span>;
+    }
+  }
+
+  return <span>{String(value)}</span>;
+};
+
 const Responses = () => {
   const { id } = useParams();
   const { theme } = useSelector((state) => state.theme);
@@ -452,11 +547,9 @@ const Responses = () => {
                         <p className="font-medium text-sm opacity-70 mb-1">
                           {answer.questionId?.label || 'Question'}
                         </p>
-                        <p>
-                          {Array.isArray(answer.value)
-                            ? answer.value.join(', ')
-                            : answer.value}
-                        </p>
+                        <div className="text-base">
+                          {renderAnswerContent(answer, response, id || form?._id)}
+                        </div>
                       </div>
                     ))}
                   </div>

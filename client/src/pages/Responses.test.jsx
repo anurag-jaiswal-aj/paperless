@@ -294,4 +294,255 @@ describe('Responses Phase 7 AI Features', () => {
       expect(screen.getByText('25')).toBeTruthy();
     });
   });
+
+  it('renders file-upload answers with original filename and semantic download link without crashing', async () => {
+    api.get.mockImplementation((url) => {
+      if (url.includes('/api/forms/')) {
+        return Promise.resolve({ data: { success: true, data: { form: { _id: '123', title: 'Job Application' } } } });
+      }
+      if (url.includes('/api/responses/') && url.includes('limit=10')) {
+        return Promise.resolve({
+          data: {
+            success: true,
+            data: [
+              {
+                _id: 'r1',
+                createdAt: '2026-10-29T12:00:00.000Z',
+                answers: [
+                  {
+                    _id: 'a1',
+                    questionId: { _id: 'q-file', label: 'Upload Resume', type: 'file_upload' },
+                    value: {
+                      key: 'uploads/123/resume.pdf',
+                      originalName: 'my-resume.pdf',
+                      mimeType: 'application/pdf',
+                      size: 1048576 // 1.0 MB
+                    }
+                  }
+                ]
+              }
+            ],
+            pagination: { pages: 1, page: 1 }
+          }
+        });
+      }
+      if (url.includes('/analytics')) {
+        return Promise.resolve({ data: { success: true, data: { totalResponses: 1, analytics: [] } } });
+      }
+      return Promise.resolve({ data: {} });
+    });
+
+    renderComponent();
+
+    await waitFor(() => {
+      expect(screen.getByText('Upload Resume')).toBeTruthy();
+      expect(screen.getByText('my-resume.pdf')).toBeTruthy();
+      expect(screen.getByText('(1.0 MB)')).toBeTruthy();
+    });
+
+    const downloadLink = screen.getByRole('link', { name: /Download my-resume\.pdf/i });
+    expect(downloadLink).toBeTruthy();
+    expect(downloadLink.getAttribute('href')).toBe('/api/responses/123/r1/file/q-file');
+    expect(downloadLink.getAttribute('target')).toBe('_blank');
+    expect(downloadLink.getAttribute('rel')).toBe('noopener noreferrer');
+  });
+
+  it('handles file answers with raw questionId string without crashing', async () => {
+    api.get.mockImplementation((url) => {
+      if (url.includes('/api/forms/')) {
+        return Promise.resolve({ data: { success: true, data: { form: { _id: '123', title: 'File Form' } } } });
+      }
+      if (url.includes('/api/responses/') && url.includes('limit=10')) {
+        return Promise.resolve({
+          data: {
+            success: true,
+            data: [
+              {
+                _id: 'r2',
+                createdAt: '2026-10-29T12:00:00.000Z',
+                answers: [
+                  {
+                    _id: 'a2',
+                    questionId: 'q-raw-file',
+                    value: {
+                      key: 'uploads/doc.pdf',
+                      originalName: 'report.pdf',
+                      size: 2048
+                    }
+                  }
+                ]
+              }
+            ],
+            pagination: { pages: 1, page: 1 }
+          }
+        });
+      }
+      if (url.includes('/analytics')) {
+        return Promise.resolve({ data: { success: true, data: { totalResponses: 1, analytics: [] } } });
+      }
+      return Promise.resolve({ data: {} });
+    });
+
+    renderComponent();
+
+    await waitFor(() => {
+      expect(screen.getByText('report.pdf')).toBeTruthy();
+      expect(screen.getByText('(2.0 KB)')).toBeTruthy();
+    });
+
+    const downloadLink = screen.getByRole('link', { name: /Download report\.pdf/i });
+    expect(downloadLink.getAttribute('href')).toBe('/api/responses/123/r2/file/q-raw-file');
+  });
+
+  it('handles file answers with missing questionId or metadata gracefully without crashing', async () => {
+    api.get.mockImplementation((url) => {
+      if (url.includes('/api/forms/')) {
+        return Promise.resolve({ data: { success: true, data: { form: { _id: '123', title: 'Orphan File Form' } } } });
+      }
+      if (url.includes('/api/responses/') && url.includes('limit=10')) {
+        return Promise.resolve({
+          data: {
+            success: true,
+            data: [
+              {
+                _id: 'r3',
+                createdAt: '2026-10-29T12:00:00.000Z',
+                answers: [
+                  {
+                    _id: 'a3',
+                    questionId: null,
+                    value: {
+                      originalName: 'orphan.png',
+                      size: 512
+                    }
+                  }
+                ]
+              }
+            ],
+            pagination: { pages: 1, page: 1 }
+          }
+        });
+      }
+      if (url.includes('/analytics')) {
+        return Promise.resolve({ data: { success: true, data: { totalResponses: 1, analytics: [] } } });
+      }
+      return Promise.resolve({ data: {} });
+    });
+
+    renderComponent();
+
+    await waitFor(() => {
+      expect(screen.getByText('orphan.png')).toBeTruthy();
+      expect(screen.getByText('(512 B)')).toBeTruthy();
+    });
+
+    // Should not render a broken link when questionId is missing
+    expect(screen.queryByRole('link', { name: /Download orphan\.png/i })).toBeNull();
+  });
+
+  it('preserves string, number, array, empty, and null answer rendering', async () => {
+    api.get.mockImplementation((url) => {
+      if (url.includes('/api/forms/')) {
+        return Promise.resolve({ data: { success: true, data: { form: { _id: '123', title: 'Survey' } } } });
+      }
+      if (url.includes('/api/responses/') && url.includes('limit=10')) {
+        return Promise.resolve({
+          data: {
+            success: true,
+            data: [
+              {
+                _id: 'r4',
+                createdAt: '2026-10-29T12:00:00.000Z',
+                answers: [
+                  {
+                    _id: 'a-str',
+                    questionId: { _id: 'q-str', label: 'Candidate Name' },
+                    value: 'Alice Smith'
+                  },
+                  {
+                    _id: 'a-num',
+                    questionId: { _id: 'q-num', label: 'Years of Experience' },
+                    value: 7
+                  },
+                  {
+                    _id: 'a-arr',
+                    questionId: { _id: 'q-arr', label: 'Skills' },
+                    value: ['TypeScript', 'Node.js', 'React']
+                  },
+                  {
+                    _id: 'a-null',
+                    questionId: { _id: 'q-null', label: 'Additional Comments' },
+                    value: null
+                  }
+                ]
+              }
+            ],
+            pagination: { pages: 1, page: 1 }
+          }
+        });
+      }
+      if (url.includes('/analytics')) {
+        return Promise.resolve({ data: { success: true, data: { totalResponses: 1, analytics: [] } } });
+      }
+      return Promise.resolve({ data: {} });
+    });
+
+    renderComponent();
+
+    await waitFor(() => {
+      expect(screen.getByText('Candidate Name')).toBeTruthy();
+      expect(screen.getByText('Alice Smith')).toBeTruthy();
+      expect(screen.getByText('Years of Experience')).toBeTruthy();
+      expect(screen.getByText('7')).toBeTruthy();
+      expect(screen.getByText('Skills')).toBeTruthy();
+      expect(screen.getByText('TypeScript, Node.js, React')).toBeTruthy();
+      expect(screen.getByText('Additional Comments')).toBeTruthy();
+    });
+  });
+
+  it('handles unexpected plain objects without crashing the page', async () => {
+    api.get.mockImplementation((url) => {
+      if (url.includes('/api/forms/')) {
+        return Promise.resolve({ data: { success: true, data: { form: { _id: '123', title: 'Crash Test' } } } });
+      }
+      if (url.includes('/api/responses/') && url.includes('limit=10')) {
+        return Promise.resolve({
+          data: {
+            success: true,
+            data: [
+              {
+                _id: 'r5',
+                createdAt: '2026-10-29T12:00:00.000Z',
+                answers: [
+                  {
+                    _id: 'a-obj',
+                    questionId: { _id: 'q-obj', label: 'Custom Metadata' },
+                    value: { arbitraryKey: 'safeValue', count: 99 }
+                  },
+                  {
+                    _id: 'a-empty-obj',
+                    questionId: { _id: 'q-empty', label: 'Empty Object' },
+                    value: {}
+                  }
+                ]
+              }
+            ],
+            pagination: { pages: 1, page: 1 }
+          }
+        });
+      }
+      if (url.includes('/analytics')) {
+        return Promise.resolve({ data: { success: true, data: { totalResponses: 1, analytics: [] } } });
+      }
+      return Promise.resolve({ data: {} });
+    });
+
+    renderComponent();
+
+    await waitFor(() => {
+      expect(screen.getByText('Custom Metadata')).toBeTruthy();
+      expect(screen.getByText(/arbitraryKey/i)).toBeTruthy();
+      expect(screen.getByText('Empty Object')).toBeTruthy();
+    });
+  });
 });
