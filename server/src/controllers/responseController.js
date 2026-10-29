@@ -105,11 +105,35 @@ export const submitResponse = async (req, res, next) => {
           if (isNaN(Number(val))) {
             return res.status(400).json({ success: false, message: `Question "${question.label}" must be a number` });
           }
+        } else if (question.type === 'rating') {
+          const num = typeof val === 'number' ? val : (typeof val === 'string' && val.trim() !== '' ? Number(val) : NaN);
+          if (!Number.isInteger(num) || num < 1 || num > 5) {
+            return res.status(400).json({ success: false, message: `Question "${question.label}" must be a rating between 1 and 5` });
+          }
+        } else if (question.type === 'date') {
+          if (typeof val !== 'string') {
+            return res.status(400).json({ success: false, message: `Question "${question.label}" must be a valid date` });
+          }
+          const match = val.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+          if (!match) {
+            return res.status(400).json({ success: false, message: `Question "${question.label}" must be a valid date` });
+          }
+          const year = parseInt(match[1], 10);
+          const month = parseInt(match[2], 10);
+          const day = parseInt(match[3], 10);
+          const d = new Date(Date.UTC(year, month - 1, day));
+          if (
+            d.getUTCFullYear() !== year ||
+            d.getUTCMonth() !== month - 1 ||
+            d.getUTCDate() !== day
+          ) {
+            return res.status(400).json({ success: false, message: `Question "${question.label}" must be a valid date` });
+          }
         } else if (['single_choice', 'dropdown'].includes(question.type)) {
           if (!question.options.includes(String(val))) {
             return res.status(400).json({ success: false, message: `Question "${question.label}" has an invalid choice` });
           }
-        } else if (question.type === 'multiple_choice') {
+        } else if (['multiple_choice', 'checkbox'].includes(question.type)) {
           if (!Array.isArray(val) || !val.every(v => question.options.includes(String(v)))) {
             return res.status(400).json({ success: false, message: `Question "${question.label}" has invalid choices` });
           }
@@ -155,7 +179,7 @@ export const submitResponse = async (req, res, next) => {
         if (question.type !== 'file') {
           validAnswersToSave.push({
             questionId: question._id,
-            value: val
+            value: question.type === 'rating' ? Number(val) : val
           });
         }
       }
@@ -399,7 +423,7 @@ export const getAnalytics = async (req, res, next) => {
 
       let data = {};
 
-      if (['single_choice', 'multiple_choice', 'dropdown'].includes(type)) {
+      if (['single_choice', 'multiple_choice', 'checkbox', 'dropdown'].includes(type)) {
         const optionCounts = {};
         let selectionCount = 0;
 
@@ -439,10 +463,30 @@ export const getAnalytics = async (req, res, next) => {
         } else {
           data = { type: 'number', min: null, max: null, average: null };
         }
+      } else if (type === 'rating') {
+        const ratings = qData.values
+          .filter(v => (typeof v === 'number' || typeof v === 'string') && v !== '' && v !== null)
+          .map(v => Number(v))
+          .filter(v => Number.isInteger(v) && v >= 1 && v <= 5);
+
+        const distribution = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
+        ratings.forEach(r => {
+          distribution[r] = (distribution[r] || 0) + 1;
+        });
+
+        const sum = ratings.reduce((a, b) => a + b, 0);
+        const average = ratings.length > 0 ? Number((sum / ratings.length).toFixed(1)) : 0;
+
+        data = {
+          type: 'rating',
+          average,
+          distribution,
+          totalRatings: ratings.length
+        };
       } else if (type === 'file') {
         data = { type: 'file', count: qData.totalAnswers };
       } else {
-        // Text / Email types
+        // Text / Email / Date types
         data = { type: 'text', count: qData.totalAnswers };
       }
 

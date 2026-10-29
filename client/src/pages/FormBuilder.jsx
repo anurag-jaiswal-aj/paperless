@@ -17,6 +17,8 @@ const QUESTION_TYPES = [
   { value: 'single_choice', label: 'Single Choice' },
   { value: 'multiple_choice', label: 'Multiple Choice' },
   { value: 'dropdown', label: 'Dropdown' },
+  { value: 'rating', label: 'Rating' },
+  { value: 'date', label: 'Date' },
   { value: 'file', label: 'File Upload' }
 ];
 
@@ -375,7 +377,7 @@ const FormBuilder = () => {
 
                                 <div className="flex gap-3 flex-wrap items-center">
                                   <CustomSelect
-                                    value={question.type}
+                                    value={question.type === 'checkbox' ? 'multiple_choice' : question.type}
                                     onChange={(val) => handleUpdateQuestion(question._id, { type: val })}
                                     options={QUESTION_TYPES}
                                   />

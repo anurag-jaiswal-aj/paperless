@@ -295,6 +295,50 @@ describe('Responses Phase 7 AI Features', () => {
     });
   });
 
+  it('renders rating question analytics with average and star distribution', async () => {
+    api.get.mockImplementation((url) => {
+      if (url.includes('/api/forms/')) {
+        return Promise.resolve({ data: { success: true, data: { form: { _id: '123', title: 'Test Form' } } } });
+      }
+      if (url.includes('/api/responses/') && url.includes('limit=10')) {
+        return Promise.resolve({ data: { success: true, data: [{ _id: 'r1', answers: [] }], pagination: { pages: 1, page: 1 } } });
+      }
+      if (url.includes('/analytics')) {
+        return Promise.resolve({
+          data: {
+            success: true,
+            data: {
+              totalResponses: 5,
+              analytics: [
+                {
+                  questionId: 'q-rating',
+                  label: 'Customer Satisfaction',
+                  type: 'rating',
+                  totalAnswers: 5,
+                  data: {
+                    type: 'rating',
+                    average: 4.6,
+                    distribution: { 1: 0, 2: 0, 3: 1, 4: 1, 5: 3 },
+                    totalRatings: 5
+                  }
+                }
+              ]
+            }
+          }
+        });
+      }
+      return Promise.resolve({ data: {} });
+    });
+
+    renderComponent();
+
+    await waitFor(() => {
+      expect(screen.getByText('Customer Satisfaction')).toBeTruthy();
+      expect(screen.getByText(/Average:\s*4\.6\s*\/\s*5/)).toBeTruthy();
+      expect(screen.getByText('5 answers')).toBeTruthy();
+    });
+  });
+
   it('renders file-upload answers with original filename and semantic download link without crashing', async () => {
     api.get.mockImplementation((url) => {
       if (url.includes('/api/forms/')) {

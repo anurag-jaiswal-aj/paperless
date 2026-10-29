@@ -23,7 +23,7 @@ const sanitizeQuestions = (questions, existingLabels = []) => {
 
     // Apply type rules
     let options = [];
-    if (['single_choice', 'multiple_choice', 'dropdown'].includes(q.type)) {
+    if (['single_choice', 'multiple_choice', 'checkbox', 'dropdown'].includes(q.type)) {
       if (q.options && Array.isArray(q.options)) {
         options = [...new Set(q.options.map(o => o.trim()).filter(o => o.length > 0))];
       }
@@ -252,7 +252,7 @@ const buildSafeResponseDataset = async (form, reqQuery) => {
   const questions = await Question.find({ formId: form._id }).lean();
 
   // Filter questions that are semantic
-  const semanticTypes = new Set(['short_text', 'long_text', 'single_choice', 'multiple_choice', 'dropdown']);
+  const semanticTypes = new Set(['short_text', 'long_text', 'single_choice', 'multiple_choice', 'checkbox', 'dropdown', 'rating', 'date']);
   const semanticQuestions = questions.filter(q => semanticTypes.has(q.type));
   const qMap = new Map(semanticQuestions.map(q => [q._id.toString(), q.label]));
 

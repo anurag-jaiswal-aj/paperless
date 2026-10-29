@@ -156,6 +156,342 @@ describe('Response Controller - Phase 2', () => {
       expect(res.status).toBe(400);
       expect(res.body.message).toContain('invalid choice');
     });
+
+    it('should validate and save rating questions', async () => {
+      const qRating = await Question.create({
+        formId: form._id,
+        type: 'rating',
+        label: 'Overall Experience',
+        required: true,
+        order: 10
+      });
+
+      // Reject non-number
+      const resBadType = await request(app).post(`/api/responses/${form._id}`).send({
+        answers: [
+          { questionId: qText._id, value: 'John' },
+          { questionId: qEmail._id, value: 'test@test.com' },
+          { questionId: qChoice._id, value: 'Blue' },
+          { questionId: qRating._id, value: 'excellent' }
+        ]
+      });
+      expect(resBadType.status).toBe(400);
+      expect(resBadType.body.message).toContain('must be a rating between 1 and 5');
+
+      // Reject rating < 1
+      const resLow = await request(app).post(`/api/responses/${form._id}`).send({
+        answers: [
+          { questionId: qText._id, value: 'John' },
+          { questionId: qEmail._id, value: 'test@test.com' },
+          { questionId: qChoice._id, value: 'Blue' },
+          { questionId: qRating._id, value: 0 }
+        ]
+      });
+      expect(resLow.status).toBe(400);
+      expect(resLow.body.message).toContain('must be a rating between 1 and 5');
+
+      // Reject rating > 5
+      const resHigh = await request(app).post(`/api/responses/${form._id}`).send({
+        answers: [
+          { questionId: qText._id, value: 'John' },
+          { questionId: qEmail._id, value: 'test@test.com' },
+          { questionId: qChoice._id, value: 'Blue' },
+          { questionId: qRating._id, value: 6 }
+        ]
+      });
+      expect(resHigh.status).toBe(400);
+      expect(resHigh.body.message).toContain('must be a rating between 1 and 5');
+
+      // Reject non-integer rating
+      const resFloat = await request(app).post(`/api/responses/${form._id}`).send({
+        answers: [
+          { questionId: qText._id, value: 'John' },
+          { questionId: qEmail._id, value: 'test@test.com' },
+          { questionId: qChoice._id, value: 'Blue' },
+          { questionId: qRating._id, value: 4.5 }
+        ]
+      });
+      expect(resFloat.status).toBe(400);
+      expect(resFloat.body.message).toContain('must be a rating between 1 and 5');
+
+      // Reject boolean and array values
+      const resBool = await request(app).post(`/api/responses/${form._id}`).send({
+        answers: [
+          { questionId: qText._id, value: 'John' },
+          { questionId: qEmail._id, value: 'test@test.com' },
+          { questionId: qChoice._id, value: 'Blue' },
+          { questionId: qRating._id, value: true }
+        ]
+      });
+      expect(resBool.status).toBe(400);
+      expect(resBool.body.message).toContain('must be a rating between 1 and 5');
+
+      const resArr = await request(app).post(`/api/responses/${form._id}`).send({
+        answers: [
+          { questionId: qText._id, value: 'John' },
+          { questionId: qEmail._id, value: 'test@test.com' },
+          { questionId: qChoice._id, value: 'Blue' },
+          { questionId: qRating._id, value: [5] }
+        ]
+      });
+      expect(resArr.status).toBe(400);
+      expect(resArr.body.message).toContain('must be a rating between 1 and 5');
+
+      // Accept valid rating and store as number
+      const resValid = await request(app).post(`/api/responses/${form._id}`).send({
+        answers: [
+          { questionId: qText._id, value: 'John' },
+          { questionId: qEmail._id, value: 'test@test.com' },
+          { questionId: qChoice._id, value: 'Blue' },
+          { questionId: qRating._id, value: '5' }
+        ]
+      });
+      expect(resValid.status).toBe(201);
+
+      const saved = await Response.findOne({ formId: form._id }).sort({ createdAt: -1 });
+      const ratingAns = saved.answers.find(a => a.questionId.toString() === qRating._id.toString());
+      expect(ratingAns.value).toBe(5);
+    });
+
+    it('should validate and save date questions', async () => {
+      const qDate = await Question.create({
+        formId: form._id,
+        type: 'date',
+        label: 'Event Date',
+        required: true,
+        order: 11
+      });
+
+      // Reject invalid date string
+      const resBad = await request(app).post(`/api/responses/${form._id}`).send({
+        answers: [
+          { questionId: qText._id, value: 'John' },
+          { questionId: qEmail._id, value: 'test@test.com' },
+          { questionId: qChoice._id, value: 'Blue' },
+          { questionId: qDate._id, value: 'invalid-date-string' }
+        ]
+      });
+      expect(resBad.status).toBe(400);
+      expect(resBad.body.message).toContain('must be a valid date');
+
+      // Reject impossible calendar date (Feb 31)
+      const resFeb31 = await request(app).post(`/api/responses/${form._id}`).send({
+        answers: [
+          { questionId: qText._id, value: 'John' },
+          { questionId: qEmail._id, value: 'test@test.com' },
+          { questionId: qChoice._id, value: 'Blue' },
+          { questionId: qDate._id, value: '2026-02-31' }
+        ]
+      });
+      expect(resFeb31.status).toBe(400);
+      expect(resFeb31.body.message).toContain('must be a valid date');
+
+      // Reject impossible day in 30-day month (April 31)
+      const resApr31 = await request(app).post(`/api/responses/${form._id}`).send({
+        answers: [
+          { questionId: qText._id, value: 'John' },
+          { questionId: qEmail._id, value: 'test@test.com' },
+          { questionId: qChoice._id, value: 'Blue' },
+          { questionId: qDate._id, value: '2026-04-31' }
+        ]
+      });
+      expect(resApr31.status).toBe(400);
+      expect(resApr31.body.message).toContain('must be a valid date');
+
+      // Reject Feb 29 on non-leap year (2025)
+      const resNonLeap = await request(app).post(`/api/responses/${form._id}`).send({
+        answers: [
+          { questionId: qText._id, value: 'John' },
+          { questionId: qEmail._id, value: 'test@test.com' },
+          { questionId: qChoice._id, value: 'Blue' },
+          { questionId: qDate._id, value: '2025-02-29' }
+        ]
+      });
+      expect(resNonLeap.status).toBe(400);
+      expect(resNonLeap.body.message).toContain('must be a valid date');
+
+      // Reject century non-leap year (1900-02-29)
+      const res1900 = await request(app).post(`/api/responses/${form._id}`).send({
+        answers: [
+          { questionId: qText._id, value: 'John' },
+          { questionId: qEmail._id, value: 'test@test.com' },
+          { questionId: qChoice._id, value: 'Blue' },
+          { questionId: qDate._id, value: '1900-02-29' }
+        ]
+      });
+      expect(res1900.status).toBe(400);
+      expect(res1900.body.message).toContain('must be a valid date');
+
+      // Accept Feb 29 on leap year (2024)
+      const resLeap = await request(app).post(`/api/responses/${form._id}`).send({
+        answers: [
+          { questionId: qText._id, value: 'John' },
+          { questionId: qEmail._id, value: 'test@test.com' },
+          { questionId: qChoice._id, value: 'Blue' },
+          { questionId: qDate._id, value: '2024-02-29' }
+        ]
+      });
+      expect(resLeap.status).toBe(201);
+
+      // Accept valid YYYY-MM-DD date
+      const resValid = await request(app).post(`/api/responses/${form._id}`).send({
+        answers: [
+          { questionId: qText._id, value: 'John' },
+          { questionId: qEmail._id, value: 'test@test.com' },
+          { questionId: qChoice._id, value: 'Blue' },
+          { questionId: qDate._id, value: '2026-10-29' }
+        ]
+      });
+      expect(resValid.status).toBe(201);
+
+      const saved = await Response.findOne({ formId: form._id }).sort({ createdAt: -1 });
+      const dateAns = saved.answers.find(a => a.questionId.toString() === qDate._id.toString());
+      expect(dateAns.value).toBe('2026-10-29');
+
+      // Reject missing required date
+      const resMissingReq = await request(app).post(`/api/responses/${form._id}`).send({
+        answers: [
+          { questionId: qText._id, value: 'John' },
+          { questionId: qEmail._id, value: 'test@test.com' },
+          { questionId: qChoice._id, value: 'Blue' }
+        ]
+      });
+      expect(resMissingReq.status).toBe(400);
+      expect(resMissingReq.body.message).toContain('is required');
+
+      // Optional date question can be omitted safely
+      const qOptDate = await Question.create({
+        formId: form._id,
+        type: 'date',
+        label: 'Optional Completion Date',
+        required: false,
+        order: 12
+      });
+      expect(qOptDate.required).toBe(false);
+
+      const resOptOmitted = await request(app).post(`/api/responses/${form._id}`).send({
+        answers: [
+          { questionId: qText._id, value: 'John' },
+          { questionId: qEmail._id, value: 'test@test.com' },
+          { questionId: qChoice._id, value: 'Blue' },
+          { questionId: qDate._id, value: '2026-10-29' }
+          // qOptDate omitted
+        ]
+      });
+      expect(resOptOmitted.status).toBe(201);
+    });
+
+    it('should validate multiple_choice and checkbox array inputs', async () => {
+      const qMulti = await Question.create({
+        formId: form._id,
+        type: 'multiple_choice',
+        label: 'Hobbies',
+        required: true,
+        options: ['Reading', 'Gaming', 'Cooking'],
+        order: 12
+      });
+      const qCheck = await Question.create({
+        formId: form._id,
+        type: 'checkbox',
+        label: 'Languages',
+        required: false,
+        options: ['JS', 'Python', 'Go'],
+        order: 13
+      });
+
+      // Reject if value is not an array
+      const resNotArray = await request(app).post(`/api/responses/${form._id}`).send({
+        answers: [
+          { questionId: qText._id, value: 'John' },
+          { questionId: qEmail._id, value: 'test@test.com' },
+          { questionId: qChoice._id, value: 'Blue' },
+          { questionId: qMulti._id, value: 'Reading' }
+        ]
+      });
+      expect(resNotArray.status).toBe(400);
+      expect(resNotArray.body.message).toContain('invalid choices');
+
+      // Reject if an option is not in defined options
+      const resBadOpt = await request(app).post(`/api/responses/${form._id}`).send({
+        answers: [
+          { questionId: qText._id, value: 'John' },
+          { questionId: qEmail._id, value: 'test@test.com' },
+          { questionId: qChoice._id, value: 'Blue' },
+          { questionId: qMulti._id, value: ['Reading', 'Skydiving'] }
+        ]
+      });
+      expect(resBadOpt.status).toBe(400);
+      expect(resBadOpt.body.message).toContain('invalid choices');
+
+      // Accept valid array
+      const resValid = await request(app).post(`/api/responses/${form._id}`).send({
+        answers: [
+          { questionId: qText._id, value: 'John' },
+          { questionId: qEmail._id, value: 'test@test.com' },
+          { questionId: qChoice._id, value: 'Blue' },
+          { questionId: qMulti._id, value: ['Reading', 'Cooking'] },
+          { questionId: qCheck._id, value: ['JS', 'Go'] }
+        ]
+      });
+      expect(resValid.status).toBe(201);
+    });
+
+    it('should evaluate conditional visibility rules targeting rating, date, and multiple_choice', async () => {
+      const qRating = await Question.create({
+        formId: form._id,
+        type: 'rating',
+        label: 'Satisfaction',
+        required: true,
+        order: 14
+      });
+      const qFeedback = await Question.create({
+        formId: form._id,
+        type: 'short_text',
+        label: 'Why 5 stars?',
+        required: true,
+        visibilityRule: {
+          targetQuestionId: qRating._id.toString(),
+          operator: 'equals',
+          value: '5'
+        },
+        order: 15
+      });
+
+      // Rating is 4: qFeedback is hidden, so required rule is bypassed
+      const resHidden = await request(app).post(`/api/responses/${form._id}`).send({
+        answers: [
+          { questionId: qText._id, value: 'John' },
+          { questionId: qEmail._id, value: 'test@test.com' },
+          { questionId: qChoice._id, value: 'Blue' },
+          { questionId: qRating._id, value: 4 }
+        ]
+      });
+      expect(resHidden.status).toBe(201);
+
+      // Rating is 5: qFeedback is visible and required, so submission fails if omitted
+      const resVisibleMissing = await request(app).post(`/api/responses/${form._id}`).send({
+        answers: [
+          { questionId: qText._id, value: 'John' },
+          { questionId: qEmail._id, value: 'test@test.com' },
+          { questionId: qChoice._id, value: 'Blue' },
+          { questionId: qRating._id, value: 5 }
+        ]
+      });
+      expect(resVisibleMissing.status).toBe(400);
+      expect(resVisibleMissing.body.message).toContain('Why 5 stars?');
+
+      // Rating is 5: qFeedback is provided, so submission succeeds
+      const resVisibleSuccess = await request(app).post(`/api/responses/${form._id}`).send({
+        answers: [
+          { questionId: qText._id, value: 'John' },
+          { questionId: qEmail._id, value: 'test@test.com' },
+          { questionId: qChoice._id, value: 'Blue' },
+          { questionId: qRating._id, value: 5 },
+          { questionId: qFeedback._id, value: 'Loved the product!' }
+        ]
+      });
+      expect(resVisibleSuccess.status).toBe(201);
+    });
   });
 
   describe('File Upload Validation', () => {
@@ -350,7 +686,99 @@ describe('Response Controller - Phase 2', () => {
       expect(numberAnalytics.data.max).toBe(40);
       expect(numberAnalytics.data.average).toBe(30);
     });
+
+    it('should aggregate rating and checkbox analytics correctly', async () => {
+      const qRating = await Question.create({
+        formId: form._id,
+        type: 'rating',
+        label: 'Satisfaction',
+        required: false,
+        order: 20
+      });
+      const qCheck = await Question.create({
+        formId: form._id,
+        type: 'checkbox',
+        label: 'Interests',
+        options: ['Coding', 'Music', 'Design'],
+        required: false,
+        order: 21
+      });
+
+      await Response.create([
+        {
+          formId: form._id,
+          answers: [
+            { questionId: qRating._id, value: 5 },
+            { questionId: qCheck._id, value: ['Coding', 'Design'] }
+          ]
+        },
+        {
+          formId: form._id,
+          answers: [
+            { questionId: qRating._id, value: 4 },
+            { questionId: qCheck._id, value: ['Coding'] }
+          ]
+        },
+        {
+          formId: form._id,
+          answers: [
+            { questionId: qRating._id, value: 5 },
+            { questionId: qCheck._id, value: ['Music', 'Design'] }
+          ]
+        }
+      ]);
+
+      const res = await request(app)
+        .get(`/api/responses/${form._id}/analytics`)
+        .set('Cookie', [`token=${ownerToken}`]);
+
+      expect(res.status).toBe(200);
+      const data = res.body.data;
+
+      const ratingAnalytics = data.analytics.find(a => a.type === 'rating');
+      expect(ratingAnalytics).toBeDefined();
+      expect(ratingAnalytics.data.type).toBe('rating');
+      expect(ratingAnalytics.data.average).toBe(4.7);
+      expect(ratingAnalytics.data.distribution['5']).toBe(2);
+      expect(ratingAnalytics.data.distribution['4']).toBe(1);
+      expect(ratingAnalytics.data.distribution['1']).toBe(0);
+
+      const checkAnalytics = data.analytics.find(a => a.type === 'checkbox');
+      expect(checkAnalytics).toBeDefined();
+      expect(checkAnalytics.data.type).toBe('options');
+      expect(checkAnalytics.data.distribution.find(d => d.option === 'Coding').count).toBe(2);
+      expect(checkAnalytics.data.distribution.find(d => d.option === 'Design').count).toBe(2);
+      expect(checkAnalytics.data.distribution.find(d => d.option === 'Music').count).toBe(1);
+    });
+
+    it('returns stable 0 values for rating questions with empty responses or invalid entries', async () => {
+      const user = await User.findOne({ email: 'owner@test.com' });
+      const emptyForm = await Form.create({
+        ownerId: user._id,
+        title: 'Empty Form',
+        status: 'published'
+      });
+      const qRatingEmpty = await Question.create({
+        formId: emptyForm._id,
+        type: 'rating',
+        label: 'Unrated Service',
+        required: false,
+        order: 0
+      });
+
+      const res = await request(app)
+        .get(`/api/responses/${emptyForm._id}/analytics`)
+        .set('Cookie', [`token=${ownerToken}`]);
+
+      expect(res.status).toBe(200);
+      const ratingAnalytics = res.body.data.analytics.find(a => a.questionId.toString() === qRatingEmpty._id.toString());
+      expect(ratingAnalytics).toBeDefined();
+      expect(ratingAnalytics.data.average).toBe(0);
+      expect(ratingAnalytics.data.totalRatings).toBe(0);
+      expect(ratingAnalytics.data.distribution).toEqual({ 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 });
+    });
   });
+
   describe('CSV Utility Functions Unit Tests', () => {
     it('formatCsvAnswer handles all value variants deterministically', () => {
       expect(formatCsvAnswer(null)).toBe('');

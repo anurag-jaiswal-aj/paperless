@@ -3,7 +3,7 @@ import mongoose from 'mongoose';
 /**
  * Question Model
  * Stores individual questions for a form
- * Types: short_text, long_text, multiple_choice, checkbox, dropdown, rating, date, file
+ * Types: short_text, long_text, number, email, single_choice, multiple_choice, checkbox, dropdown, rating, date, file
  */
 const questionSchema = new mongoose.Schema({
   formId: {
@@ -22,7 +22,10 @@ const questionSchema = new mongoose.Schema({
       'email',
       'single_choice',
       'multiple_choice',
+      'checkbox',
       'dropdown',
+      'rating',
+      'date',
       'file'
     ]
   },

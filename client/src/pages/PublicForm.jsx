@@ -187,7 +187,7 @@ const PublicForm = () => {
       case 'single_choice':
         return (
           <div className="space-y-2">
-            {question.options.map((option, index) => (
+            {(question.options || []).map((option, index) => (
               <label key={index} className="flex items-center gap-2 cursor-pointer">
                 <input
                   type="radio"
@@ -208,7 +208,7 @@ const PublicForm = () => {
       case 'checkbox':
         return (
           <div className="space-y-2">
-            {question.options.map((option, index) => (
+            {(question.options || []).map((option, index) => (
               <label key={index} className="flex items-center gap-2 cursor-pointer">
                 <input
                   type="checkbox"
@@ -238,7 +238,7 @@ const PublicForm = () => {
             className="input"
           >
             <option value="">Select an option</option>
-            {question.options.map((option, index) => (
+            {(question.options || []).map((option, index) => (
               <option key={index} value={option}>
                 {option}
               </option>

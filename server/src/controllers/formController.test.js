@@ -135,6 +135,47 @@ describe('Form Controller - Phase 2', () => {
       expect(res.body.data.required).toBe(true);
     });
 
+    it('should support rating, date, and checkbox question types end-to-end', async () => {
+      const ratingRes = await request(app)
+        .post(`/api/forms/${form._id}/questions`)
+        .set('Cookie', [`token=${user1Token}`])
+        .send({ type: 'rating', label: 'How satisfied are you?', required: true });
+
+      expect(ratingRes.status).toBe(201);
+      expect(ratingRes.body.data.type).toBe('rating');
+
+      const dateRes = await request(app)
+        .post(`/api/forms/${form._id}/questions`)
+        .set('Cookie', [`token=${user1Token}`])
+        .send({ type: 'date', label: 'Preferred start date', required: false });
+
+      expect(dateRes.status).toBe(201);
+      expect(dateRes.body.data.type).toBe('date');
+
+      const checkboxRes = await request(app)
+        .post(`/api/forms/${form._id}/questions`)
+        .set('Cookie', [`token=${user1Token}`])
+        .send({
+          type: 'checkbox',
+          label: 'Select skills',
+          options: ['Node.js', 'React', 'MongoDB'],
+          required: false
+        });
+
+      expect(checkboxRes.status).toBe(201);
+      expect(checkboxRes.body.data.type).toBe('checkbox');
+    });
+
+    it('should reject invalid question types not in the schema enum', async () => {
+      const res = await request(app)
+        .post(`/api/forms/${form._id}/questions`)
+        .set('Cookie', [`token=${user1Token}`])
+        .send({ type: 'invalid_unsupported_type', label: 'Invalid Question' });
+
+      expect(res.status).toBeGreaterThanOrEqual(400);
+      expect(res.body.success).toBe(false);
+    });
+
     it('should allow reordering questions', async () => {
       const q1 = await Question.create({ formId: form._id, type: 'short_text', label: 'Q1', order: 0 });
       const q2 = await Question.create({ formId: form._id, type: 'short_text', label: 'Q2', order: 1 });
@@ -161,6 +202,7 @@ describe('Form Controller - Phase 2', () => {
       expect(updatedQ2.order).toBe(0);
     });
   });
+
   describe('Question Deletion and Orphaned Visibility Rule Cleanup', () => {
     let form;
     let otherForm;

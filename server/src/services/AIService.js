@@ -8,9 +8,12 @@ const GeneratedQuestionSchema = z.object({
     'long_text',
     'single_choice',
     'multiple_choice',
+    'checkbox',
     'dropdown',
     'number',
     'email',
+    'rating',
+    'date',
     'file'
   ]),
   label: z.string().describe('The question text'),
