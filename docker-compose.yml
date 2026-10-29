@@ -27,6 +27,7 @@ services:
       context: ./client
       args:
         - VITE_API_URL=${VITE_API_URL:-http://localhost:5000}
+        - VITE_BACKEND_URL=${VITE_BACKEND_URL:-${VITE_API_URL:-http://localhost:5000}}
     ports:
       - "80:80"
     restart: unless-stopped

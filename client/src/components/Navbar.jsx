@@ -1,7 +1,9 @@
+import { useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { useSelector, useDispatch } from 'react-redux';
 import { logout } from '../store/authSlice';
 import { toggleTheme } from '../store/themeSlice';
+import api from '../utils/api';
 import { FiSun, FiMoon, FiLogOut } from 'react-icons/fi';
 import { MdArrowForward } from 'react-icons/md';
 
@@ -10,9 +12,21 @@ const Navbar = () => {
   const location = useLocation();
   const { isAuthenticated, user } = useSelector((state) => state.auth);
   const { theme } = useSelector((state) => state.theme);
+  const [isLoggingOut, setIsLoggingOut] = useState(false);
 
-  const handleLogout = () => {
-    dispatch(logout());
+  const handleLogout = async () => {
+    if (isLoggingOut) return;
+    setIsLoggingOut(true);
+    api.invalidateAuthSession?.();
+    try {
+      await api.post('/api/auth/logout');
+    } catch (err) {
+      console.error('Logout error:', err.response?.data?.message || err.message);
+    } finally {
+      api.invalidateAuthSession?.();
+      dispatch(logout());
+      setIsLoggingOut(false);
+    }
   };
 
   const handleThemeToggle = () => {
@@ -49,9 +63,13 @@ const Navbar = () => {
                 <Link to="/dashboard" className="font-['Geist',sans-serif] text-[13px] leading-[20px] text-stitch-on-surface-variant hover:text-stitch-primary transition-colors">
                   Dashboard
                 </Link>
-                <button onClick={handleLogout} className="inline-flex items-center gap-[6px] font-['Geist',sans-serif] text-[13px] leading-[20px] text-stitch-on-surface-variant hover:text-stitch-primary transition-colors">
+                <button
+                  onClick={handleLogout}
+                  disabled={isLoggingOut}
+                  className="inline-flex items-center gap-[6px] font-['Geist',sans-serif] text-[13px] leading-[20px] text-stitch-on-surface-variant hover:text-stitch-primary transition-colors disabled:opacity-50"
+                >
                   <FiLogOut size={16} />
-                  <span>Logout</span>
+                  <span>{isLoggingOut ? 'Logging out...' : 'Logout'}</span>
                 </button>
                 <div className="w-8 h-8 rounded-full bg-stitch-primary flex items-center justify-center">
                   <span className="text-stitch-on-primary font-['Geist',sans-serif] text-[13px] leading-[20px] font-medium">{user?.name?.charAt(0)?.toUpperCase()}</span>
@@ -100,10 +118,11 @@ const Navbar = () => {
               <span className="text-sm opacity-70">{user?.name}</span>
               <button
                 onClick={handleLogout}
-                className="btn btn-secondary"
+                disabled={isLoggingOut}
+                className="btn btn-secondary disabled:opacity-50"
               >
                 <FiLogOut />
-                Logout
+                {isLoggingOut ? 'Logging out...' : 'Logout'}
               </button>
             </>
           ) : (

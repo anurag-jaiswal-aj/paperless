@@ -131,12 +131,28 @@ const Responses = () => {
   };
 
   const renderChart = (analyticsItem) => {
-    if (analyticsItem.data.type === 'options') {
+    if (analyticsItem.data?.type === 'options') {
       // Bar chart for choice questions
-      const chartData = Object.entries(analyticsItem.data.counts).map(([name, value]) => ({
-        name,
-        value
-      }));
+      let chartData = [];
+      if (Array.isArray(analyticsItem.data?.distribution)) {
+        chartData = analyticsItem.data.distribution.map((item) => ({
+          name: item.option,
+          value: item.count
+        }));
+      } else if (analyticsItem.data?.counts && typeof analyticsItem.data.counts === 'object') {
+        chartData = Object.entries(analyticsItem.data.counts).map(([name, value]) => ({
+          name,
+          value
+        }));
+      }
+
+      if (chartData.length === 0) {
+        return (
+          <div className="text-sm opacity-70">
+            No options data available
+          </div>
+        );
+      }
 
       return (
         <ResponsiveContainer width="100%" height={300}>
@@ -154,9 +170,38 @@ const Responses = () => {
           </BarChart>
         </ResponsiveContainer>
       );
-    } else if (analyticsItem.data.type === 'rating') {
+    } else if (analyticsItem.data?.type === 'number') {
+      const { min, max, average } = analyticsItem.data || {};
+      if (average === null || average === undefined) {
+        return (
+          <div className="text-sm opacity-70">
+            No numeric responses recorded
+          </div>
+        );
+      }
+
+      return (
+        <div className="grid grid-cols-3 gap-4">
+          <div className="p-4 bg-gray-50 dark:bg-surface-hover rounded-xl border border-gray-100 dark:border-border-default text-center">
+            <span className="text-xs uppercase tracking-wider opacity-70 block mb-1">Average</span>
+            <span className="text-2xl font-bold">{average}</span>
+          </div>
+          <div className="p-4 bg-gray-50 dark:bg-surface-hover rounded-xl border border-gray-100 dark:border-border-default text-center">
+            <span className="text-xs uppercase tracking-wider opacity-70 block mb-1">Min</span>
+            <span className="text-2xl font-bold">{min ?? 'N/A'}</span>
+          </div>
+          <div className="p-4 bg-gray-50 dark:bg-surface-hover rounded-xl border border-gray-100 dark:border-border-default text-center">
+            <span className="text-xs uppercase tracking-wider opacity-70 block mb-1">Max</span>
+            <span className="text-2xl font-bold">{max ?? 'N/A'}</span>
+          </div>
+        </div>
+      );
+    } else if (analyticsItem.data?.type === 'rating') {
       // Bar chart for ratings
-      const chartData = Object.entries(analyticsItem.data.distribution).map(([rating, count]) => ({
+      const distribution = analyticsItem.data?.distribution && typeof analyticsItem.data.distribution === 'object'
+        ? analyticsItem.data.distribution
+        : {};
+      const chartData = Object.entries(distribution).map(([rating, count]) => ({
         name: `${rating} ★`,
         value: count
       }));
@@ -164,7 +209,7 @@ const Responses = () => {
       return (
         <div>
           <div className="mb-4 text-lg font-medium">
-            Average: {analyticsItem.data.average} / 5
+            Average: {analyticsItem.data?.average ?? 0} / 5
           </div>
           <ResponsiveContainer width="100%" height={250}>
             <BarChart data={chartData}>

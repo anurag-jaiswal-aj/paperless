@@ -195,7 +195,7 @@ cp .env.example .env
 
 Required variables (use secure, random strings for secrets):
 ```env
-PORT=5000
+PORT=5001 # Default port 5001 avoids macOS AirPlay Receiver conflicts on port 5000
 NODE_ENV=development
 FRONTEND_URL=http://localhost:5173
 
@@ -226,7 +226,7 @@ EMAIL_FROM=noreply@yourdomain.com
 
 For the frontend, create a `.env` file in the `client` directory:
 ```env
-VITE_BACKEND_URL=http://localhost:5000
+VITE_BACKEND_URL=http://localhost:5001
 ```
 
 ### 3. Development

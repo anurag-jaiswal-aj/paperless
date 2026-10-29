@@ -1,7 +1,7 @@
 /**
  * @vitest-environment jsdom
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, beforeAll } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import Responses from './Responses';
 import { Provider } from 'react-redux';
@@ -9,6 +9,21 @@ import { BrowserRouter } from 'react-router-dom';
 import api from '../utils/api';
 
 vi.mock('../utils/api');
+
+beforeAll(() => {
+  global.ResizeObserver = class ResizeObserver {
+    constructor(callback) {
+      this.callback = callback;
+    }
+    observe(target) {
+      if (this.callback) {
+        this.callback([{ target, contentRect: { width: 500, height: 300 } }]);
+      }
+    }
+    unobserve() {}
+    disconnect() {}
+  };
+});
 
 const createMockStore = (initialState) => {
   return {
@@ -142,6 +157,141 @@ describe('Responses Phase 7 AI Features', () => {
       expect(screen.getByText('Cat desc')).toBeTruthy();
       expect(screen.getByText(/Includes Response IDs: #2, #Unknown/i)).toBeTruthy();
       expect(screen.getByText(/Response IDs: #1/i)).toBeTruthy();
+    });
+  });
+
+  it('renders choice question analytics using distribution structure without crashing', async () => {
+    api.get.mockImplementation((url) => {
+      if (url.includes('/api/forms/')) {
+        return Promise.resolve({ data: { success: true, data: { form: { _id: '123', title: 'Test Form' } } } });
+      }
+      if (url.includes('/api/responses/') && url.includes('limit=10')) {
+        return Promise.resolve({ data: { success: true, data: [{ _id: 'r1', answers: [] }], pagination: { pages: 1, page: 1 } } });
+      }
+      if (url.includes('/analytics')) {
+        return Promise.resolve({
+          data: {
+            success: true,
+            data: {
+              totalResponses: 2,
+              analytics: [
+                {
+                  questionId: 'q-choice',
+                  label: 'Preferred Platform',
+                  type: 'single_choice',
+                  totalAnswers: 2,
+                  data: {
+                    type: 'options',
+                    distribution: [
+                      { option: 'Web', count: 2, percentage: 100 },
+                      { option: 'Mobile', count: 0, percentage: 0 }
+                    ],
+                    totalSelections: 2
+                  }
+                }
+              ]
+            }
+          }
+        });
+      }
+      return Promise.resolve({ data: {} });
+    });
+
+    renderComponent();
+
+    await waitFor(() => {
+      expect(screen.getByText('Preferred Platform')).toBeTruthy();
+      expect(screen.getByText('2 answers')).toBeTruthy();
+    });
+  });
+
+  it('handles empty choice distribution safely', async () => {
+    api.get.mockImplementation((url) => {
+      if (url.includes('/api/forms/')) {
+        return Promise.resolve({ data: { success: true, data: { form: { _id: '123', title: 'Test Form' } } } });
+      }
+      if (url.includes('/api/responses/') && url.includes('limit=10')) {
+        return Promise.resolve({ data: { success: true, data: [{ _id: 'r1', answers: [] }], pagination: { pages: 1, page: 1 } } });
+      }
+      if (url.includes('/analytics')) {
+        return Promise.resolve({
+          data: {
+            success: true,
+            data: {
+              totalResponses: 0,
+              analytics: [
+                {
+                  questionId: 'q-choice-empty',
+                  label: 'Empty Choice Question',
+                  type: 'single_choice',
+                  totalAnswers: 0,
+                  data: {
+                    type: 'options',
+                    distribution: [],
+                    totalSelections: 0
+                  }
+                }
+              ]
+            }
+          }
+        });
+      }
+      return Promise.resolve({ data: {} });
+    });
+
+    renderComponent();
+
+    await waitFor(() => {
+      expect(screen.getByText('Empty Choice Question')).toBeTruthy();
+      expect(screen.getByText('No options data available')).toBeTruthy();
+    });
+  });
+
+  it('renders numeric question analytics with min, max, and average', async () => {
+    api.get.mockImplementation((url) => {
+      if (url.includes('/api/forms/')) {
+        return Promise.resolve({ data: { success: true, data: { form: { _id: '123', title: 'Test Form' } } } });
+      }
+      if (url.includes('/api/responses/') && url.includes('limit=10')) {
+        return Promise.resolve({ data: { success: true, data: [{ _id: 'r1', answers: [] }], pagination: { pages: 1, page: 1 } } });
+      }
+      if (url.includes('/analytics')) {
+        return Promise.resolve({
+          data: {
+            success: true,
+            data: {
+              totalResponses: 3,
+              analytics: [
+                {
+                  questionId: 'q-number',
+                  label: 'Rate your team size',
+                  type: 'number',
+                  totalAnswers: 3,
+                  data: {
+                    type: 'number',
+                    min: 5,
+                    max: 25,
+                    average: 15
+                  }
+                }
+              ]
+            }
+          }
+        });
+      }
+      return Promise.resolve({ data: {} });
+    });
+
+    renderComponent();
+
+    await waitFor(() => {
+      expect(screen.getByText('Rate your team size')).toBeTruthy();
+      expect(screen.getByText('Average')).toBeTruthy();
+      expect(screen.getByText('15')).toBeTruthy();
+      expect(screen.getByText('Min')).toBeTruthy();
+      expect(screen.getByText('5')).toBeTruthy();
+      expect(screen.getByText('Max')).toBeTruthy();
+      expect(screen.getByText('25')).toBeTruthy();
     });
   });
 });

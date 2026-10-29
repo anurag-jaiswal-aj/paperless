@@ -2,7 +2,9 @@ FROM node:20-alpine AS builder
 WORKDIR /app
 # Build argument for API URL during build time
 ARG VITE_API_URL
+ARG VITE_BACKEND_URL
 ENV VITE_API_URL=$VITE_API_URL
+ENV VITE_BACKEND_URL=$VITE_BACKEND_URL
 COPY package*.json ./
 RUN npm ci
 COPY . .
