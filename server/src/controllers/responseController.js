@@ -473,6 +473,134 @@ export const getAnalytics = async (req, res, next) => {
 };
 
 /**
+ * Formats an answer value of any shape into a clean string representation for CSV export.
+ * Handles strings, numbers, booleans, arrays, file upload objects, and unexpected objects
+ * deterministically without crashing or producing [object Object].
+ */
+export const formatCsvAnswer = (value) => {
+  if (value === null || value === undefined) {
+    return '';
+  }
+
+  if (typeof value === 'boolean') {
+    return value ? 'true' : 'false';
+  }
+
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? String(value) : '';
+  }
+
+  if (typeof value === 'string') {
+    return value;
+  }
+
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => formatCsvAnswer(item))
+      .filter((item) => item !== '')
+      .join('; ');
+  }
+
+  if (typeof value === 'object') {
+    // Check if it's a file upload answer object
+    const isFile =
+      Boolean(value.originalName) ||
+      Boolean(value.fileName) ||
+      Boolean(value.filename) ||
+      Boolean(value.name) ||
+      Boolean(value.key) ||
+      Boolean(value.mimeType);
+
+    if (isFile) {
+      return (
+        value.originalName ||
+        value.fileName ||
+        value.filename ||
+        value.name ||
+        (typeof value.key === 'string' ? value.key.split('/').pop() : null) ||
+        'Attached File'
+      );
+    }
+
+    // Unexpected object: serialize deterministically with JSON to avoid [object Object]
+    try {
+      const json = JSON.stringify(value);
+      return json === '{}' ? '' : json;
+    } catch {
+      return '';
+    }
+  }
+
+  return String(value);
+};
+
+/**
+ * Sanitizes a cell value to prevent CSV / Spreadsheet Formula Injection (CWE-1236).
+ * Prepends a single quote (') if the field starts with '=', '+', '-', '@', tab (\t),
+ * carriage return (\r), or leading whitespace followed by a formula trigger,
+ * unless the value is a valid numeric literal (e.g. -5, +42, -12.34).
+ */
+export const sanitizeCsvCell = (value) => {
+  if (value === null || value === undefined) {
+    return '';
+  }
+
+  const str = String(value);
+  if (!str) {
+    return '';
+  }
+
+  const trimmedStart = str.trimStart();
+  if (!trimmedStart) {
+    // String is only whitespace
+    return str;
+  }
+
+  const firstChar = str[0];
+  const firstTrimmedChar = trimmedStart[0];
+
+  const startsWithTrigger =
+    firstChar === '=' ||
+    firstChar === '+' ||
+    firstChar === '-' ||
+    firstChar === '@' ||
+    firstChar === '\t' ||
+    firstChar === '\r' ||
+    firstTrimmedChar === '=' ||
+    firstTrimmedChar === '+' ||
+    firstTrimmedChar === '-' ||
+    firstTrimmedChar === '@';
+
+  if (startsWithTrigger) {
+    // Check if it's an ordinary numeric literal (e.g., "-5", "-12.34", "+42")
+    const isNumeric = /^[+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?$/.test(str.trim());
+    if (isNumeric) {
+      return str;
+    }
+
+    // Prepend single quote to neutralize formula execution in spreadsheet applications
+    return `'${str}`;
+  }
+
+  return str;
+};
+
+/**
+ * Escapes and encloses a cell value according to RFC 4180.
+ * Double quotes inside the cell are escaped by doubling them (" -> "").
+ * Every cell is enclosed in double quotes to reliably handle commas, newlines, and quotes.
+ */
+export const escapeCsvCell = (value) => {
+  if (value === null || value === undefined) {
+    return '""';
+  }
+
+  const str = String(value);
+  const escaped = str.replace(/"/g, '""');
+  return `"${escaped}"`;
+};
+
+/**
  * @route   GET /api/responses/:formId/export
  * @desc    Export responses as JSON or CSV
  * @access  Private (owner only)
@@ -521,26 +649,33 @@ export const exportResponses = async (req, res, next) => {
       // Generate CSV
       const headers = ['Timestamp', ...questions.map((q) => q.label)];
       const rows = responses.map((response) => {
-        const row = [new Date(response.createdAt).toISOString()];
+        const timestamp = response.createdAt
+          ? new Date(response.createdAt).toISOString()
+          : '';
+        const row = [timestamp];
+
         questions.forEach((question) => {
-          const answer = response.answers.find(
-            (a) => a.questionId.toString() === question._id.toString()
-          );
-          const value = answer
-            ? Array.isArray(answer.value)
-              ? answer.value.join('; ')
-              : answer.value
-            : '';
-          row.push(value);
+          const answer = response.answers.find((a) => {
+            const aQId = (a.questionId?._id || a.questionId)?.toString();
+            return aQId === question._id.toString();
+          });
+
+          const rawValue = answer ? answer.value : '';
+          const formattedValue = formatCsvAnswer(rawValue);
+          row.push(formattedValue);
         });
+
         return row;
       });
 
-      const csv = [headers, ...rows]
-        .map((row) => row.map((cell) => `"${cell}"`).join(','))
-        .join('\n');
+      const csv = [
+        headers.map((h) => escapeCsvCell(sanitizeCsvCell(h))).join(','),
+        ...rows.map((row) =>
+          row.map((cell) => escapeCsvCell(sanitizeCsvCell(cell))).join(',')
+        )
+      ].join('\r\n');
 
-      res.setHeader('Content-Type', 'text/csv');
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
       res.setHeader(
         'Content-Disposition',
         `attachment; filename="responses-${req.params.formId}.csv"`
