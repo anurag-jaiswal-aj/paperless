@@ -22,14 +22,52 @@ const QUESTION_TYPES = [
   { value: 'file', label: 'File Upload' }
 ];
 
+const MAX_OCC_RETRIES = 3;
+
 const FormBuilder = () => {
   const { id } = useParams();
   const navigate = useNavigate();
   const dispatch = useDispatch();
-  const { questions, loading } = useSelector((state) => state.forms);
+  const { currentForm, questions, loading } = useSelector((state) => state.forms);
+  const questionsRef = useRef(questions);
+  useEffect(() => {
+    questionsRef.current = questions;
+  }, [questions]);
 
-  const [formData, setFormData] = useState({ title: '', description: '', status: 'draft' });
+  const [formData, setFormData] = useState(() => ({
+    title: currentForm?.title || '',
+    description: currentForm?.description || '',
+    status: currentForm?.status || 'draft'
+  }));
+  const formDataRef = useRef(formData);
+  const lastSavedFormRef = useRef({
+    title: currentForm?.title || '',
+    description: currentForm?.description || '',
+    status: currentForm?.status || 'draft'
+  });
+  const formUpdateSeqRef = useRef(0);
+  const formPendingTimerRef = useRef(null);
+
+  const [saveStatus, setSaveStatus] = useState('saved'); // 'saved' | 'saving' | 'error' | 'unsaved'
+  const questionVersionsRef = useRef({});
+  const formVersionRef = useRef(undefined);
+  const questionConflictRetriesRef = useRef({});
+  const formConflictRetriesRef = useRef(0);
+  const questionInFlightRef = useRef({});
+  const formInFlightRef = useRef(false);
+  const formPendingUpdatesRef = useRef({});
+  const flushQuestionUpdateRef = useRef();
+  const flushFormUpdateRef = useRef();
+
+  const isMountedRef = useRef(true);
+  const activeFormIdRef = useRef(id);
+
   const statusUpdateSeqRef = useRef(0);
+  const questionSeqRef = useRef({});
+  const questionPendingTimersRef = useRef({});
+  const questionPendingUpdatesRef = useRef({});
+  const deletedQuestionsRef = useRef(new Set());
+
   const [showAIModal, setShowAIModal] = useState(false);
   const [aiTopic, setAiTopic] = useState('');
   const [aiLoading, setAiLoading] = useState(false);
@@ -40,18 +78,55 @@ const FormBuilder = () => {
   const [consultantData, setConsultantData] = useState(null);
   const [proposedQuestions, setProposedQuestions] = useState([]);
 
+  const checkIfAllSaved = useCallback(() => {
+    const hasPendingQuestions = Object.values(questionPendingUpdatesRef.current).some(
+      (u) => u && Object.keys(u).length > 0
+    );
+    const hasPendingForm = Object.keys(formPendingUpdatesRef.current).length > 0;
+    const isQuestionInFlight = Object.values(questionInFlightRef.current).some(Boolean);
+    const isFormInFlight = formInFlightRef.current;
+
+    if (!hasPendingQuestions && !hasPendingForm && !isQuestionInFlight && !isFormInFlight) {
+      setSaveStatus('saved');
+    }
+  }, []);
+
   const fetchFormData = useCallback(async () => {
     dispatch(setLoading(true));
     try {
       const response = await api.get(`/api/forms/${id}`);
-      if (response.data.success) {
+      if (response?.data?.success && response.data?.data) {
         dispatch(setCurrentForm(response.data.data.form));
         dispatch(setQuestions(response.data.data.questions));
-        setFormData({
-          title: response.data.data.form.title,
-          description: response.data.data.form.description,
-          status: response.data.data.form.status || 'draft'
+        const loadedForm = response.data.data.form;
+
+        if (loadedForm?.version !== undefined) {
+          formVersionRef.current = loadedForm.version;
+        }
+
+        if (Array.isArray(response.data.data.questions)) {
+          response.data.data.questions.forEach((q) => {
+            if (q.version !== undefined) {
+              questionVersionsRef.current[q._id] = q.version;
+            }
+          });
+        }
+
+        const newFormState = {
+          title: loadedForm.title || '',
+          description: loadedForm.description || '',
+          status: loadedForm.status || 'draft'
+        };
+        setFormData((prev) => {
+          if (!prev.title && !prev.description) {
+            formDataRef.current = newFormState;
+            lastSavedFormRef.current = { ...newFormState };
+            return newFormState;
+          }
+          lastSavedFormRef.current = { ...newFormState };
+          return prev;
         });
+        setSaveStatus('saved');
       }
     } catch (err) {
       alert('Failed to load form');
@@ -60,47 +135,596 @@ const FormBuilder = () => {
   }, [dispatch, id, navigate]);
 
   useEffect(() => {
-    // eslint-disable-next-line
-    fetchFormData();
-  }, [fetchFormData]);
+    const handleBeforeUnload = (e) => {
+      const hasPendingQuestions = Object.values(questionPendingUpdatesRef.current).some(
+        (u) => u && Object.keys(u).length > 0
+      );
+      const hasPendingForm = Object.keys(formPendingUpdatesRef.current).length > 0;
+      const isSaving =
+        formInFlightRef.current || Object.values(questionInFlightRef.current).some(Boolean);
 
-  const handleFormUpdate = async () => {
+      if (hasPendingQuestions || hasPendingForm || isSaving) {
+        e.preventDefault();
+        e.returnValue = '';
+        return '';
+      }
+    };
+
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => {
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+    };
+  }, []);
+
+  const flushQuestionUpdate = useCallback(async (questionId, explicitSeq = null) => {
+    if (!isMountedRef.current || activeFormIdRef.current !== id) return;
+    if (deletedQuestionsRef.current.has(questionId)) return;
+
+    if (questionPendingTimersRef.current[questionId]) {
+      clearTimeout(questionPendingTimersRef.current[questionId]);
+      delete questionPendingTimersRef.current[questionId];
+    }
+
+    if (questionInFlightRef.current[questionId]) {
+      return;
+    }
+
+    const updates = questionPendingUpdatesRef.current[questionId];
+    if (!updates || Object.keys(updates).length === 0) return;
+
+    const payloadToSend = { ...updates };
+    delete questionPendingUpdatesRef.current[questionId];
+
+    const seq = explicitSeq !== null ? explicitSeq : ((questionSeqRef.current[questionId] || 0) + 1);
+    questionSeqRef.current[questionId] = seq;
+
+    questionInFlightRef.current[questionId] = true;
+    setSaveStatus('saving');
+
+    const qVersion = questionVersionsRef.current[questionId];
+    const requestPayload = {
+      ...payloadToSend,
+      ...(qVersion !== undefined ? { version: qVersion } : {})
+    };
+
     try {
-      await api.put(`/api/forms/${id}`, formData);
-      alert('Form updated successfully');
+      const response = await api.put(`/api/forms/${id}/questions/${questionId}`, requestPayload);
+      questionInFlightRef.current[questionId] = false;
+
+      if (
+        !isMountedRef.current ||
+        activeFormIdRef.current !== id ||
+        deletedQuestionsRef.current.has(questionId) ||
+        seq !== questionSeqRef.current[questionId]
+      ) {
+        return;
+      }
+
+      if (response.data?.success && response.data?.data) {
+        questionConflictRetriesRef.current[questionId] = 0;
+        if (response.data.data.version !== undefined) {
+          questionVersionsRef.current[questionId] = response.data.data.version;
+        }
+
+        const hasNewerPending = Boolean(
+          questionPendingUpdatesRef.current[questionId] &&
+          Object.keys(questionPendingUpdatesRef.current[questionId]).length > 0
+        );
+
+        const currentQ = questionsRef.current.find((q) => q._id === questionId);
+        const mergedData = {
+          ...response.data.data,
+          order: currentQ ? currentQ.order : response.data.data.order
+        };
+
+        if (hasNewerPending) {
+          Object.assign(mergedData, questionPendingUpdatesRef.current[questionId]);
+        }
+
+        dispatch(updateQuestion(mergedData));
+
+        if (hasNewerPending) {
+          flushQuestionUpdateRef.current?.(questionId);
+        } else {
+          checkIfAllSaved();
+        }
+      }
     } catch (err) {
-      alert('Failed to update form');
+      questionInFlightRef.current[questionId] = false;
+
+      if (
+        !isMountedRef.current ||
+        activeFormIdRef.current !== id ||
+        deletedQuestionsRef.current.has(questionId)
+      ) {
+        return;
+      }
+
+      if (err.response?.status === 409) {
+        const latestServerDoc = err.response.data?.data;
+        if (latestServerDoc?.version !== undefined) {
+          questionVersionsRef.current[questionId] = latestServerDoc.version;
+        }
+
+        questionPendingUpdatesRef.current[questionId] = {
+          ...payloadToSend,
+          ...(questionPendingUpdatesRef.current[questionId] || {})
+        };
+
+        if (latestServerDoc) {
+          const currentQ = questionsRef.current.find((q) => q._id === questionId);
+          const userEdits = questionPendingUpdatesRef.current[questionId] || {};
+          const reconciled = {
+            ...latestServerDoc,
+            order: currentQ ? currentQ.order : latestServerDoc.order,
+            ...userEdits
+          };
+          dispatch(updateQuestion(reconciled));
+        }
+
+        const retries = (questionConflictRetriesRef.current[questionId] || 0) + 1;
+        questionConflictRetriesRef.current[questionId] = retries;
+
+        if (retries <= MAX_OCC_RETRIES) {
+          flushQuestionUpdateRef.current?.(questionId);
+          return;
+        }
+
+        setSaveStatus('error');
+        return;
+      }
+
+      questionPendingUpdatesRef.current[questionId] = {
+        ...payloadToSend,
+        ...(questionPendingUpdatesRef.current[questionId] || {})
+      };
+
+      setSaveStatus('error');
+      alert(err.response?.data?.message || 'Failed to update question');
+    }
+  }, [id, dispatch, checkIfAllSaved]);
+
+  const flushAllPendingQuestionUpdates = useCallback(async () => {
+    const pendingIds = Object.keys(questionPendingUpdatesRef.current);
+    for (const qId of pendingIds) {
+      if (questionPendingTimersRef.current[qId]) {
+        clearTimeout(questionPendingTimersRef.current[qId]);
+        delete questionPendingTimersRef.current[qId];
+      }
+      await flushQuestionUpdate(qId);
+    }
+  }, [flushQuestionUpdate]);
+
+  const flushFormUpdate = useCallback(async () => {
+    if (!isMountedRef.current || activeFormIdRef.current !== id) return;
+    if (formPendingTimerRef.current) {
+      clearTimeout(formPendingTimerRef.current);
+      formPendingTimerRef.current = null;
+    }
+
+    if (formInFlightRef.current) return;
+
+    const currentTitle = formPendingUpdatesRef.current.title !== undefined
+      ? formPendingUpdatesRef.current.title
+      : formDataRef.current.title;
+    const currentDesc = formPendingUpdatesRef.current.description !== undefined
+      ? formPendingUpdatesRef.current.description
+      : formDataRef.current.description;
+
+    if (
+      currentTitle === lastSavedFormRef.current.title &&
+      currentDesc === lastSavedFormRef.current.description &&
+      Object.keys(formPendingUpdatesRef.current).length === 0
+    ) {
+      return;
+    }
+
+    formPendingUpdatesRef.current = {};
+    formInFlightRef.current = true;
+    setSaveStatus('saving');
+
+    const currentSeq = ++formUpdateSeqRef.current;
+    const requestPayload = {
+      title: currentTitle,
+      description: currentDesc,
+      ...(formVersionRef.current !== undefined ? { version: formVersionRef.current } : {})
+    };
+
+    try {
+      const response = await api.put(`/api/forms/${id}`, requestPayload);
+      formInFlightRef.current = false;
+
+      if (
+        isMountedRef.current &&
+        activeFormIdRef.current === id &&
+        currentSeq === formUpdateSeqRef.current
+      ) {
+        if (response.data?.success) {
+          formConflictRetriesRef.current = 0;
+          if (response.data.data?.version !== undefined) {
+            formVersionRef.current = response.data.data.version;
+          }
+          if (response.data.data?.title !== undefined) {
+            lastSavedFormRef.current.title = response.data.data.title;
+          } else {
+            lastSavedFormRef.current.title = currentTitle;
+          }
+          if (response.data.data?.description !== undefined) {
+            lastSavedFormRef.current.description = response.data.data.description;
+          } else {
+            lastSavedFormRef.current.description = currentDesc;
+          }
+          if (response.data.data) {
+            dispatch(setCurrentForm(response.data.data));
+          }
+
+          const hasNewer = Object.keys(formPendingUpdatesRef.current).length > 0;
+          if (hasNewer) {
+            flushFormUpdateRef.current?.();
+          } else {
+            checkIfAllSaved();
+          }
+        }
+      }
+    } catch (err) {
+      formInFlightRef.current = false;
+
+      if (
+        isMountedRef.current &&
+        activeFormIdRef.current === id &&
+        currentSeq === formUpdateSeqRef.current
+      ) {
+        if (err.response?.status === 409) {
+          const latestDoc = err.response.data?.data;
+          if (latestDoc?.version !== undefined) {
+            formVersionRef.current = latestDoc.version;
+          }
+
+          const pendingEdits = {
+            ...(currentTitle !== lastSavedFormRef.current.title ? { title: currentTitle } : {}),
+            ...(currentDesc !== lastSavedFormRef.current.description ? { description: currentDesc } : {}),
+            ...formPendingUpdatesRef.current
+          };
+          formPendingUpdatesRef.current = pendingEdits;
+
+          if (latestDoc) {
+            const reconciledForm = {
+              ...latestDoc,
+              ...formDataRef.current,
+              ...pendingEdits
+            };
+            formDataRef.current = {
+              title: reconciledForm.title || '',
+              description: reconciledForm.description || '',
+              status: reconciledForm.status || 'draft'
+            };
+            setFormData(formDataRef.current);
+            dispatch(setCurrentForm(reconciledForm));
+            if (!pendingEdits.title && latestDoc.title !== undefined) {
+              lastSavedFormRef.current.title = latestDoc.title;
+            }
+            if (!pendingEdits.description && latestDoc.description !== undefined) {
+              lastSavedFormRef.current.description = latestDoc.description;
+            }
+          }
+
+          const retries = (formConflictRetriesRef.current || 0) + 1;
+          formConflictRetriesRef.current = retries;
+
+          if (retries <= MAX_OCC_RETRIES) {
+            flushFormUpdateRef.current?.();
+            return;
+          }
+
+          setSaveStatus('error');
+          return;
+        }
+
+        formPendingUpdatesRef.current = {
+          title: currentTitle,
+          description: currentDesc,
+          ...formPendingUpdatesRef.current
+        };
+
+        setSaveStatus('error');
+        alert(err.response?.data?.message || 'Failed to update form');
+      }
+    }
+  }, [id, dispatch, checkIfAllSaved]);
+
+  useEffect(() => {
+    flushQuestionUpdateRef.current = flushQuestionUpdate;
+    flushFormUpdateRef.current = flushFormUpdate;
+  }, [flushQuestionUpdate, flushFormUpdate]);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    activeFormIdRef.current = id;
+    deletedQuestionsRef.current.clear();
+    questionSeqRef.current = {};
+    questionPendingUpdatesRef.current = {};
+    questionVersionsRef.current = {};
+    questionInFlightRef.current = {};
+    questionConflictRetriesRef.current = {};
+    formConflictRetriesRef.current = 0;
+    formInFlightRef.current = false;
+    formPendingUpdatesRef.current = {};
+    formVersionRef.current = undefined;
+
+    // Clear any timers from a previous form or mount
+    Object.values(questionPendingTimersRef.current).forEach(clearTimeout);
+    questionPendingTimersRef.current = {};
+    if (formPendingTimerRef.current) {
+      clearTimeout(formPendingTimerRef.current);
+      formPendingTimerRef.current = null;
+    }
+
+    fetchFormData();
+
+    return () => {
+      // Best-effort flush for any pending edits before unmounting
+      flushAllPendingQuestionUpdates();
+      flushFormUpdate();
+
+      isMountedRef.current = false;
+      Object.values(questionPendingTimersRef.current).forEach(clearTimeout);
+      questionPendingTimersRef.current = {};
+      if (formPendingTimerRef.current) {
+        clearTimeout(formPendingTimerRef.current);
+        formPendingTimerRef.current = null;
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id]);
+
+  const handleFormTextChange = (field, val) => {
+    formDataRef.current = {
+      ...formDataRef.current,
+      [field]: val
+    };
+    setFormData(formDataRef.current);
+
+    formPendingUpdatesRef.current = {
+      ...formPendingUpdatesRef.current,
+      [field]: val
+    };
+
+    setSaveStatus('unsaved');
+
+    if (formPendingTimerRef.current) {
+      clearTimeout(formPendingTimerRef.current);
+    }
+    formPendingTimerRef.current = setTimeout(() => {
+      flushFormUpdate();
+    }, 400);
+  };
+
+  const handleFormBlur = () => {
+    if (formPendingTimerRef.current) {
+      clearTimeout(formPendingTimerRef.current);
+      formPendingTimerRef.current = null;
+      flushFormUpdate();
     }
   };
 
   const handleStatusChange = async (newStatus) => {
     if (!newStatus || newStatus === formData.status) return;
 
+    if (formPendingTimerRef.current) {
+      clearTimeout(formPendingTimerRef.current);
+      formPendingTimerRef.current = null;
+      await flushFormUpdate();
+    }
+
     const previousStatus = formData.status;
     const currentSeq = ++statusUpdateSeqRef.current;
 
-    setFormData((prev) => ({ ...prev, status: newStatus }));
+    setFormData((prev) => {
+      const updated = { ...prev, status: newStatus };
+      formDataRef.current = updated;
+      return updated;
+    });
+
+    const requestPayload = {
+      status: newStatus,
+      ...(formVersionRef.current !== undefined ? { version: formVersionRef.current } : {})
+    };
 
     try {
-      const response = await api.put(`/api/forms/${id}`, { status: newStatus });
+      const response = await api.put(`/api/forms/${id}`, requestPayload);
       if (currentSeq === statusUpdateSeqRef.current) {
         if (response.data?.success && response.data?.data) {
+          if (response.data.data.version !== undefined) {
+            formVersionRef.current = response.data.data.version;
+          }
           dispatch(setCurrentForm(response.data.data));
-          setFormData((prev) => ({
-            ...prev,
-            status: response.data.data.status || newStatus
-          }));
+          setFormData((prev) => {
+            const updated = {
+              ...prev,
+              status: response.data.data.status || newStatus
+            };
+            formDataRef.current = updated;
+            return updated;
+          });
+          lastSavedFormRef.current.status = response.data.data.status || newStatus;
         }
       }
     } catch (err) {
       if (currentSeq === statusUpdateSeqRef.current) {
-        setFormData((prev) => ({ ...prev, status: previousStatus }));
+        setFormData((prev) => {
+          const reverted = { ...prev, status: previousStatus };
+          formDataRef.current = reverted;
+          return reverted;
+        });
         alert(err.response?.data?.message || 'Failed to update form status');
       }
     }
   };
 
+  const handleDebouncedQuestionUpdate = useCallback((questionId, updates) => {
+    if (deletedQuestionsRef.current.has(questionId)) return;
+
+    // Optimistic update in Redux for immediate UI responsiveness
+    dispatch(updateQuestion({ _id: questionId, ...updates }));
+
+    // Accumulate pending updates
+    questionPendingUpdatesRef.current[questionId] = {
+      ...(questionPendingUpdatesRef.current[questionId] || {}),
+      ...updates
+    };
+
+    setSaveStatus('unsaved');
+
+    // Increment sequence number
+    const seq = (questionSeqRef.current[questionId] || 0) + 1;
+    questionSeqRef.current[questionId] = seq;
+
+    // Schedule debounced flush
+    if (questionPendingTimersRef.current[questionId]) {
+      clearTimeout(questionPendingTimersRef.current[questionId]);
+    }
+    questionPendingTimersRef.current[questionId] = setTimeout(() => {
+      flushQuestionUpdate(questionId, seq);
+    }, 300);
+  }, [dispatch, flushQuestionUpdate]);
+
+  const handleImmediateQuestionUpdate = useCallback(async (questionId, updates) => {
+    if (deletedQuestionsRef.current.has(questionId)) return;
+
+    // Clear any pending debounce timer
+    if (questionPendingTimersRef.current[questionId]) {
+      clearTimeout(questionPendingTimersRef.current[questionId]);
+      delete questionPendingTimersRef.current[questionId];
+    }
+
+    // Merge with any existing pending updates
+    const combinedUpdates = {
+      ...(questionPendingUpdatesRef.current[questionId] || {}),
+      ...updates
+    };
+    delete questionPendingUpdatesRef.current[questionId];
+
+    // Optimistic Redux update
+    dispatch(updateQuestion({ _id: questionId, ...combinedUpdates }));
+
+    // Increment sequence
+    const seq = (questionSeqRef.current[questionId] || 0) + 1;
+    questionSeqRef.current[questionId] = seq;
+
+    questionInFlightRef.current[questionId] = true;
+    setSaveStatus('saving');
+
+    const qVersion = questionVersionsRef.current[questionId];
+    const requestPayload = {
+      ...combinedUpdates,
+      ...(qVersion !== undefined ? { version: qVersion } : {})
+    };
+
+    try {
+      const response = await api.put(`/api/forms/${id}/questions/${questionId}`, requestPayload);
+      questionInFlightRef.current[questionId] = false;
+
+      if (
+        isMountedRef.current &&
+        activeFormIdRef.current === id &&
+        !deletedQuestionsRef.current.has(questionId) &&
+        seq === questionSeqRef.current[questionId]
+      ) {
+        if (response.data?.success && response.data?.data) {
+          questionConflictRetriesRef.current[questionId] = 0;
+          if (response.data.data.version !== undefined) {
+            questionVersionsRef.current[questionId] = response.data.data.version;
+          }
+
+          const hasNewerPending = Boolean(
+            questionPendingUpdatesRef.current[questionId] &&
+            Object.keys(questionPendingUpdatesRef.current[questionId]).length > 0
+          );
+
+          const currentQ = questionsRef.current.find((q) => q._id === questionId);
+          const mergedData = {
+            ...response.data.data,
+            order: currentQ ? currentQ.order : response.data.data.order
+          };
+
+          if (hasNewerPending) {
+            Object.assign(mergedData, questionPendingUpdatesRef.current[questionId]);
+          }
+
+          dispatch(updateQuestion(mergedData));
+
+          if (hasNewerPending) {
+            flushQuestionUpdate(questionId);
+          } else {
+            checkIfAllSaved();
+          }
+        }
+      }
+    } catch (err) {
+      questionInFlightRef.current[questionId] = false;
+
+      if (
+        isMountedRef.current &&
+        activeFormIdRef.current === id &&
+        !deletedQuestionsRef.current.has(questionId) &&
+        seq === questionSeqRef.current[questionId]
+      ) {
+        if (err.response?.status === 409) {
+          const latestServerDoc = err.response.data?.data;
+          if (latestServerDoc?.version !== undefined) {
+            questionVersionsRef.current[questionId] = latestServerDoc.version;
+          }
+
+          questionPendingUpdatesRef.current[questionId] = {
+            ...combinedUpdates,
+            ...(questionPendingUpdatesRef.current[questionId] || {})
+          };
+
+          if (latestServerDoc) {
+            const currentQ = questionsRef.current.find((q) => q._id === questionId);
+            const userEdits = questionPendingUpdatesRef.current[questionId] || {};
+            const reconciled = {
+              ...latestServerDoc,
+              order: currentQ ? currentQ.order : latestServerDoc.order,
+              ...userEdits
+            };
+            dispatch(updateQuestion(reconciled));
+          }
+
+          const retries = (questionConflictRetriesRef.current[questionId] || 0) + 1;
+          questionConflictRetriesRef.current[questionId] = retries;
+
+          if (retries <= MAX_OCC_RETRIES) {
+            flushQuestionUpdate(questionId);
+            return;
+          }
+
+          setSaveStatus('error');
+          return;
+        }
+
+        questionPendingUpdatesRef.current[questionId] = {
+          ...combinedUpdates,
+          ...(questionPendingUpdatesRef.current[questionId] || {})
+        };
+
+        setSaveStatus('error');
+        alert(err.response?.data?.message || 'Failed to update question');
+      }
+    }
+  }, [id, dispatch, flushQuestionUpdate, checkIfAllSaved]);
+
+  const handleRetry = useCallback(() => {
+    questionConflictRetriesRef.current = {};
+    formConflictRetriesRef.current = 0;
+    setSaveStatus('saving');
+    flushAllPendingQuestionUpdates();
+    flushFormUpdate();
+  }, [flushAllPendingQuestionUpdates, flushFormUpdate]);
+
   const handleAddQuestion = async (questionData = null) => {
+    flushAllPendingQuestionUpdates();
+
     const newQuestion = questionData || {
       type: 'short_text',
       label: 'Untitled Question',
@@ -111,31 +735,38 @@ const FormBuilder = () => {
     try {
       const response = await api.post(`/api/forms/${id}/questions`, newQuestion);
       if (response.data.success) {
-        dispatch(addQuestion(response.data.data));
+        const createdQ = response.data.data;
+        if (createdQ?._id) {
+          questionVersionsRef.current[createdQ._id] =
+            createdQ.version !== undefined ? createdQ.version : 0;
+        }
+        dispatch(addQuestion(createdQ));
       }
     } catch (err) {
       alert('Failed to add question');
     }
   };
 
-  const handleUpdateQuestion = async (questionId, updates) => {
-    try {
-      const response = await api.put(`/api/forms/${id}/questions/${questionId}`, updates);
-      if (response.data.success) {
-        dispatch(updateQuestion(response.data.data));
-      }
-    } catch (err) {
-      alert('Failed to update question');
-    }
-  };
-
   const handleDeleteQuestion = async (questionId) => {
     if (!confirm('Delete this question?')) return;
+
+    // Cancel pending timers and delete pending updates for questionId
+    if (questionPendingTimersRef.current[questionId]) {
+      clearTimeout(questionPendingTimersRef.current[questionId]);
+      delete questionPendingTimersRef.current[questionId];
+    }
+    delete questionPendingUpdatesRef.current[questionId];
+    delete questionConflictRetriesRef.current[questionId];
+
+    // Mark as deleted so in-flight updates are ignored
+    deletedQuestionsRef.current.add(questionId);
+    questionSeqRef.current[questionId] = (questionSeqRef.current[questionId] || 0) + 1;
 
     try {
       await api.delete(`/api/forms/${id}/questions/${questionId}`);
       dispatch(removeQuestion(questionId));
     } catch (err) {
+      deletedQuestionsRef.current.delete(questionId);
       alert('Failed to delete question');
     }
   };
@@ -149,6 +780,9 @@ const FormBuilder = () => {
 
     // Update local state immediately
     dispatch(reorderQuestions(items));
+
+    // Flush pending question updates so latest labels/options are saved
+    flushAllPendingQuestionUpdates();
 
     // Update server
     try {
@@ -232,14 +866,37 @@ const FormBuilder = () => {
 
     const newText = improvements.improvedText;
     if (improveTarget.type === 'question') {
-      await handleUpdateQuestion(improveTarget.id, { label: newText });
+      await handleImmediateQuestionUpdate(improveTarget.id, { label: newText });
     } else if (improveTarget.type === 'title') {
-      setFormData(prev => ({ ...prev, title: newText }));
-      // Save it explicitly
-      await api.put(`/api/forms/${id}`, { ...formData, title: newText });
+      if (formPendingTimerRef.current) {
+        clearTimeout(formPendingTimerRef.current);
+        formPendingTimerRef.current = null;
+      }
+      formDataRef.current = {
+        ...formDataRef.current,
+        title: newText
+      };
+      setFormData(formDataRef.current);
+      formPendingUpdatesRef.current = {
+        ...formPendingUpdatesRef.current,
+        title: newText
+      };
+      await flushFormUpdate();
     } else if (improveTarget.type === 'description') {
-      setFormData(prev => ({ ...prev, description: newText }));
-      await api.put(`/api/forms/${id}`, { ...formData, description: newText });
+      if (formPendingTimerRef.current) {
+        clearTimeout(formPendingTimerRef.current);
+        formPendingTimerRef.current = null;
+      }
+      formDataRef.current = {
+        ...formDataRef.current,
+        description: newText
+      };
+      setFormData(formDataRef.current);
+      formPendingUpdatesRef.current = {
+        ...formPendingUpdatesRef.current,
+        description: newText
+      };
+      await flushFormUpdate();
     }
 
     setShowImproveModal(false);
@@ -276,8 +933,8 @@ const FormBuilder = () => {
                 <input
                   type="text"
                   value={formData.title}
-                  onChange={(e) => setFormData({ ...formData, title: e.target.value })}
-                  onBlur={handleFormUpdate}
+                  onChange={(e) => handleFormTextChange('title', e.target.value)}
+                  onBlur={handleFormBlur}
                   className="text-3xl font-bold w-full bg-transparent border-none focus:outline-none theme-transition flex-1"
                   placeholder="Form Title"
                 />
@@ -292,8 +949,8 @@ const FormBuilder = () => {
               <div className="flex gap-2 items-start w-full">
                 <textarea
                   value={formData.description}
-                  onChange={(e) => setFormData({ ...formData, description: e.target.value })}
-                  onBlur={handleFormUpdate}
+                  onChange={(e) => handleFormTextChange('description', e.target.value)}
+                  onBlur={handleFormBlur}
                   rows={2}
                   className="w-full opacity-70 bg-transparent border-none focus:outline-none theme-transition resize-none flex-1"
                   placeholder="Form description (optional)"
@@ -324,7 +981,30 @@ const FormBuilder = () => {
                 Form Consultant
               </button>
 
-              <div className="ml-auto flex items-center gap-2">
+              <div className="ml-auto flex items-center gap-3">
+                {saveStatus === 'saving' && (
+                  <span className="text-sm opacity-70 flex items-center gap-1.5" data-testid="save-status-saving">
+                    <span className="inline-block w-2 h-2 rounded-full bg-blue-500 animate-pulse" />
+                    Saving...
+                  </span>
+                )}
+                {saveStatus === 'saved' && (
+                  <span className="text-sm text-green-600 dark:text-green-400 flex items-center gap-1" data-testid="save-status-saved">
+                    All changes saved
+                  </span>
+                )}
+                {saveStatus === 'error' && (
+                  <div className="flex items-center gap-2" data-testid="save-status-error">
+                    <span className="text-sm text-red-500 font-medium">Save failed</span>
+                    <button
+                      type="button"
+                      onClick={handleRetry}
+                      className="text-xs px-2 py-0.5 bg-red-100 hover:bg-red-200 dark:bg-red-900/40 text-red-700 dark:text-red-300 rounded font-medium transition"
+                    >
+                      Retry
+                    </button>
+                  </div>
+                )}
                 <span className="text-sm opacity-70">Status:</span>
                 <CustomSelect
                   value={formData.status}
@@ -362,7 +1042,8 @@ const FormBuilder = () => {
                                   <input
                                     type="text"
                                     value={question.label}
-                                    onChange={(e) => handleUpdateQuestion(question._id, { label: e.target.value })}
+                                    onChange={(e) => handleDebouncedQuestionUpdate(question._id, { label: e.target.value })}
+                                    onBlur={() => flushQuestionUpdate(question._id)}
                                     className="text-lg font-medium w-full bg-transparent focus:outline-none theme-transition flex-1"
                                     placeholder="Question text"
                                   />
@@ -378,15 +1059,15 @@ const FormBuilder = () => {
                                 <div className="flex gap-3 flex-wrap items-center">
                                   <CustomSelect
                                     value={question.type === 'checkbox' ? 'multiple_choice' : question.type}
-                                    onChange={(val) => handleUpdateQuestion(question._id, { type: val })}
+                                    onChange={(val) => handleImmediateQuestionUpdate(question._id, { type: val })}
                                     options={QUESTION_TYPES}
                                   />
 
                                   <label className="flex items-center gap-2 text-sm">
                                     <input
                                       type="checkbox"
-                                      checked={question.required}
-                                      onChange={(e) => handleUpdateQuestion(question._id, { required: e.target.checked })}
+                                      checked={Boolean(question.required)}
+                                      onChange={(e) => handleImmediateQuestionUpdate(question._id, { required: e.target.checked })}
                                       className="w-4 h-4"
                                     />
                                     Required
@@ -407,12 +1088,10 @@ const FormBuilder = () => {
                                     <CustomSelect
                                       value={question.visibilityRule?.targetQuestionId || ''}
                                       onChange={(val) => {
-                                        console.log('[FormBuilder DEBUG] Conditional visibility onChange called with val:', val);
                                         const newRule = val
                                           ? { targetQuestionId: val, operator: 'equals', value: '' }
                                           : null;
-                                        console.log('[FormBuilder DEBUG] Calling handleUpdateQuestion with rule:', newRule);
-                                        handleUpdateQuestion(question._id, { visibilityRule: newRule });
+                                        handleImmediateQuestionUpdate(question._id, { visibilityRule: newRule });
                                       }}
                                       options={[
                                         { value: '', label: 'Always Visible' },
@@ -426,7 +1105,7 @@ const FormBuilder = () => {
                                       <>
                                         <CustomSelect
                                           value={question.visibilityRule.operator || 'equals'}
-                                          onChange={(val) => handleUpdateQuestion(question._id, {
+                                          onChange={(val) => handleImmediateQuestionUpdate(question._id, {
                                             visibilityRule: { ...question.visibilityRule, operator: val }
                                           })}
                                           options={[
@@ -439,9 +1118,10 @@ const FormBuilder = () => {
                                           type="text"
                                           placeholder="Value"
                                           value={question.visibilityRule.value || ''}
-                                          onChange={(e) => handleUpdateQuestion(question._id, {
+                                          onChange={(e) => handleDebouncedQuestionUpdate(question._id, {
                                             visibilityRule: { ...question.visibilityRule, value: e.target.value }
                                           })}
+                                          onBlur={() => flushQuestionUpdate(question._id)}
                                           className="input px-2 py-1 text-black w-24 h-8 text-sm"
                                         />
                                       </>
@@ -460,15 +1140,16 @@ const FormBuilder = () => {
                                           onChange={(e) => {
                                             const newOptions = [...question.options];
                                             newOptions[optIndex] = e.target.value;
-                                            handleUpdateQuestion(question._id, { options: newOptions });
+                                            handleDebouncedQuestionUpdate(question._id, { options: newOptions });
                                           }}
+                                          onBlur={() => flushQuestionUpdate(question._id)}
                                           className="flex-1 px-3 py-1 rounded text-sm focus:outline-none theme-transition"
                                           placeholder={`Option ${optIndex + 1}`}
                                         />
                                         <button
                                           onClick={() => {
                                             const newOptions = question.options.filter((_, i) => i !== optIndex);
-                                            handleUpdateQuestion(question._id, { options: newOptions });
+                                            handleImmediateQuestionUpdate(question._id, { options: newOptions });
                                           }}
                                           className="text-red-600 hover:opacity-70"
                                         >
@@ -479,7 +1160,7 @@ const FormBuilder = () => {
                                     <button
                                       onClick={() => {
                                         const newOptions = [...(question.options || []), ''];
-                                        handleUpdateQuestion(question._id, { options: newOptions });
+                                        handleImmediateQuestionUpdate(question._id, { options: newOptions });
                                       }}
                                       className="text-sm opacity-70 hover:opacity-100"
                                     >

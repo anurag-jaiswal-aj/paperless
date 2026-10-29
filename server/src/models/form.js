@@ -28,6 +28,10 @@ const formSchema = new mongoose.Schema({
     enum: ['draft', 'published', 'closed'],
     default: 'draft'
   },
+  version: {
+    type: Number,
+    default: 0
+  },
   createdAt: {
     type: Date,
     default: Date.now

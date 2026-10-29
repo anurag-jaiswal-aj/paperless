@@ -201,6 +201,139 @@ describe('Form Controller - Phase 2', () => {
       expect(updatedQ1.order).toBe(1);
       expect(updatedQ2.order).toBe(0);
     });
+
+    it('should update question properties atomically using partial update', async () => {
+      const q = await Question.create({
+        formId: form._id,
+        type: 'short_text',
+        label: 'Initial Label',
+        order: 5,
+        required: false
+      });
+
+      const res = await request(app)
+        .put(`/api/forms/${form._id}/questions/${q._id}`)
+        .set('Cookie', [`token=${user1Token}`])
+        .send({ label: 'Updated Label' });
+
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+      expect(res.body.data.label).toBe('Updated Label');
+      expect(res.body.data.order).toBe(5);
+      expect(res.body.data.type).toBe('short_text');
+
+      const saved = await Question.findById(q._id);
+      expect(saved.label).toBe('Updated Label');
+      expect(saved.order).toBe(5);
+    });
+
+    it('should reject updating question by non-owner or when not found', async () => {
+      const q = await Question.create({
+        formId: form._id,
+        type: 'short_text',
+        label: 'Q',
+        order: 0
+      });
+
+      // Non-owner attempt
+      const resNonOwner = await request(app)
+        .put(`/api/forms/${form._id}/questions/${q._id}`)
+        .set('Cookie', [`token=${user2Token}`])
+        .send({ label: 'Hacked Label' });
+
+      expect(resNonOwner.status).toBe(403);
+
+      // Non-existent question ID
+      const fakeId = new mongoose.Types.ObjectId();
+      const res404 = await request(app)
+        .put(`/api/forms/${form._id}/questions/${fakeId}`)
+        .set('Cookie', [`token=${user1Token}`])
+        .send({ label: 'Ghost' });
+
+      expect(res404.status).toBe(404);
+    });
+
+    it('should prevent stale same-field writes and return 409 conflict when revision is outdated', async () => {
+      const q = await Question.create({
+        formId: form._id,
+        type: 'short_text',
+        label: 'Original Label',
+        order: 1,
+        version: 0
+      });
+
+      // Request 1: update with valid version 0
+      const res1 = await request(app)
+        .put(`/api/forms/${form._id}/questions/${q._id}`)
+        .set('Cookie', [`token=${user1Token}`])
+        .send({ label: 'Updated by Request 1', version: 0 });
+
+      expect(res1.status).toBe(200);
+      expect(res1.body.success).toBe(true);
+      expect(res1.body.data.label).toBe('Updated by Request 1');
+      expect(res1.body.data.version).toBe(1);
+
+      // Request 2: stale request sent with outdated version 0
+      const res2 = await request(app)
+        .put(`/api/forms/${form._id}/questions/${q._id}`)
+        .set('Cookie', [`token=${user1Token}`])
+        .send({ label: 'Stale Overwrite Attempt', version: 0 });
+
+      expect(res2.status).toBe(409);
+      expect(res2.body.success).toBe(false);
+      expect(res2.body.message).toContain('Conflict');
+      expect(res2.body.data.label).toBe('Updated by Request 1');
+      expect(res2.body.data.version).toBe(1);
+
+      // Verify MongoDB document was not overwritten by the stale write
+      const persisted = await Question.findById(q._id);
+      expect(persisted.label).toBe('Updated by Request 1');
+      expect(persisted.version).toBe(1);
+
+      // Reconciled update with the current version 1 succeeds
+      const res3 = await request(app)
+        .put(`/api/forms/${form._id}/questions/${q._id}`)
+        .set('Cookie', [`token=${user1Token}`])
+        .send({ label: 'Reconciled Label', version: 1 });
+
+      expect(res3.status).toBe(200);
+      expect(res3.body.data.label).toBe('Reconciled Label');
+      expect(res3.body.data.version).toBe(2);
+    });
+
+    it('should prevent stale form updates and return 409 conflict when form version is outdated', async () => {
+      const testForm = await Form.create({
+        ownerId: user1Id,
+        title: 'Initial Title',
+        description: 'Initial Desc',
+        version: 0
+      });
+
+      // First update with version 0 succeeds
+      const res1 = await request(app)
+        .put(`/api/forms/${testForm._id}`)
+        .set('Cookie', [`token=${user1Token}`])
+        .send({ title: 'New Title', version: 0 });
+
+      expect(res1.status).toBe(200);
+      expect(res1.body.data.title).toBe('New Title');
+      expect(res1.body.data.version).toBe(1);
+
+      // Stale update with version 0 is rejected with 409
+      const res2 = await request(app)
+        .put(`/api/forms/${testForm._id}`)
+        .set('Cookie', [`token=${user1Token}`])
+        .send({ title: 'Stale Title', version: 0 });
+
+      expect(res2.status).toBe(409);
+      expect(res2.body.success).toBe(false);
+      expect(res2.body.data.title).toBe('New Title');
+
+      // Database preserves New Title
+      const savedForm = await Form.findById(testForm._id);
+      expect(savedForm.title).toBe('New Title');
+      expect(savedForm.version).toBe(1);
+    });
   });
 
   describe('Question Deletion and Orphaned Visibility Rule Cleanup', () => {

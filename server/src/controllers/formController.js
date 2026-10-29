@@ -127,18 +127,62 @@ export const updateForm = async (req, res, next) => {
       });
     }
 
-    const { title, description, status } = req.body;
+    const { title, description, status, version } = req.body;
 
-    if (title !== undefined) form.title = title;
-    if (description !== undefined) form.description = description;
-    if (status !== undefined) form.status = status;
+    const updateFields = { updatedAt: Date.now() };
+    if (title !== undefined) updateFields.title = title;
+    if (description !== undefined) updateFields.description = description;
+    if (status !== undefined) updateFields.status = status;
 
-    await form.save();
+    const query = {
+      _id: req.params.id,
+      ownerId: req.user.id
+    };
+
+    if (version !== undefined && version !== null) {
+      const parsedVersion = Number(version);
+      if (parsedVersion === 0) {
+        query.$or = [{ version: 0 }, { version: { $exists: false } }];
+      } else {
+        query.version = parsedVersion;
+      }
+    }
+
+    const updateDoc = {
+      $set: updateFields,
+      $inc: { version: 1 }
+    };
+
+    const updatedForm = await Form.findOneAndUpdate(
+      query,
+      updateDoc,
+      { new: true, runValidators: true }
+    );
+
+    if (!updatedForm) {
+      const existingForm = await Form.findOne({
+        _id: req.params.id,
+        ownerId: req.user.id
+      });
+
+      if (!existingForm) {
+        return res.status(404).json({
+          success: false,
+          message: 'Form not found'
+        });
+      }
+
+      return res.status(409).json({
+        success: false,
+        message: 'Conflict: Form has been modified by another update',
+        data: existingForm
+      });
+    }
 
     res.status(200).json({
       success: true,
       message: 'Form updated successfully',
-      data: form
+      data: updatedForm
     });
   } catch (error) {
     next(error);
@@ -279,31 +323,66 @@ export const updateQuestion = async (req, res, next) => {
       });
     }
 
-    const question = await Question.findById(req.params.questionId);
+    const { type, label, required, options, order, validation, visibilityRule, version } = req.body;
 
-    if (!question || question.formId.toString() !== req.params.formId) {
-      return res.status(404).json({
-        success: false,
-        message: 'Question not found'
-      });
+    const updateFields = {};
+    if (type !== undefined) updateFields.type = type;
+    if (label !== undefined) updateFields.label = label;
+    if (required !== undefined) updateFields.required = required;
+    if (options !== undefined) updateFields.options = options;
+    if (order !== undefined) updateFields.order = order;
+    if (validation !== undefined) updateFields.validation = validation;
+    if (visibilityRule !== undefined) updateFields.visibilityRule = visibilityRule;
+
+    const query = {
+      _id: req.params.questionId,
+      formId: req.params.formId
+    };
+
+    if (version !== undefined && version !== null) {
+      const parsedVersion = Number(version);
+      if (parsedVersion === 0) {
+        query.$or = [{ version: 0 }, { version: { $exists: false } }];
+      } else {
+        query.version = parsedVersion;
+      }
     }
 
-    const { type, label, required, options, order, validation, visibilityRule } = req.body;
+    const updateDoc = {
+      $set: updateFields,
+      $inc: { version: 1 }
+    };
 
-    if (type !== undefined) question.type = type;
-    if (label !== undefined) question.label = label;
-    if (required !== undefined) question.required = required;
-    if (options !== undefined) question.options = options;
-    if (order !== undefined) question.order = order;
-    if (validation !== undefined) question.validation = validation;
-    if (visibilityRule !== undefined) question.visibilityRule = visibilityRule;
+    const updatedQuestion = await Question.findOneAndUpdate(
+      query,
+      updateDoc,
+      { new: true, runValidators: true }
+    );
 
-    await question.save();
+    if (!updatedQuestion) {
+      const existingQuestion = await Question.findOne({
+        _id: req.params.questionId,
+        formId: req.params.formId
+      });
+
+      if (!existingQuestion) {
+        return res.status(404).json({
+          success: false,
+          message: 'Question not found'
+        });
+      }
+
+      return res.status(409).json({
+        success: false,
+        message: 'Conflict: Question has been modified by another update',
+        data: existingQuestion
+      });
+    }
 
     res.status(200).json({
       success: true,
       message: 'Question updated successfully',
-      data: question
+      data: updatedQuestion
     });
   } catch (error) {
     next(error);
