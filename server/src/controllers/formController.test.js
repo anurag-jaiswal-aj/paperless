@@ -202,6 +202,34 @@ describe('Form Controller - Phase 2', () => {
       expect(updatedQ2.order).toBe(0);
     });
 
+    it('should not allow reordering questions belonging to another form (IDOR prevention)', async () => {
+      const q1 = await Question.create({ formId: form._id, type: 'short_text', label: 'Q1', order: 0 });
+      // Create second form owned by user2 with its own question
+      const form2 = await Form.create({ ownerId: user2Id, title: 'Form 2', status: 'draft' });
+      const qForeign = await Question.create({ formId: form2._id, type: 'short_text', label: 'Foreign Q', order: 0 });
+
+      // User 1 attempts to reorder qForeign through Form 1
+      const res = await request(app)
+        .put(`/api/forms/${form._id}/questions/reorder`)
+        .set('Cookie', [`token=${user1Token}`])
+        .send({
+          questionOrders: [
+            { questionId: q1._id, order: 5 },
+            { questionId: qForeign._id, order: 99 }
+          ]
+        });
+
+      expect(res.status).toBe(200);
+
+      // Verify q1 was updated because it belongs to form 1
+      const updatedQ1 = await Question.findById(q1._id);
+      expect(updatedQ1.order).toBe(5);
+
+      // Verify qForeign was NOT modified because it belongs to form 2
+      const unchangedForeign = await Question.findById(qForeign._id);
+      expect(unchangedForeign.order).toBe(0);
+    });
+
     it('should update question properties atomically using partial update', async () => {
       const q = await Question.create({
         formId: form._id,

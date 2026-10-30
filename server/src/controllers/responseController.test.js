@@ -135,8 +135,9 @@ describe('Response Controller - Phase 2', () => {
       expect(res.body.message).toContain('valid email');
     });
 
-    it('should validate number type', async () => {
-      const res = await request(app).post(`/api/responses/${form._id}`).send({
+    it('should validate number type strictly and store clean numeric values', async () => {
+      // Reject string word
+      let res = await request(app).post(`/api/responses/${form._id}`).send({
         answers: [
           { questionId: qText._id, value: 'John' },
           { questionId: qEmail._id, value: 'test@test.com' },
@@ -145,7 +146,164 @@ describe('Response Controller - Phase 2', () => {
         ]
       });
       expect(res.status).toBe(400);
-      expect(res.body.message).toContain('number');
+      expect(res.body.message).toContain('must be a number');
+
+      // Reject boolean true
+      res = await request(app).post(`/api/responses/${form._id}`).send({
+        answers: [
+          { questionId: qText._id, value: 'John' },
+          { questionId: qEmail._id, value: 'test@test.com' },
+          { questionId: qChoice._id, value: 'Blue' },
+          { questionId: qNumber._id, value: true }
+        ]
+      });
+      expect(res.status).toBe(400);
+      expect(res.body.message).toContain('must be a number');
+
+      // Reject boolean false
+      res = await request(app).post(`/api/responses/${form._id}`).send({
+        answers: [
+          { questionId: qText._id, value: 'John' },
+          { questionId: qEmail._id, value: 'test@test.com' },
+          { questionId: qChoice._id, value: 'Blue' },
+          { questionId: qNumber._id, value: false }
+        ]
+      });
+      expect(res.status).toBe(400);
+      expect(res.body.message).toContain('must be a number');
+
+      // Reject array [10]
+      res = await request(app).post(`/api/responses/${form._id}`).send({
+        answers: [
+          { questionId: qText._id, value: 'John' },
+          { questionId: qEmail._id, value: 'test@test.com' },
+          { questionId: qChoice._id, value: 'Blue' },
+          { questionId: qNumber._id, value: [10] }
+        ]
+      });
+      expect(res.status).toBe(400);
+      expect(res.body.message).toContain('must be a number');
+
+      // Reject Infinity
+      res = await request(app).post(`/api/responses/${form._id}`).send({
+        answers: [
+          { questionId: qText._id, value: 'John' },
+          { questionId: qEmail._id, value: 'test@test.com' },
+          { questionId: qChoice._id, value: 'Blue' },
+          { questionId: qNumber._id, value: 'Infinity' }
+        ]
+      });
+      expect(res.status).toBe(400);
+      expect(res.body.message).toContain('must be a number');
+
+      // Reject empty or whitespace string
+      res = await request(app).post(`/api/responses/${form._id}`).send({
+        answers: [
+          { questionId: qText._id, value: 'John' },
+          { questionId: qEmail._id, value: 'test@test.com' },
+          { questionId: qChoice._id, value: 'Blue' },
+          { questionId: qNumber._id, value: '   ' }
+        ]
+      });
+      expect(res.status).toBe(400);
+      expect(res.body.message).toContain('must be a number');
+
+      // Reject object
+      res = await request(app).post(`/api/responses/${form._id}`).send({
+        answers: [
+          { questionId: qText._id, value: 'John' },
+          { questionId: qEmail._id, value: 'test@test.com' },
+          { questionId: qChoice._id, value: 'Blue' },
+          { questionId: qNumber._id, value: { val: 42 } }
+        ]
+      });
+      expect(res.status).toBe(400);
+      expect(res.body.message).toContain('must be a number');
+
+      // Accept numeric string and verify saved as Number
+      res = await request(app).post(`/api/responses/${form._id}`).send({
+        answers: [
+          { questionId: qText._id, value: 'John' },
+          { questionId: qEmail._id, value: 'test@test.com' },
+          { questionId: qChoice._id, value: 'Blue' },
+          { questionId: qNumber._id, value: '42.5' }
+        ]
+      });
+      expect(res.status).toBe(201);
+
+      const saved = await Response.findOne({ formId: form._id }).sort({ createdAt: -1 });
+      const numberAns = saved.answers.find(a => a.questionId.toString() === qNumber._id.toString());
+      expect(numberAns.value).toBe(42.5);
+      expect(typeof numberAns.value).toBe('number');
+    });
+
+    it('should validate text types and enforce length bounds', async () => {
+      // Reject non-string for short_text
+      let res = await request(app).post(`/api/responses/${form._id}`).send({
+        answers: [
+          { questionId: qText._id, value: { malicious: true } },
+          { questionId: qEmail._id, value: 'test@test.com' },
+          { questionId: qChoice._id, value: 'Blue' }
+        ]
+      });
+      expect(res.status).toBe(400);
+      expect(res.body.message).toContain('must be a text value');
+
+      // Reject boolean for short_text
+      res = await request(app).post(`/api/responses/${form._id}`).send({
+        answers: [
+          { questionId: qText._id, value: true },
+          { questionId: qEmail._id, value: 'test@test.com' },
+          { questionId: qChoice._id, value: 'Blue' }
+        ]
+      });
+      expect(res.status).toBe(400);
+      expect(res.body.message).toContain('must be a text value');
+
+      // Reject short_text exceeding 1000 characters
+      const longString = 'a'.repeat(1001);
+      res = await request(app).post(`/api/responses/${form._id}`).send({
+        answers: [
+          { questionId: qText._id, value: longString },
+          { questionId: qEmail._id, value: 'test@test.com' },
+          { questionId: qChoice._id, value: 'Blue' }
+        ]
+      });
+      expect(res.status).toBe(400);
+      expect(res.body.message).toContain('exceeds maximum length of 1000 characters');
+
+      // Create long_text question and test bound
+      const qLong = await Question.create({
+        formId: form._id,
+        type: 'long_text',
+        label: 'Feedback',
+        required: false,
+        order: 20
+      });
+
+      const oversizedLong = 'x'.repeat(20001);
+      res = await request(app).post(`/api/responses/${form._id}`).send({
+        answers: [
+          { questionId: qText._id, value: 'John' },
+          { questionId: qEmail._id, value: 'test@test.com' },
+          { questionId: qChoice._id, value: 'Blue' },
+          { questionId: qLong._id, value: oversizedLong }
+        ]
+      });
+      expect(res.status).toBe(400);
+      expect(res.body.message).toContain('exceeds maximum length of 20000 characters');
+
+      // Accept valid long_text
+      const validLong = 'x'.repeat(500);
+      res = await request(app).post(`/api/responses/${form._id}`).send({
+        answers: [
+          { questionId: qText._id, value: 'John' },
+          { questionId: qEmail._id, value: 'test@test.com' },
+          { questionId: qChoice._id, value: 'Blue' },
+          { questionId: qLong._id, value: validLong }
+        ]
+      });
+      expect(res.status).toBe(201);
     });
 
     it('should validate choice options', async () => {

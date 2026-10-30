@@ -229,19 +229,29 @@ export const summaryHandler = async (req, res, next) => {
 };
 
 // --- Phase 7 Helper: Build Safe Response Dataset ---
-const buildSafeResponseDataset = async (form, reqQuery) => {
-  const { startDate, endDate, maxResponses = 500 } = reqQuery;
+export const buildSafeResponseDataset = async (form, options = {}) => {
+  const { startDate, endDate, maxResponses = 500 } = options;
 
   // Build query
   const query = { formId: form._id };
   if (startDate || endDate) {
     query.createdAt = {};
-    if (startDate) query.createdAt.$gte = new Date(startDate);
-    if (endDate) query.createdAt.$lte = new Date(endDate);
+    if (startDate) {
+      const start = new Date(startDate);
+      if (!isNaN(start.getTime())) query.createdAt.$gte = start;
+    }
+    if (endDate) {
+      const end = new Date(endDate);
+      if (!isNaN(end.getTime())) query.createdAt.$lte = end;
+    }
+    if (Object.keys(query.createdAt).length === 0) {
+      delete query.createdAt;
+    }
   }
 
   // Fetch bounded responses
-  const limit = Math.min(parseInt(maxResponses, 10) || 500, 500);
+  const parsedLimit = parseInt(maxResponses, 10);
+  const limit = Math.min(500, Math.max(1, isNaN(parsedLimit) ? 500 : parsedLimit));
   const responses = await Response.find(query).sort({ createdAt: -1 }).limit(limit).lean();
 
   if (responses.length === 0) {
@@ -299,7 +309,8 @@ export const responseSummaryHandler = async (req, res, next) => {
     if (!form) return res.status(404).json({ success: false, message: 'Form not found' });
     if (form.ownerId.toString() !== req.user.id) return res.status(403).json({ success: false, message: 'Not authorized to view this form' });
 
-    const { dataset, total } = await buildSafeResponseDataset(form, req.body);
+    const filterOptions = { ...(req.query || {}), ...(req.body || {}) };
+    const { dataset, total } = await buildSafeResponseDataset(form, filterOptions);
     if (!dataset) {
       return res.status(200).json({ success: true, data: { overview: 'Not enough valid responses to generate insights.', keyInsights: [], caveats: [] } });
     }
@@ -322,7 +333,8 @@ export const responseThemesHandler = async (req, res, next) => {
     if (!form) return res.status(404).json({ success: false, message: 'Form not found' });
     if (form.ownerId.toString() !== req.user.id) return res.status(403).json({ success: false, message: 'Not authorized to view this form' });
 
-    const { dataset } = await buildSafeResponseDataset(form, req.body);
+    const filterOptions = { ...(req.query || {}), ...(req.body || {}) };
+    const { dataset } = await buildSafeResponseDataset(form, filterOptions);
     if (!dataset) {
       return res.status(200).json({ success: true, data: { themes: [] } });
     }
@@ -345,7 +357,8 @@ export const responseCategorizeHandler = async (req, res, next) => {
     if (!form) return res.status(404).json({ success: false, message: 'Form not found' });
     if (form.ownerId.toString() !== req.user.id) return res.status(403).json({ success: false, message: 'Not authorized to view this form' });
 
-    const { dataset } = await buildSafeResponseDataset(form, req.body);
+    const filterOptions = { ...(req.query || {}), ...(req.body || {}) };
+    const { dataset } = await buildSafeResponseDataset(form, filterOptions);
     if (!dataset) {
       return res.status(200).json({ success: true, data: { categories: [], uncategorizedResponseIndexes: [] } });
     }

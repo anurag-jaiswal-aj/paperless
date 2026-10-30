@@ -3,6 +3,8 @@ import request from 'supertest';
 import express from 'express';
 import aiRoutes from '../routes/aiRoutes.js';
 import AIService from '../services/AIService.js';
+import Response from '../models/response.js';
+import { buildSafeResponseDataset } from './aiController.js';
 import { errorHandler } from '../middleware/errorHandler.js';
 
 // Mock auth middleware to easily simulate logged in user
@@ -167,6 +169,43 @@ describe('AI Controller (Phase 6)', () => {
   });
 
   describe('Phase 7: Response Intelligence', () => {
+    describe('buildSafeResponseDataset', () => {
+      it('safely ignores invalid date filters and clamps minimum maxResponses', async () => {
+        const form = { _id: 'form1', title: 'Survey' };
+        const result = await buildSafeResponseDataset(form, {
+          startDate: 'not-a-date',
+          endDate: 'also-invalid',
+          maxResponses: -5
+        });
+
+        expect(result.total).toBe(1);
+        expect(Response.find).toHaveBeenCalledWith({ formId: 'form1' });
+
+        const mockSort = Response.find.mock.results[Response.find.mock.results.length - 1].value.sort;
+        const mockLimit = mockSort.mock.results[mockSort.mock.results.length - 1].value.limit;
+        expect(mockLimit).toHaveBeenCalledWith(1);
+      });
+
+      it('correctly applies valid date filters and clamps upper bound maxResponses', async () => {
+        const form = { _id: 'form1', title: 'Survey' };
+        const result = await buildSafeResponseDataset(form, {
+          startDate: '2026-01-01',
+          endDate: '2026-01-31',
+          maxResponses: 2000
+        });
+
+        expect(result.total).toBe(1);
+        const lastCall = Response.find.mock.calls[Response.find.mock.calls.length - 1][0];
+        expect(lastCall.formId).toBe('form1');
+        expect(lastCall.createdAt.$gte).toEqual(new Date('2026-01-01'));
+        expect(lastCall.createdAt.$lte).toEqual(new Date('2026-01-31'));
+
+        const mockSort = Response.find.mock.results[Response.find.mock.results.length - 1].value.sort;
+        const mockLimit = mockSort.mock.results[mockSort.mock.results.length - 1].value.limit;
+        expect(mockLimit).toHaveBeenCalledWith(500);
+      });
+    });
+
     describe('responseSummaryHandler', () => {
       it('returns 403 for unauthorized form', async () => {
         const res = await request(app).post('/api/ai/responses/summary/form2');

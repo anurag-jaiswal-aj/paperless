@@ -99,13 +99,28 @@ export const submitResponse = async (req, res, next) => {
 
       if (isVisible && hasValue) {
         // Type validation
-        if (question.type === 'email') {
+        if (['short_text', 'long_text'].includes(question.type)) {
+          if (typeof val !== 'string') {
+            return res.status(400).json({ success: false, message: `Question "${question.label}" must be a text value` });
+          }
+          const maxLen = question.type === 'short_text' ? 1000 : 20000;
+          if (val.length > maxLen) {
+            return res.status(400).json({ success: false, message: `Question "${question.label}" exceeds maximum length of ${maxLen} characters` });
+          }
+        } else if (question.type === 'email') {
+          if (typeof val !== 'string') {
+            return res.status(400).json({ success: false, message: `Question "${question.label}" must be a valid email` });
+          }
           const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-          if (!emailRegex.test(String(val))) {
+          if (!emailRegex.test(val)) {
             return res.status(400).json({ success: false, message: `Question "${question.label}" must be a valid email` });
           }
         } else if (question.type === 'number') {
-          if (isNaN(Number(val))) {
+          const isNumeric =
+            typeof val === 'number'
+              ? Number.isFinite(val)
+              : typeof val === 'string' && val.trim() !== '' && Number.isFinite(Number(val));
+          if (!isNumeric) {
             return res.status(400).json({ success: false, message: `Question "${question.label}" must be a number` });
           }
         } else if (question.type === 'rating') {
@@ -133,11 +148,11 @@ export const submitResponse = async (req, res, next) => {
             return res.status(400).json({ success: false, message: `Question "${question.label}" must be a valid date` });
           }
         } else if (['single_choice', 'dropdown'].includes(question.type)) {
-          if (!question.options.includes(String(val))) {
+          if (typeof val !== 'string' || !question.options.includes(val)) {
             return res.status(400).json({ success: false, message: `Question "${question.label}" has an invalid choice` });
           }
         } else if (['multiple_choice', 'checkbox'].includes(question.type)) {
-          if (!Array.isArray(val) || !val.every(v => question.options.includes(String(v)))) {
+          if (!Array.isArray(val) || !val.every(v => typeof v === 'string' && question.options.includes(v))) {
             return res.status(400).json({ success: false, message: `Question "${question.label}" has invalid choices` });
           }
         } else if (question.type === 'file') {
@@ -182,7 +197,7 @@ export const submitResponse = async (req, res, next) => {
         if (question.type !== 'file') {
           validAnswersToSave.push({
             questionId: question._id,
-            value: question.type === 'rating' ? Number(val) : val
+            value: question.type === 'rating' || question.type === 'number' ? Number(val) : val
           });
         }
       }

@@ -531,11 +531,16 @@ export const reorderQuestions = async (req, res, next) => {
       });
     }
 
-    // Update each question's order
+    // Update each question's order scoped strictly to this form
     await Promise.all(
-      questionOrders.map(({ questionId, order }) =>
-        Question.findByIdAndUpdate(questionId, { order })
-      )
+      questionOrders
+        .filter((item) => item && mongoose.Types.ObjectId.isValid(item.questionId) && typeof item.order === 'number' && Number.isFinite(item.order))
+        .map(({ questionId, order }) =>
+          Question.findOneAndUpdate(
+            { _id: questionId, formId: req.params.formId },
+            { order }
+          )
+        )
     );
 
     res.status(200).json({

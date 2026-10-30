@@ -141,11 +141,16 @@ export const register = async (req, res, next) => {
       return res.status(400).json({ success: false, message: 'Please provide name, email, and password' });
     }
 
+    const normalizedEmail = typeof email === 'string' ? email.trim().toLowerCase() : '';
+    if (!normalizedEmail) {
+      return res.status(400).json({ success: false, message: 'Please provide a valid email' });
+    }
+
     if (password.length < 6) {
       return res.status(400).json({ success: false, message: 'Password must be at least 6 characters' });
     }
 
-    const existingUser = await User.findOne({ email });
+    const existingUser = await User.findOne({ email: normalizedEmail });
     if (existingUser) {
       return res.status(400).json({ success: false, message: 'User already exists with this email' });
     }
@@ -155,7 +160,7 @@ export const register = async (req, res, next) => {
 
     const user = await User.create({
       name,
-      email,
+      email: normalizedEmail,
       password: hashedPassword
     });
 
@@ -178,7 +183,8 @@ export const login = async (req, res, next) => {
       return res.status(400).json({ success: false, message: 'Please provide email and password' });
     }
 
-    const user = await User.findOne({ email });
+    const normalizedEmail = typeof email === 'string' ? email.trim().toLowerCase() : '';
+    const user = await User.findOne({ email: normalizedEmail });
     if (!user) {
       return res.status(401).json({ success: false, message: 'Invalid credentials' });
     }
@@ -297,6 +303,9 @@ export const logout = async (req, res) => {
 export const getMe = async (req, res, next) => {
   try {
     const user = await User.findById(req.user.id).select('-password');
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'User not found' });
+    }
     res.status(200).json({ success: true, data: user });
   } catch (error) {
     next(error);
@@ -390,7 +399,8 @@ export const forgotPassword = async (req, res, next) => {
       return res.status(400).json({ success: false, message: 'Please provide email' });
     }
 
-    const user = await User.findOne({ email });
+    const normalizedEmail = typeof email === 'string' ? email.trim().toLowerCase() : '';
+    const user = await User.findOne({ email: normalizedEmail });
 
     if (!user) {
       // Do not leak existence
@@ -466,6 +476,8 @@ export const resetPassword = async (req, res, next) => {
     user.password = await bcrypt.hash(password, salt);
     user.resetPasswordToken = undefined;
     user.resetPasswordExpire = undefined;
+    user.refreshTokens = [];
+    user.lastLogoutAt = new Date();
     await user.save();
 
     await sendTokenResponse(user, 200, res, 'Password reset successful');

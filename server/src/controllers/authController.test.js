@@ -121,6 +121,23 @@ describe('Auth Controller', () => {
       expect(res.status).toBe(401);
       expect(res.body.success).toBe(false);
     });
+
+    it('allows login with case-insensitive email matching', async () => {
+      await request(app).post('/api/auth/register').send({
+        name: 'Case Test',
+        email: 'CaseSensitive@Example.Com',
+        password: 'password123'
+      });
+
+      const res = await request(app).post('/api/auth/login').send({
+        email: 'CASESENSITIVE@EXAMPLE.COM',
+        password: 'password123'
+      });
+
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+      expect(res.body.data.user.email).toBe('casesensitive@example.com');
+    });
   });
 
   describe('GET /api/auth/me', () => {
@@ -1122,6 +1139,51 @@ describe('Auth Controller', () => {
         .send({ password: 'newpassword123' });
       expect(res.status).toBe(400);
       expect(res.body.message).toContain('Invalid or expired token');
+    });
+
+    it('revokes pre-existing sessions and tokens upon password reset', async () => {
+      const regRes = await request(app).post('/api/auth/register').send({
+        name: 'Reset Revoke User',
+        email: 'revoke-reset@example.com',
+        password: 'initialpassword123'
+      });
+      const preResetCookies = regRes.headers['set-cookie'];
+
+      const meBefore = await request(app)
+        .get('/api/auth/me')
+        .set('Cookie', preResetCookies);
+      expect(meBefore.status).toBe(200);
+
+      const user = await User.findOne({ email: 'revoke-reset@example.com' });
+      const resetToken = user.getResetPasswordToken();
+      await user.save({ validateBeforeSave: false });
+
+      const resetRes = await request(app)
+        .put(`/api/auth/resetpassword/${resetToken}`)
+        .send({ password: 'brandnewpassword123' });
+      expect(resetRes.status).toBe(200);
+
+      const meAfter = await request(app)
+        .get('/api/auth/me')
+        .set('Cookie', preResetCookies);
+      expect(meAfter.status).toBe(401);
+      expect(meAfter.body.message).toContain('session has been revoked');
+
+      const postResetCookies = resetRes.headers['set-cookie'];
+      const meNew = await request(app)
+        .get('/api/auth/me')
+        .set('Cookie', postResetCookies);
+      expect(meNew.status).toBe(200);
+    });
+
+    it('allows forgot password with case-insensitive email', async () => {
+      const res = await request(app)
+        .post('/api/auth/forgotpassword')
+        .send({ email: testUser.email.toUpperCase() });
+      expect(res.status).toBe(200);
+
+      const user = await User.findOne({ email: testUser.email.toLowerCase() });
+      expect(user.resetPasswordToken).toBeDefined();
     });
   });
 
