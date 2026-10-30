@@ -9,11 +9,14 @@ import Form from '../models/form.js';
 import Question from '../models/question.js';
 import Response from '../models/response.js';
 import responseRoutes from '../routes/responseRoutes.js';
-import { formatCsvAnswer, sanitizeCsvCell, escapeCsvCell } from './responseController.js';
+import { formatCsvAnswer, sanitizeCsvCell, escapeCsvCell, isQuestionVisible, submitResponse } from './responseController.js';
 import { errorHandler } from '../middleware/errorHandler.js';
 import storageService from '../services/StorageService.js';
 import { Readable } from 'stream';
 import jwt from 'jsonwebtoken';
+import multer from 'multer';
+import os from 'os';
+import fs from 'fs';
 
 let mongoServer;
 const app = express();
@@ -1611,6 +1614,397 @@ describe('Response Controller - Phase 2', () => {
       const disposition = res.headers['content-disposition'];
       expect(disposition).toBeDefined();
       expect(disposition).toContain("filename*=UTF-8''%E6%97%A5%E6%9C%AC%E8%AA%9E-2026.pdf");
+    });
+  });
+
+  describe('Hardening and Boundary Verification: Input Robustness', () => {
+    let robustForm;
+    let reqText, optText;
+    const upload = multer({ dest: os.tmpdir() });
+    const hardeningApp = express();
+    hardeningApp.use(express.json());
+    hardeningApp.post('/api/responses/:formId', upload.any(), submitResponse);
+    hardeningApp.use(errorHandler);
+
+    beforeEach(async () => {
+      const user = await User.create({
+        name: 'Audit Owner',
+        email: 'audit-owner@test.com',
+        password: 'password123'
+      });
+
+      robustForm = await Form.create({ ownerId: user._id, title: 'Hardening Form', status: 'published' });
+      reqText = await Question.create({
+        formId: robustForm._id,
+        type: 'short_text',
+        label: 'Required Name',
+        required: true,
+        order: 0
+      });
+      optText = await Question.create({
+        formId: robustForm._id,
+        type: 'short_text',
+        label: 'Optional Notes',
+        required: false,
+        order: 1
+      });
+    });
+
+    it('rejects answers payload containing non-object items with HTTP 400 instead of crashing', async () => {
+      // Test null item
+      let res = await request(hardeningApp)
+        .post(`/api/responses/${robustForm._id}`)
+        .send({ answers: [null] });
+      expect(res.status).toBe(400);
+      expect(res.body.success).toBe(false);
+      expect(res.body.message).toBe('Each answer item must be a valid object');
+
+      // Test primitive string item
+      res = await request(hardeningApp)
+        .post(`/api/responses/${robustForm._id}`)
+        .send({ answers: ['not-an-object'] });
+      expect(res.status).toBe(400);
+      expect(res.body.success).toBe(false);
+      expect(res.body.message).toBe('Each answer item must be a valid object');
+
+      // Test numeric item
+      res = await request(hardeningApp)
+        .post(`/api/responses/${robustForm._id}`)
+        .send({ answers: [123] });
+      expect(res.status).toBe(400);
+      expect(res.body.success).toBe(false);
+      expect(res.body.message).toBe('Each answer item must be a valid object');
+
+      // Test nested array item
+      res = await request(hardeningApp)
+        .post(`/api/responses/${robustForm._id}`)
+        .send({ answers: [[{ questionId: reqText._id, value: 'Test' }]] });
+      expect(res.status).toBe(400);
+      expect(res.body.success).toBe(false);
+      expect(res.body.message).toBe('Each answer item must be a valid object');
+
+      // Test empty object missing questionId
+      res = await request(hardeningApp)
+        .post(`/api/responses/${robustForm._id}`)
+        .send({ answers: [{}] });
+      expect(res.status).toBe(400);
+      expect(res.body.success).toBe(false);
+      expect(res.body.message).toBe('Each answer item must be a valid object');
+
+      // Test answer item missing questionId
+      res = await request(hardeningApp)
+        .post(`/api/responses/${robustForm._id}`)
+        .send({ answers: [{ value: 'no-question-id' }] });
+      expect(res.status).toBe(400);
+      expect(res.body.success).toBe(false);
+      expect(res.body.message).toBe('Each answer item must be a valid object');
+
+      // Test answer item with empty string questionId
+      res = await request(hardeningApp)
+        .post(`/api/responses/${robustForm._id}`)
+        .send({ answers: [{ questionId: '   ', value: 'whitespace-id' }] });
+      expect(res.status).toBe(400);
+      expect(res.body.success).toBe(false);
+      expect(res.body.message).toBe('Each answer item must be a valid object');
+
+      // Test answer item with numeric questionId
+      res = await request(hardeningApp)
+        .post(`/api/responses/${robustForm._id}`)
+        .send({ answers: [{ questionId: 12345, value: 'numeric-id' }] });
+      expect(res.status).toBe(400);
+      expect(res.body.success).toBe(false);
+      expect(res.body.message).toBe('Each answer item must be a valid object');
+
+      // Test answer item with malformed string questionId
+      res = await request(hardeningApp)
+        .post(`/api/responses/${robustForm._id}`)
+        .send({ answers: [{ questionId: 'not-a-valid-id', value: 'bad-id' }] });
+      expect(res.status).toBe(400);
+      expect(res.body.success).toBe(false);
+      expect(res.body.message).toBe('Each answer item must be a valid object');
+
+      // Test answer item with 12-byte string questionId
+      res = await request(hardeningApp)
+        .post(`/api/responses/${robustForm._id}`)
+        .send({ answers: [{ questionId: '123456789012', value: '12-char-id' }] });
+      expect(res.status).toBe(400);
+      expect(res.body.success).toBe(false);
+      expect(res.body.message).toBe('Each answer item must be a valid object');
+
+      // Verify no response was saved to the database
+      const count = await Response.countDocuments({ formId: robustForm._id });
+      expect(count).toBe(0);
+    });
+
+    it('rejects duplicate question IDs with HTTP 400 without persisting', async () => {
+      // Test duplicate IDs with identical values
+      let res = await request(hardeningApp)
+        .post(`/api/responses/${robustForm._id}`)
+        .send({
+          answers: [
+            { questionId: reqText._id, value: 'First Value' },
+            { questionId: reqText._id, value: 'First Value' }
+          ]
+        });
+      expect(res.status).toBe(400);
+      expect(res.body.success).toBe(false);
+      expect(res.body.message).toBe('Duplicate answers for the same question are not allowed');
+
+      // Test duplicate IDs with different values
+      res = await request(hardeningApp)
+        .post(`/api/responses/${robustForm._id}`)
+        .send({
+          answers: [
+            { questionId: reqText._id, value: 'Initial Value' },
+            { questionId: reqText._id, value: 'Conflicting Value' }
+          ]
+        });
+      expect(res.status).toBe(400);
+      expect(res.body.success).toBe(false);
+      expect(res.body.message).toBe('Duplicate answers for the same question are not allowed');
+
+      // Test duplicate IDs with mixed ObjectId and string normalization
+      res = await request(hardeningApp)
+        .post(`/api/responses/${robustForm._id}`)
+        .send({
+          answers: [
+            { questionId: reqText._id, value: 'ObjectId format' },
+            { questionId: reqText._id.toString(), value: 'String format' }
+          ]
+        });
+      expect(res.status).toBe(400);
+      expect(res.body.success).toBe(false);
+      expect(res.body.message).toBe('Duplicate answers for the same question are not allowed');
+
+      // Confirm no document was written to the database
+      const count = await Response.countDocuments({ formId: robustForm._id });
+      expect(count).toBe(0);
+    });
+
+    it('rejects payloads exceeding the 500 answer limit with HTTP 400', async () => {
+      const hugeAnswers = Array.from({ length: 501 }, () => ({
+        questionId: reqText._id.toString(),
+        value: 'spam'
+      }));
+
+      const res = await request(hardeningApp)
+        .post(`/api/responses/${robustForm._id}`)
+        .send({ answers: hugeAnswers });
+
+      expect(res.status).toBe(400);
+      expect(res.body.success).toBe(false);
+      expect(res.body.message).toBe('Answers array exceeds maximum limit of 500 items');
+
+      const count = await Response.countDocuments({ formId: robustForm._id });
+      expect(count).toBe(0);
+    });
+
+    it('rejects whitespace-only submissions for required text questions', async () => {
+      const res = await request(hardeningApp)
+        .post(`/api/responses/${robustForm._id}`)
+        .send({
+          answers: [
+            { questionId: reqText._id, value: '    ' }
+          ]
+        });
+
+      expect(res.status).toBe(400);
+      expect(res.body.success).toBe(false);
+      expect(res.body.message).toBe('Question "Required Name" is required');
+
+      const count = await Response.countDocuments({ formId: robustForm._id });
+      expect(count).toBe(0);
+    });
+
+    it('accepts whitespace-only submissions for optional text questions without saving blank answers', async () => {
+      const res = await request(hardeningApp)
+        .post(`/api/responses/${robustForm._id}`)
+        .send({
+          answers: [
+            { questionId: reqText._id, value: 'Valid Name' },
+            { questionId: optText._id, value: '   ' }
+          ]
+        });
+
+      expect(res.status).toBe(201);
+      expect(res.body.success).toBe(true);
+
+      const saved = await Response.findOne({ formId: robustForm._id });
+      expect(saved).toBeDefined();
+      expect(saved.answers.length).toBe(1);
+      expect(saved.answers[0].questionId.toString()).toBe(reqText._id.toString());
+      expect(saved.answers[0].value).toBe('Valid Name');
+    });
+
+    it('rejects foreign question IDs with HTTP 400 and prevents partial persistence', async () => {
+      const foreignId = new mongoose.Types.ObjectId().toString();
+      const res = await request(hardeningApp)
+        .post(`/api/responses/${robustForm._id}`)
+        .send({
+          answers: [
+            { questionId: reqText._id, value: 'Legitimate Answer' },
+            { questionId: foreignId, value: 'Foreign Question Value' }
+          ]
+        });
+
+      expect(res.status).toBe(400);
+      expect(res.body.success).toBe(false);
+      expect(res.body.message).toBe('Question does not belong to this form');
+
+      // Ensure no response is partially persisted
+      const count = await Response.countDocuments({ formId: robustForm._id });
+      expect(count).toBe(0);
+    });
+
+    it('rejects foreign-question submissions without initiating file uploads or creating documents', async () => {
+      const fileQuestion = await Question.create({
+        formId: robustForm._id,
+        type: 'file',
+        label: 'Upload Document',
+        required: false,
+        order: 2
+      });
+
+      const uploadSpy = vi.spyOn(storageService, 'uploadFile');
+      const foreignId = new mongoose.Types.ObjectId().toString();
+
+      const res = await request(hardeningApp)
+        .post(`/api/responses/${robustForm._id}`)
+        .field('answers', JSON.stringify([
+          { questionId: reqText._id, value: 'Valid Name' },
+          { questionId: foreignId, value: 'Foreign Value' }
+        ]))
+        .attach(`file_${fileQuestion._id.toString()}`, Buffer.from('%PDF-1.4\n%EOF\n'), {
+          filename: 'valid.pdf',
+          contentType: 'application/pdf'
+        });
+
+      expect(res.status).toBe(400);
+      expect(res.body.success).toBe(false);
+      expect(res.body.message).toBe('Question does not belong to this form');
+
+      // Verify storageService.uploadFile was never initiated
+      expect(uploadSpy).not.toHaveBeenCalled();
+
+      // Verify no response was saved
+      const count = await Response.countDocuments({ formId: robustForm._id });
+      expect(count).toBe(0);
+
+      uploadSpy.mockRestore();
+    });
+
+    it('cleans up temporary files from disk when validation fails', async () => {
+      const fileQuestion = await Question.create({
+        formId: robustForm._id,
+        type: 'file',
+        label: 'Upload Document',
+        required: false,
+        order: 2
+      });
+
+      const unlinkSpy = vi.spyOn(fs, 'unlinkSync');
+      const foreignId = new mongoose.Types.ObjectId().toString();
+
+      try {
+        const res = await request(hardeningApp)
+          .post(`/api/responses/${robustForm._id}`)
+          .field('answers', JSON.stringify([
+            { questionId: reqText._id, value: 'Valid Name' },
+            { questionId: foreignId, value: 'Foreign Value' }
+          ]))
+          .attach(`file_${fileQuestion._id.toString()}`, Buffer.from('%PDF-1.4\n%EOF\n'), {
+            filename: 'test-cleanup.pdf',
+            contentType: 'application/pdf'
+          });
+
+        expect(res.status).toBe(400);
+        expect(res.body.success).toBe(false);
+
+        // Verify fs.unlinkSync was called for the uploaded temporary file
+        expect(unlinkSpy).toHaveBeenCalled();
+        const unlinkedPath = unlinkSpy.mock.calls[0][0];
+        expect(typeof unlinkedPath).toBe('string');
+        expect(fs.existsSync(unlinkedPath)).toBe(false);
+      } finally {
+        unlinkSpy.mockRestore();
+      }
+    });
+
+    it('allows valid submissions containing only matching form questions to succeed', async () => {
+      const res = await request(hardeningApp)
+        .post(`/api/responses/${robustForm._id}`)
+        .send({
+          answers: [
+            { questionId: reqText._id, value: 'Legitimate Name' },
+            { questionId: optText._id, value: 'Legitimate Notes' }
+          ]
+        });
+
+      expect(res.status).toBe(201);
+      expect(res.body.success).toBe(true);
+
+      const saved = await Response.findOne({ formId: robustForm._id });
+      expect(saved).toBeDefined();
+      expect(saved.answers.length).toBe(2);
+      expect(saved.answers[0].questionId.toString()).toBe(reqText._id.toString());
+      expect(saved.answers[0].value).toBe('Legitimate Name');
+      expect(saved.answers[1].questionId.toString()).toBe(optText._id.toString());
+      expect(saved.answers[1].value).toBe('Legitimate Notes');
+    });
+
+    it('isQuestionVisible unit evaluation handles malformed inputs safely without throwing', () => {
+      const targetQId = new mongoose.Types.ObjectId().toString();
+      const ruleQuestion = {
+        visibilityRule: {
+          targetQuestionId: targetQId,
+          operator: 'equals',
+          value: 'show_it'
+        }
+      };
+
+      // Non-array answers
+      expect(isQuestionVisible(ruleQuestion, null)).toBe(false);
+      expect(isQuestionVisible(ruleQuestion, undefined)).toBe(false);
+      expect(isQuestionVisible(ruleQuestion, 'not-an-array')).toBe(false);
+
+      // Answers array containing null, undefined, primitive, or malformed elements
+      expect(isQuestionVisible(ruleQuestion, [null, undefined, 42, 'string', {}])).toBe(false);
+
+      // Answers array containing valid matching entry
+      expect(
+        isQuestionVisible(ruleQuestion, [
+          null,
+          { questionId: targetQId, value: 'show_it' }
+        ])
+      ).toBe(true);
+
+      // Question without rule or with empty rule
+      expect(isQuestionVisible({}, [])).toBe(true);
+      expect(isQuestionVisible(null, [])).toBe(true);
+      expect(isQuestionVisible({ visibilityRule: {} }, [])).toBe(true);
+      expect(isQuestionVisible({ visibilityRule: { targetQuestionId: null } }, [])).toBe(true);
+
+      // Visibility rule operators
+      const notEqualQuestion = {
+        visibilityRule: {
+          targetQuestionId: targetQId,
+          operator: 'not_equals',
+          value: 'hide_me'
+        }
+      };
+      expect(isQuestionVisible(notEqualQuestion, [{ questionId: targetQId, value: 'other' }])).toBe(true);
+      expect(isQuestionVisible(notEqualQuestion, [{ questionId: targetQId, value: 'hide_me' }])).toBe(false);
+
+      const containsQuestion = {
+        visibilityRule: {
+          targetQuestionId: targetQId,
+          operator: 'contains',
+          value: 'apple'
+        }
+      };
+      expect(isQuestionVisible(containsQuestion, [{ questionId: targetQId, value: ['orange', 'apple'] }])).toBe(true);
+      expect(isQuestionVisible(containsQuestion, [{ questionId: targetQId, value: 'pineapple' }])).toBe(true);
+      expect(isQuestionVisible(containsQuestion, [{ questionId: targetQId, value: 'banana' }])).toBe(false);
     });
   });
 });

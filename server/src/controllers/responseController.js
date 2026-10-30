@@ -1,3 +1,4 @@
+import mongoose from 'mongoose';
 import Response from '../models/response.js';
 import Form from '../models/form.js';
 import Question from '../models/question.js';
@@ -12,12 +13,14 @@ import path from 'path';
 import contentDisposition from 'content-disposition';
 
 // Helper to evaluate visibility rule
-const isQuestionVisible = (question, answers) => {
-  if (!question.visibilityRule || !question.visibilityRule.targetQuestionId) {
+export const isQuestionVisible = (question, answers) => {
+  if (!question || !question.visibilityRule || !question.visibilityRule.targetQuestionId) {
     return true;
   }
   const { targetQuestionId, operator, value } = question.visibilityRule;
-  const targetAnswer = answers.find(a => String(a.questionId) === String(targetQuestionId));
+  const targetAnswer = Array.isArray(answers)
+    ? answers.find(a => a && typeof a === 'object' && a.questionId && String(a.questionId) === String(targetQuestionId))
+    : null;
 
   if (!targetAnswer || targetAnswer.value === undefined || targetAnswer.value === null) {
     return false;
@@ -68,7 +71,44 @@ export const submitResponse = async (req, res, next) => {
       return res.status(400).json({ success: false, message: 'Answers array is required' });
     }
 
+    if (rawAnswers.length > 500) {
+      return res.status(400).json({ success: false, message: 'Answers array exceeds maximum limit of 500 items' });
+    }
+
+    const isValidQuestionId = id =>
+      id instanceof mongoose.Types.ObjectId ||
+      (typeof id === 'string' && /^[0-9a-fA-F]{24}$/.test(id));
+
+    if (
+      rawAnswers.some(
+        a =>
+          !a ||
+          typeof a !== 'object' ||
+          Array.isArray(a) ||
+          !a.questionId ||
+          !isValidQuestionId(a.questionId)
+      )
+    ) {
+      return res.status(400).json({ success: false, message: 'Each answer item must be a valid object' });
+    }
+
+    const seenQuestionIds = new Set();
+    for (const a of rawAnswers) {
+      const normalizedId = a.questionId.toString();
+      if (seenQuestionIds.has(normalizedId)) {
+        return res.status(400).json({ success: false, message: 'Duplicate answers for the same question are not allowed' });
+      }
+      seenQuestionIds.add(normalizedId);
+    }
+
     const questions = await Question.find({ formId: req.params.formId });
+
+    const validQuestionIds = new Set(questions.map(q => q._id.toString()));
+    for (const a of rawAnswers) {
+      if (!validQuestionIds.has(a.questionId.toString())) {
+        return res.status(400).json({ success: false, message: 'Question does not belong to this form' });
+      }
+    }
 
     const validAnswersToSave = [];
     const filesToUpload = []; // { file, question, key }
@@ -88,9 +128,18 @@ export const submitResponse = async (req, res, next) => {
           val = file;
         }
       } else {
-        const providedAnswer = rawAnswers.find(a => a.questionId === question._id.toString());
+        const providedAnswer = rawAnswers.find(
+          a => a && typeof a === 'object' && a.questionId && a.questionId.toString() === question._id.toString()
+        );
         val = providedAnswer ? providedAnswer.value : undefined;
-        hasValue = val !== undefined && val !== null && val !== '' && !(Array.isArray(val) && val.length === 0);
+        const isWhitespaceOnlyText =
+          ['short_text', 'long_text'].includes(question.type) && typeof val === 'string' && val.trim() === '';
+        hasValue =
+          val !== undefined &&
+          val !== null &&
+          val !== '' &&
+          !isWhitespaceOnlyText &&
+          !(Array.isArray(val) && val.length === 0);
       }
 
       if (isVisible && question.required && !hasValue) {
@@ -261,22 +310,22 @@ export const submitResponse = async (req, res, next) => {
         }
       }
       throw uploadOrDbError;
-    } finally {
-      // Clean up temporary files from disk
-      if (req.files && Array.isArray(req.files)) {
-        for (const f of req.files) {
-          if (f.path && fs.existsSync(f.path)) {
-            try {
-              fs.unlinkSync(f.path);
-            } catch (e) {
-              console.error('Failed to delete temp file:', e);
-            }
+    }
+  } catch (error) {
+    next(error);
+  } finally {
+    // Clean up temporary files from disk
+    if (req.files && Array.isArray(req.files)) {
+      for (const f of req.files) {
+        if (f.path && fs.existsSync(f.path)) {
+          try {
+            fs.unlinkSync(f.path);
+          } catch (e) {
+            console.error('Failed to delete temp file:', e);
           }
         }
       }
     }
-  } catch (error) {
-    next(error);
   }
 };
 
