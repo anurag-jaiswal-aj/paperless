@@ -109,7 +109,7 @@ app.use(csrfProtection); // Validate origin on mutating requests
 
 // Health check routes
 // Liveness probe
-app.get('/health', (req, res) => {
+app.get(['/health', '/api/health'], (req, res) => {
   res.status(200).json({
     success: true,
     status: 'live',
@@ -130,8 +130,7 @@ const readinessHandler = (req, res) => {
   });
 };
 
-app.get('/health/ready', readinessHandler);
-app.get('/ready', readinessHandler);
+app.get(['/health/ready', '/ready', '/api/health/ready', '/api/ready'], readinessHandler);
 
 // API Routes
 app.use('/api/auth', authRoutes);
@@ -140,7 +139,7 @@ app.use('/api/responses', responseRoutes);
 app.use('/api/ai', aiRoutes);
 
 // Root route
-app.get('/', (req, res) => {
+app.get(['/', '/api'], (req, res) => {
   res.json({
     success: true,
     message: 'Welcome to Paperless API',

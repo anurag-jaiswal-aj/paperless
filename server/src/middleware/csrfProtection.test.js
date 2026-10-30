@@ -43,18 +43,19 @@ beforeAll(async () => {
   testApp.use(csrfProtection);
 
   // Health and readiness probes
-  testApp.get('/health', (req, res) => {
+  testApp.get(['/health', '/api/health'], (req, res) => {
     res.status(200).json({ success: true, status: 'live' });
   });
 
-  testApp.get('/health/ready', (req, res) => {
+  const readinessProbe = (req, res) => {
     const isDbReady = mongoose.connection.readyState === 1;
     res.status(isDbReady ? 200 : 503).json({
       success: isDbReady,
       status: isDbReady ? 'ready' : 'not_ready',
       database: isDbReady ? 'connected' : 'disconnected'
     });
-  });
+  };
+  testApp.get(['/health/ready', '/ready', '/api/health/ready', '/api/ready'], readinessProbe);
 
   testApp.use('/api/auth', authRoutes);
   testApp.use('/api/forms', formRoutes);
@@ -128,6 +129,15 @@ describe('CSRF Protection and Origin Validation', () => {
 
     it('allows GET requests with missing Origin header', async () => {
       const res = await request(testApp).get('/health');
+      expect(res.status).toBe(200);
+      expect(res.body.status).toBe('live');
+    });
+
+    it('allows GET requests to /api/health regardless of Origin header', async () => {
+      const res = await request(testApp)
+        .get('/api/health')
+        .set('Origin', UNTRUSTED_ORIGIN);
+
       expect(res.status).toBe(200);
       expect(res.body.status).toBe('live');
     });
@@ -392,6 +402,20 @@ describe('CSRF Protection and Origin Validation', () => {
       expect(res.body.success).toBe(true);
       expect(res.body.status).toBe('ready');
       expect(res.body.database).toBe('connected');
+    });
+
+    it('returns HTTP 200 on /ready, /api/ready, and /api/health/ready when MongoDB is connected', async () => {
+      const resReady = await request(testApp).get('/ready');
+      expect(resReady.status).toBe(200);
+      expect(resReady.body.status).toBe('ready');
+
+      const resApiReady = await request(testApp).get('/api/ready');
+      expect(resApiReady.status).toBe(200);
+      expect(resApiReady.body.status).toBe('ready');
+
+      const resApiHealthReady = await request(testApp).get('/api/health/ready');
+      expect(resApiHealthReady.status).toBe(200);
+      expect(resApiHealthReady.body.status).toBe('ready');
     });
 
     it('returns HTTP 503 when MongoDB is not connected', async () => {

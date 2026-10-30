@@ -66,7 +66,7 @@ export const errorHandler = (err, req, res, next) => {
   }
 
   // Default error
-  const statusCode = err.statusCode || 500;
+  const statusCode = err.statusCode || (res.statusCode && res.statusCode >= 400 ? res.statusCode : 500);
   const isProduction = process.env.NODE_ENV === 'production';
   const message = (isProduction && statusCode === 500) ? 'Internal Server Error' : (err.message || 'Server Error');
 
@@ -82,6 +82,7 @@ export const errorHandler = (err, req, res, next) => {
  */
 export const notFound = (req, res, next) => {
   const error = new Error(`Not Found - ${req.originalUrl}`);
+  error.statusCode = 404;
   res.status(404);
   next(error);
 };
