@@ -14,12 +14,53 @@ class EmailService {
   }
 
   /**
+   * Helper to format email body for development logging.
+   * Completely omits sensitive password reset content so credentials and tokens
+   * never appear in log streams under any format or encoding.
+   * @param {Object} options
+   * @returns {string}
+   */
+  _formatBodyForLogging(options) {
+    if (!options || typeof options !== 'object') return '';
+    const subject = (options.subject || '').toLowerCase();
+    const content = options.text || options.html || '';
+
+    if (
+      options.isSensitive ||
+      subject.includes('password reset') ||
+      subject.includes('reset password') ||
+      (typeof content === 'string' && /resetpassword/i.test(content))
+    ) {
+      return '[Omitted: Sensitive password reset content is never written to logs]';
+    }
+
+    return this._sanitizeForLogging(content);
+  }
+
+  /**
+   * Redacts sensitive reset URLs, raw token strings, email addresses, and API credentials from text.
+   * Defense-in-depth sanitization for email content and error messages.
+   * @param {string} content
+   * @returns {string}
+   */
+  _sanitizeForLogging(content) {
+    if (typeof content !== 'string') return '';
+    return content
+      .replace(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g, '[REDACTED_EMAIL]')
+      .replace(/(https?:\/\/[^\s"'<>]+)?\/resetpassword\/[a-zA-Z0-9_%-]+/gi, '[REDACTED_RESET_LINK]')
+      .replace(/\b[0-9a-fA-F]{40}\b/g, '[REDACTED_TOKEN]')
+      .replace(/re_[a-zA-Z0-9_]{16,}/g, '[REDACTED_API_KEY]')
+      .replace(/bearer\s+[a-zA-Z0-9._~+/-]+/gi, 'Bearer [REDACTED_TOKEN]');
+  }
+
+  /**
    * Send an email
    * @param {Object} options
    * @param {string} options.to - Recipient email address
    * @param {string} options.subject - Email subject
    * @param {string} options.html - HTML body of the email
    * @param {string} [options.text] - Plain text body (fallback)
+   * @param {boolean} [options.isSensitive] - Whether the email contains sensitive credentials
    * @returns {Promise<Object>} Provider specific response
    */
   async sendEmail(options) {
@@ -31,7 +72,7 @@ class EmailService {
       console.log('--- Development Email Log ---');
       console.log(`To: ${options.to}`);
       console.log(`Subject: ${options.subject}`);
-      console.log(`Body: ${options.text || options.html}`);
+      console.log(`Body: ${this._formatBodyForLogging(options)}`);
       console.log('-----------------------------');
       return { id: 'dev-email-id' };
     }
@@ -46,7 +87,8 @@ class EmailService {
       });
       return data;
     } catch (error) {
-      console.error('Email sending failed', error);
+      const safeErrorMsg = this._sanitizeForLogging(error && error.message ? error.message : 'Unknown error');
+      console.error('Email sending failed:', safeErrorMsg);
       throw error;
     }
   }
@@ -65,7 +107,8 @@ class EmailService {
       to,
       subject: 'Paperless - Password Reset',
       text: message,
-      html: `<p>You requested a password reset. Please click the link to reset your password:</p><a href="${resetUrl}">${resetUrl}</a>`
+      html: `<p>You requested a password reset. Please click the link to reset your password:</p><a href="${resetUrl}">${resetUrl}</a>`,
+      isSensitive: true
     });
   }
 

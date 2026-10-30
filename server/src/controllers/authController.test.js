@@ -8,6 +8,7 @@ import crypto from 'crypto';
 import { MongoMemoryServer } from 'mongodb-memory-server';
 import authRoutes from '../routes/authRoutes';
 import User from '../models/user';
+import EmailService from '../services/EmailService';
 import { optionalAuth } from '../middleware/authMiddleware';
 import { resolveCookieSameSite, getBaseCookieOptions } from './authController';
 
@@ -1102,6 +1103,119 @@ describe('Auth Controller', () => {
       const user = await User.findOne({ email: testUser.email });
       expect(user.resetPasswordToken).toBeDefined();
       expect(user.resetPasswordExpire).toBeDefined();
+    });
+
+    it('returns generic message and clears token if email delivery fails', async () => {
+      const emailSpy = vi.spyOn(EmailService.prototype, 'sendEmail').mockRejectedValueOnce(
+        new Error('Delivery service timeout')
+      );
+      const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      const res = await request(app)
+        .post('/api/auth/forgotpassword')
+        .send({ email: testUser.email });
+
+      expect(res.status).toBe(200);
+      expect(res.body.message).toContain('password reset link has been sent');
+
+      const user = await User.findOne({ email: testUser.email });
+      expect(user.resetPasswordToken).toBeUndefined();
+      expect(user.resetPasswordExpire).toBeUndefined();
+
+      expect(consoleErrorSpy).toHaveBeenCalledWith(
+        'Email delivery failed during password reset:',
+        'Delivery service timeout'
+      );
+
+      emailSpy.mockRestore();
+      consoleErrorSpy.mockRestore();
+    });
+
+    it('returns generic message and handles cleanup database errors gracefully on delivery failure', async () => {
+      const emailSpy = vi.spyOn(EmailService.prototype, 'sendEmail').mockRejectedValueOnce(
+        new Error('Delivery failure to target@example.com with key re_1234567890123456')
+      );
+      const updateOneSpy = vi.spyOn(User, 'updateOne').mockRejectedValueOnce(
+        new Error('Database write failure')
+      );
+      const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      const res = await request(app)
+        .post('/api/auth/forgotpassword')
+        .send({ email: testUser.email });
+
+      expect(res.status).toBe(200);
+      expect(res.body.message).toContain('password reset link has been sent');
+
+      const loggedErrors = consoleErrorSpy.mock.calls.map(c => c.join(' ')).join('\n');
+      expect(loggedErrors).toContain('Email delivery failed during password reset:');
+      expect(loggedErrors).toContain('Failed to cleanup reset token after email failure: Database write failure');
+      // Confirm sensitive data was sanitized
+      expect(loggedErrors).not.toContain('target@example.com');
+      expect(loggedErrors).not.toContain('re_1234567890123456');
+      expect(loggedErrors).toContain('[REDACTED_EMAIL]');
+      expect(loggedErrors).toContain('[REDACTED_API_KEY]');
+
+      emailSpy.mockRestore();
+      updateOneSpy.mockRestore();
+      consoleErrorSpy.mockRestore();
+    });
+
+    it('does not clobber a newer concurrent reset token if an earlier email delivery fails', async () => {
+      let r1Started;
+      const r1StartedPromise = new Promise(resolve => {
+        r1Started = resolve;
+      });
+
+      let r1Reject;
+      const r1EmailPromise = new Promise((_, reject) => {
+        r1Reject = reject;
+      });
+
+      let callCount = 0;
+      const emailSpy = vi.spyOn(EmailService.prototype, 'sendEmail').mockImplementation(() => {
+        callCount++;
+        if (callCount === 1) {
+          r1Started();
+          return r1EmailPromise;
+        }
+        return Promise.resolve({ id: 'r2-success' });
+      });
+      const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      // Launch Request 1 execution in background
+      const r1Execution = (async () => {
+        return request(app)
+          .post('/api/auth/forgotpassword')
+          .send({ email: testUser.email });
+      })();
+
+      // Deterministically wait until Request 1 has saved its token and entered email sending
+      await r1StartedPromise;
+
+      // Launch Request 2 (concurrent request for same user)
+      const r2Res = await request(app)
+        .post('/api/auth/forgotpassword')
+        .send({ email: testUser.email });
+      expect(r2Res.status).toBe(200);
+
+      // Inspect DB: Request 2 generated and saved its own token
+      const userAfterR2 = await User.findOne({ email: testUser.email });
+      const r2TokenHash = userAfterR2.resetPasswordToken;
+      expect(r2TokenHash).toBeDefined();
+
+      // Now trigger failure for Request 1
+      r1Reject(new Error('Network connection dropped'));
+      const r1Res = await r1Execution;
+      expect(r1Res.status).toBe(200);
+
+      // Verify Request 1 failure did not wipe out Request 2 newer valid token in DB
+      const finalUser = await User.findOne({ email: testUser.email });
+      expect(finalUser.resetPasswordToken).toBe(r2TokenHash);
+      expect(finalUser.resetPasswordExpire).toBeDefined();
+
+      emailSpy.mockRestore();
+      consoleErrorSpy.mockRestore();
     });
 
     it('resets password with valid token and invalidates token', async () => {
