@@ -14,7 +14,9 @@ import api, {
   clearLocalAuthState,
   onAuthSessionChange,
   notifyAuthLogin,
-  broadcastAuthLogout
+  broadcastAuthLogout,
+  resolveApiBaseUrl,
+  API_URL
 } from './api';
 
 describe('API Client and Token Refresh Interceptor', () => {
@@ -748,6 +750,38 @@ describe('API Client and Token Refresh Interceptor', () => {
     expect(localStorage.getItem('user')).toBeNull();
 
     unsubscribe();
+  });
+
+  describe('resolveApiBaseUrl', () => {
+    it('defaults to empty string for relative proxy requests when no variables set', () => {
+      expect(resolveApiBaseUrl({})).toBe('');
+      expect(resolveApiBaseUrl(undefined)).toBe('');
+      expect(resolveApiBaseUrl({ VITE_API_URL: '', VITE_BACKEND_URL: '' })).toBe('');
+      expect(resolveApiBaseUrl({ VITE_API_URL: '   ' })).toBe('');
+    });
+
+    it('prefers VITE_BACKEND_URL or VITE_API_URL when explicitly specified', () => {
+      expect(
+        resolveApiBaseUrl({ VITE_API_URL: 'https://api.paperless.example.com' })
+      ).toBe('https://api.paperless.example.com');
+
+      expect(
+        resolveApiBaseUrl({
+          VITE_BACKEND_URL: 'https://backend.paperless.example.com',
+          VITE_API_URL: 'https://fallback.paperless.example.com'
+        })
+      ).toBe('https://backend.paperless.example.com');
+    });
+
+    it('trims whitespace around configured URL', () => {
+      expect(
+        resolveApiBaseUrl({ VITE_API_URL: '  https://custom.api.com  ' })
+      ).toBe('https://custom.api.com');
+    });
+
+    it('current module exports default API_URL without hardcoded localhost:5001 fallback', () => {
+      expect(API_URL).not.toBe('http://localhost:5001');
+    });
   });
 });
 

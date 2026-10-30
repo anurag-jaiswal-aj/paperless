@@ -45,6 +45,34 @@ const buildSessionEntry = (sessionId, tokenHash) => {
 };
 
 /**
+ * Resolves and validates the SameSite attribute for cookies.
+ * Permitted values: 'lax', 'strict', 'none'.
+ * Any missing, blank, or invalid value safely defaults to 'lax'.
+ */
+export const resolveCookieSameSite = (value = process.env.COOKIE_SAMESITE) => {
+  if (typeof value !== 'string') return 'lax';
+  const normalized = value.trim().toLowerCase();
+  if (['lax', 'strict', 'none'].includes(normalized)) {
+    return normalized;
+  }
+  return 'lax';
+};
+
+/**
+ * Helper to construct consistent cookie options across auth endpoints.
+ */
+export const getBaseCookieOptions = () => {
+  const sameSite = resolveCookieSameSite();
+  const isSecure = process.env.NODE_ENV === 'production' || sameSite === 'none';
+  return {
+    httpOnly: true,
+    secure: isSecure,
+    sameSite,
+    path: '/'
+  };
+};
+
+/**
  * Helper: Get token from model, create cookie and send response
  */
 const sendTokenResponse = async (user, statusCode, res, message, existingSessionId) => {
@@ -71,12 +99,7 @@ const sendTokenResponse = async (user, statusCode, res, message, existingSession
 
   const finalUser = updatedUser || user;
 
-  const options = {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
-    sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
-    path: '/'
-  };
+  const options = getBaseCookieOptions();
 
   const tokenOptions = {
     ...options,
@@ -252,10 +275,7 @@ export const logout = async (req, res) => {
   }
 
   const options = {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
-    sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
-    path: '/',
+    ...getBaseCookieOptions(),
     expires: new Date(Date.now())
   };
 
@@ -326,12 +346,7 @@ export const refreshToken = async (req, res) => {
       return res.status(401).json({ success: false, message: 'Invalid or revoked refresh token' });
     }
 
-    const options = {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
-      path: '/'
-    };
+    const options = getBaseCookieOptions();
 
     const tokenOptions = {
       ...options,

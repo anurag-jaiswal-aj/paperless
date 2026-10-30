@@ -1,11 +1,16 @@
 import axios from 'axios';
 
-const configuredUrl =
-  import.meta.env.VITE_BACKEND_URL || import.meta.env.VITE_API_URL;
+export const resolveApiBaseUrl = (env = import.meta.env) => {
+  const configured = env?.VITE_BACKEND_URL || env?.VITE_API_URL;
+  if (typeof configured === 'string' && configured.trim() !== '') {
+    return configured.trim();
+  }
+  // Default to relative base URL ('') in both dev and production
+  // so that Vite proxy and Nginx reverse proxy work seamlessly without localhost leakage.
+  return '';
+};
 
-const API_URL = import.meta.env.DEV
-  ? ''
-  : (configuredUrl !== undefined ? configuredUrl : 'http://localhost:5001');
+export const API_URL = resolveApiBaseUrl();
 
 // Create axios instance
 const api = axios.create({

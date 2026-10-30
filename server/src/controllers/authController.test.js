@@ -9,6 +9,7 @@ import { MongoMemoryServer } from 'mongodb-memory-server';
 import authRoutes from '../routes/authRoutes';
 import User from '../models/user';
 import { optionalAuth } from '../middleware/authMiddleware';
+import { resolveCookieSameSite, getBaseCookieOptions } from './authController';
 
 // Mock EmailService
 vi.mock('../services/EmailService', () => {
@@ -1135,6 +1136,67 @@ describe('Auth Controller', () => {
         finalStatus = res.status;
       }
       expect(finalStatus).toBe(429); // Too many requests
+    });
+  });
+
+  describe('Cookie Policy and COOKIE_SAMESITE Validation', () => {
+    it('defaults to lax when COOKIE_SAMESITE is missing, empty, or non-string', () => {
+      expect(resolveCookieSameSite(undefined)).toBe('lax');
+      expect(resolveCookieSameSite(null)).toBe('lax');
+      expect(resolveCookieSameSite('')).toBe('lax');
+      expect(resolveCookieSameSite('   ')).toBe('lax');
+      expect(resolveCookieSameSite(123)).toBe('lax');
+    });
+
+    it('correctly accepts valid values in lowercase', () => {
+      expect(resolveCookieSameSite('lax')).toBe('lax');
+      expect(resolveCookieSameSite('strict')).toBe('strict');
+      expect(resolveCookieSameSite('none')).toBe('none');
+    });
+
+    it('normalizes mixed-case and padded values', () => {
+      expect(resolveCookieSameSite('Lax')).toBe('lax');
+      expect(resolveCookieSameSite('STRICT')).toBe('strict');
+      expect(resolveCookieSameSite('  None  ')).toBe('none');
+    });
+
+    it('falls back safely to lax when given invalid or unrecognized values', () => {
+      expect(resolveCookieSameSite('invalid')).toBe('lax');
+      expect(resolveCookieSameSite('unknown')).toBe('lax');
+      expect(resolveCookieSameSite('lax-plus')).toBe('lax');
+    });
+
+    it('enforces secure: true when SameSite=none regardless of NODE_ENV', () => {
+      const originalSameSite = process.env.COOKIE_SAMESITE;
+      try {
+        process.env.COOKIE_SAMESITE = 'none';
+        const options = getBaseCookieOptions();
+        expect(options.sameSite).toBe('none');
+        expect(options.secure).toBe(true);
+        expect(options.httpOnly).toBe(true);
+        expect(options.path).toBe('/');
+      } finally {
+        process.env.COOKIE_SAMESITE = originalSameSite;
+      }
+    });
+
+    it('sets matching SameSite=Lax attributes on login and logout cookies', async () => {
+      await request(app).post('/api/auth/register').send(testUser);
+
+      const loginRes = await request(app)
+        .post('/api/auth/login')
+        .send({ email: testUser.email, password: testUser.password });
+
+      const loginCookies = loginRes.headers['set-cookie'];
+      expect(loginCookies).toBeDefined();
+      expect(loginCookies.some(c => c.includes('SameSite=Lax'))).toBe(true);
+
+      const logoutRes = await request(app).post('/api/auth/logout');
+      const logoutCookies = logoutRes.headers['set-cookie'];
+      expect(logoutCookies).toBeDefined();
+      expect(logoutCookies.some(c => c.includes('SameSite=Lax'))).toBe(true);
+      expect(logoutCookies.some(c => c.includes('Path=/'))).toBe(true);
+      expect(logoutCookies.some(c => c.includes('HttpOnly'))).toBe(true);
     });
   });
 });
