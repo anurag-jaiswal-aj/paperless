@@ -9,12 +9,12 @@ import cookieParser from 'cookie-parser';
 // Load environment variables
 dotenv.config();
 
-// Require minimum environment variables in production
-if (process.env.NODE_ENV === 'production') {
+// Require minimum environment variables in production and staging
+if (process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging') {
   const requiredEnvs = ['MONGO_URI', 'JWT_SECRET', 'JWT_REFRESH_SECRET', 'FRONTEND_URL', 'S3_REGION', 'S3_BUCKET', 'S3_ACCESS_KEY_ID', 'S3_SECRET_ACCESS_KEY'];
   for (const env of requiredEnvs) {
     if (!process.env[env]) {
-      console.error(`FATAL ERROR: Missing required production environment variable: ${env}`);
+      console.error(`FATAL ERROR: Missing required production/staging environment variable: ${env}`);
       process.exit(1);
     }
   }
@@ -32,6 +32,53 @@ import { csrfProtection } from './middleware/csrfProtection.js';
 
 // Initialize Express app
 const app = express();
+
+export const DEFAULT_TRUSTED_PROXIES = ['loopback', 'linklocal', 'uniquelocal'];
+
+/**
+ * Resolves the trusted proxy boundary for Express.
+ * Prevents client-spoofed X-Forwarded-For headers from bypassing rate limits
+ * by trusting only private subnets and reverse proxies when behind a proxy.
+ *
+ * @param {string|undefined} trustProxyEnv - The TRUST_PROXY environment variable value
+ * @param {string|undefined} nodeEnv - The NODE_ENV environment variable value
+ * @returns {boolean|number|string|string[]} The trusted proxy setting for Express
+ */
+export const resolveTrustProxy = (trustProxyEnv, nodeEnv) => {
+  if (trustProxyEnv !== undefined && trustProxyEnv !== null && String(trustProxyEnv).trim() !== '') {
+    const trimmed = String(trustProxyEnv).trim();
+    if (trimmed.toLowerCase() === 'false') return false;
+    if (trimmed.toLowerCase() === 'true') {
+      // Setting Express 'trust proxy' to boolean true trusts every proxy hop unconditionally
+      // and accepts the leftmost client-provided IP, completely defeating IP-based rate limiting
+      // and triggering ERR_ERL_PERMISSIVE_TRUST_PROXY in express-rate-limit.
+      // Safely map 'true' to the standard trusted proxy configuration.
+      return DEFAULT_TRUSTED_PROXIES;
+    }
+
+    const num = Number(trimmed);
+    if (!Number.isNaN(num) && Number.isInteger(num) && num >= 0) {
+      return num;
+    }
+
+    const parts = trimmed.split(',').map((s) => s.trim()).filter(Boolean);
+    return parts.length === 1 ? parts[0] : parts;
+  }
+
+  // In production and staging, Express runs behind our reverse proxy (Nginx).
+  // Default to trusting loopback and standard RFC 1918 / RFC 4193 private networks
+  // (loopback: 127.0.0.0/8, ::1; linklocal: 169.254.0.0/16, fe80::/10; uniquelocal: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, fc00::/7).
+  // Direct untrusted internet IPs are never trusted, ensuring spoofed X-Forwarded-For headers are ignored.
+  if (nodeEnv === 'production' || nodeEnv === 'staging') {
+    return DEFAULT_TRUSTED_PROXIES;
+  }
+
+  // In development and test environments without an explicit TRUST_PROXY setting,
+  // default to false (untrusted) so direct requests strictly use req.socket.remoteAddress.
+  return false;
+};
+
+app.set('trust proxy', resolveTrustProxy(process.env.TRUST_PROXY, process.env.NODE_ENV));
 
 // Database connection
 const connectDB = async () => {

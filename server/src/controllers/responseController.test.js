@@ -11,6 +11,9 @@ import Response from '../models/response.js';
 import responseRoutes from '../routes/responseRoutes.js';
 import { formatCsvAnswer, sanitizeCsvCell, escapeCsvCell } from './responseController.js';
 import { errorHandler } from '../middleware/errorHandler.js';
+import storageService from '../services/StorageService.js';
+import { Readable } from 'stream';
+import jwt from 'jsonwebtoken';
 
 let mongoServer;
 const app = express();
@@ -1144,6 +1147,312 @@ describe('Response Controller - Phase 2', () => {
       expect(res.body.data.form.id).toBe(exportForm._id.toString());
       expect(res.body.data.questions.length).toBe(8);
       expect(res.body.data.responses.length).toBe(1);
+    });
+  });
+
+  describe('GET /api/responses/:formId/:responseId/file/:questionId (downloadResponseFile)', () => {
+    let owner;
+    let nonOwner;
+    let ownerToken;
+    let nonOwnerToken;
+    let fileForm;
+    let fileQuestion;
+    let fileResponse;
+
+    beforeEach(async () => {
+      owner = await User.create({
+        name: 'File Owner',
+        email: `fileowner-${Date.now()}@test.com`,
+        password: 'password123'
+      });
+      ownerToken = jwt.sign({ id: owner._id }, process.env.JWT_SECRET);
+
+      nonOwner = await User.create({
+        name: 'Non Owner',
+        email: `nonowner-${Date.now()}@test.com`,
+        password: 'password123'
+      });
+      nonOwnerToken = jwt.sign({ id: nonOwner._id }, process.env.JWT_SECRET);
+
+      fileForm = await Form.create({
+        ownerId: owner._id,
+        title: 'Form with File',
+        status: 'published'
+      });
+
+      fileQuestion = await Question.create({
+        formId: fileForm._id,
+        type: 'file',
+        label: 'Upload Document',
+        required: true,
+        order: 0
+      });
+
+      fileResponse = await Response.create({
+        formId: fileForm._id,
+        answers: [
+          {
+            questionId: fileQuestion._id,
+            value: {
+              key: `forms/${fileForm._id}/${fileQuestion._id}/sample-doc.pdf`,
+              originalName: 'report-2026.pdf',
+              mimeType: 'application/pdf',
+              size: 20
+            }
+          }
+        ]
+      });
+    });
+
+    it('successfully streams an authorized file and returns expected headers', async () => {
+      const mockStream = Readable.from(['Sample PDF content!']);
+      const spy = vi.spyOn(storageService, 'getFileStream').mockResolvedValueOnce({
+        stream: mockStream,
+        contentType: 'application/pdf',
+        contentLength: 19
+      });
+
+      const res = await request(app)
+        .get(`/api/responses/${fileForm._id}/${fileResponse._id}/file/${fileQuestion._id}`)
+        .set('Cookie', [`token=${ownerToken}`]);
+
+      expect(res.status).toBe(200);
+      expect(res.headers['content-type']).toBe('application/pdf');
+      expect(res.headers['content-disposition']).toMatch(/attachment;\s*filename="report-2026\.pdf"/);
+      expect(res.headers['x-content-type-options']).toBe('nosniff');
+      expect(res.body.toString()).toBe('Sample PDF content!');
+      expect(spy).toHaveBeenCalledWith(`forms/${fileForm._id}/${fileQuestion._id}/sample-doc.pdf`);
+    });
+
+    it('returns 404 when object is missing in storage (NoSuchKey)', async () => {
+      const noKeyErr = new Error('The specified key does not exist.');
+      noKeyErr.name = 'NoSuchKey';
+      vi.spyOn(storageService, 'getFileStream').mockRejectedValueOnce(noKeyErr);
+
+      const res = await request(app)
+        .get(`/api/responses/${fileForm._id}/${fileResponse._id}/file/${fileQuestion._id}`)
+        .set('Cookie', [`token=${ownerToken}`]);
+
+      expect(res.status).toBe(404);
+      expect(res.body.success).toBe(false);
+      expect(res.body.message).toBe('File not found in storage');
+    });
+
+    it('returns 500 when storage fails unexpectedly before streaming begins', async () => {
+      const storageErr = new Error('S3 connection failure');
+      vi.spyOn(storageService, 'getFileStream').mockRejectedValueOnce(storageErr);
+
+      const res = await request(app)
+        .get(`/api/responses/${fileForm._id}/${fileResponse._id}/file/${fileQuestion._id}`)
+        .set('Cookie', [`token=${ownerToken}`]);
+
+      expect(res.status).toBe(500);
+      expect(res.body.success).toBe(false);
+    });
+
+    it('handles stream failure after response headers are sent without unhandled rejection', async () => {
+      const faultyStream = new Readable({
+        read() {
+          this.push('chunk before failure');
+          process.nextTick(() => {
+            this.destroy(new Error('Mid-stream failure'));
+          });
+        }
+      });
+
+      vi.spyOn(storageService, 'getFileStream').mockResolvedValueOnce({
+        stream: faultyStream,
+        contentType: 'text/plain',
+        contentLength: 50
+      });
+
+      // The connection will be aborted when res.destroy() is called
+      try {
+        await request(app)
+          .get(`/api/responses/${fileForm._id}/${fileResponse._id}/file/${fileQuestion._id}`)
+          .set('Cookie', [`token=${ownerToken}`]);
+      } catch (err) {
+        expect(err).toBeDefined();
+      }
+    });
+
+    it('rejects unauthenticated requests with 401', async () => {
+      const res = await request(app)
+        .get(`/api/responses/${fileForm._id}/${fileResponse._id}/file/${fileQuestion._id}`);
+
+      expect(res.status).toBe(401);
+      expect(res.body.success).toBe(false);
+    });
+
+    it('rejects non-owner requests with 403', async () => {
+      const res = await request(app)
+        .get(`/api/responses/${fileForm._id}/${fileResponse._id}/file/${fileQuestion._id}`)
+        .set('Cookie', [`token=${nonOwnerToken}`]);
+
+      expect(res.status).toBe(403);
+      expect(res.body.success).toBe(false);
+      expect(res.body.message).toContain('Not authorized');
+    });
+
+    it('rejects request when response does not exist with 404', async () => {
+      const fakeId = new mongoose.Types.ObjectId();
+      const res = await request(app)
+        .get(`/api/responses/${fileForm._id}/${fakeId}/file/${fileQuestion._id}`)
+        .set('Cookie', [`token=${ownerToken}`]);
+
+      expect(res.status).toBe(404);
+      expect(res.body.success).toBe(false);
+      expect(res.body.message).toBe('Response not found');
+    });
+
+    it('rejects request when question has no file in response with 404', async () => {
+      const fakeQId = new mongoose.Types.ObjectId();
+      const res = await request(app)
+        .get(`/api/responses/${fileForm._id}/${fileResponse._id}/file/${fakeQId}`)
+        .set('Cookie', [`token=${ownerToken}`]);
+
+      expect(res.status).toBe(404);
+      expect(res.body.success).toBe(false);
+      expect(res.body.message).toBe('File not found in response');
+    });
+
+    it('sanitizes filenames containing quotes, CRLF, and control characters preventing header injection', async () => {
+      const unsafeResponse = await Response.create({
+        formId: fileForm._id,
+        answers: [
+          {
+            questionId: fileQuestion._id,
+            value: {
+              key: `forms/${fileForm._id}/${fileQuestion._id}/unsafe.pdf`,
+              originalName: 'evil\r\nSet-Cookie: injected=true\r\n"quoted" file.pdf',
+              mimeType: 'application/pdf',
+              size: 15
+            }
+          }
+        ]
+      });
+
+      const mockStream = Readable.from(['safe content']);
+      vi.spyOn(storageService, 'getFileStream').mockResolvedValueOnce({
+        stream: mockStream,
+        contentType: 'application/pdf',
+        contentLength: 12
+      });
+
+      const res = await request(app)
+        .get(`/api/responses/${fileForm._id}/${unsafeResponse._id}/file/${fileQuestion._id}`)
+        .set('Cookie', [`token=${ownerToken}`]);
+
+      expect(res.status).toBe(200);
+      expect(res.headers['set-cookie']).toBeUndefined();
+      const disposition = res.headers['content-disposition'];
+      expect(disposition).toBeDefined();
+      expect(disposition).not.toContain('\r');
+      expect(disposition).not.toContain('\n');
+      expect(disposition).toContain('attachment;');
+    });
+
+    it('strips directory paths from filenames to prevent path traversal in Content-Disposition', async () => {
+      const traversalResponse = await Response.create({
+        formId: fileForm._id,
+        answers: [
+          {
+            questionId: fileQuestion._id,
+            value: {
+              key: `forms/${fileForm._id}/${fileQuestion._id}/sample.pdf`,
+              originalName: '../../../../etc/passwd',
+              mimeType: 'application/pdf',
+              size: 20
+            }
+          }
+        ]
+      });
+
+      const mockStream = Readable.from(['safe content']);
+      vi.spyOn(storageService, 'getFileStream').mockResolvedValueOnce({
+        stream: mockStream,
+        contentType: 'application/pdf',
+        contentLength: 12
+      });
+
+      const res = await request(app)
+        .get(`/api/responses/${fileForm._id}/${traversalResponse._id}/file/${fileQuestion._id}`)
+        .set('Cookie', [`token=${ownerToken}`]);
+
+      expect(res.status).toBe(200);
+      const disposition = res.headers['content-disposition'];
+      expect(disposition).toBeDefined();
+      expect(disposition).toContain('filename="passwd"');
+      expect(disposition).not.toContain('..');
+      expect(disposition).not.toContain('/etc');
+    });
+
+    it('strips Windows directory paths from filenames to prevent path traversal', async () => {
+      const winTraversalResponse = await Response.create({
+        formId: fileForm._id,
+        answers: [
+          {
+            questionId: fileQuestion._id,
+            value: {
+              key: `forms/${fileForm._id}/${fileQuestion._id}/sample.pdf`,
+              originalName: '..\\..\\windows\\system32\\cmd.exe',
+              mimeType: 'application/pdf',
+              size: 20
+            }
+          }
+        ]
+      });
+
+      const mockStream = Readable.from(['safe content']);
+      vi.spyOn(storageService, 'getFileStream').mockResolvedValueOnce({
+        stream: mockStream,
+        contentType: 'application/pdf',
+        contentLength: 12
+      });
+
+      const res = await request(app)
+        .get(`/api/responses/${fileForm._id}/${winTraversalResponse._id}/file/${fileQuestion._id}`)
+        .set('Cookie', [`token=${ownerToken}`]);
+
+      expect(res.status).toBe(200);
+      const disposition = res.headers['content-disposition'];
+      expect(disposition).toBeDefined();
+      expect(disposition).toContain('filename="cmd.exe"');
+      expect(disposition).not.toContain('..');
+      expect(disposition).not.toContain('windows');
+    });
+
+    it('safely encodes Unicode filenames with RFC 5987 formatting in Content-Disposition', async () => {
+      const unicodeResponse = await Response.create({
+        formId: fileForm._id,
+        answers: [
+          {
+            questionId: fileQuestion._id,
+            value: {
+              key: `forms/${fileForm._id}/${fileQuestion._id}/unicode.pdf`,
+              originalName: '日本語-2026.pdf',
+              mimeType: 'application/pdf',
+              size: 25
+            }
+          }
+        ]
+      });
+
+      const mockStream = Readable.from(['unicode file content']);
+      vi.spyOn(storageService, 'getFileStream').mockResolvedValueOnce({
+        stream: mockStream,
+        contentType: 'application/pdf',
+        contentLength: 20
+      });
+
+      const res = await request(app)
+        .get(`/api/responses/${fileForm._id}/${unicodeResponse._id}/file/${fileQuestion._id}`)
+        .set('Cookie', [`token=${ownerToken}`]);
+
+      expect(res.status).toBe(200);
+      const disposition = res.headers['content-disposition'];
+      expect(disposition).toBeDefined();
+      expect(disposition).toContain("filename*=UTF-8''%E6%97%A5%E6%9C%AC%E8%AA%9E-2026.pdf");
     });
   });
 });

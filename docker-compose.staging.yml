@@ -1,0 +1,113 @@
+services:
+  mongo:
+    image: mongo:7.0
+    restart: unless-stopped
+    volumes:
+      - staging_mongo_data:/data/db
+    networks:
+      - staging-network
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  minio:
+    image: cgr.dev/chainguard/minio:latest
+    restart: unless-stopped
+    command: server /data --console-address :9001
+    environment:
+      - MINIO_ROOT_USER=${S3_ACCESS_KEY_ID:-staging_minio_admin}
+      - MINIO_ROOT_PASSWORD=${S3_SECRET_ACCESS_KEY:-staging_minio_password}
+    volumes:
+      - staging_minio_data:/data
+    networks:
+      staging-network:
+        aliases:
+          - minio
+          - ${S3_BUCKET:-paperless-staging}.minio
+    healthcheck:
+      test: ["CMD", "/usr/bin/bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/9000"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  minio-init:
+    image: cgr.dev/chainguard/minio:latest
+    restart: "no"
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      until /usr/bin/bash -c 'exec 3<>/dev/tcp/minio/9000' 2>/dev/null; do
+        sleep 1;
+      done;
+      /usr/bin/mc alias set local http://minio:9000 $$MINIO_ROOT_USER $$MINIO_ROOT_PASSWORD;
+      /usr/bin/mc mb --ignore-existing local/$$S3_BUCKET;
+      exit 0;
+      "
+    environment:
+      - MINIO_ROOT_USER=${S3_ACCESS_KEY_ID:-staging_minio_admin}
+      - MINIO_ROOT_PASSWORD=${S3_SECRET_ACCESS_KEY:-staging_minio_password}
+      - S3_BUCKET=${S3_BUCKET:-paperless-staging}
+    networks:
+      - staging-network
+
+  server:
+    build:
+      context: ./server
+    restart: unless-stopped
+    depends_on:
+      mongo:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment:
+      - NODE_ENV=production
+      - PORT=5000
+      - MONGO_URI=${MONGO_URI:-mongodb://mongo:27017/paperless_staging}
+      - JWT_SECRET=${JWT_SECRET}
+      - JWT_REFRESH_SECRET=${JWT_REFRESH_SECRET}
+      - COOKIE_SAMESITE=${COOKIE_SAMESITE:-lax}
+      - FRONTEND_URL=${FRONTEND_URL}
+      - TRUSTED_ORIGINS=${TRUSTED_ORIGINS:-${FRONTEND_URL}}
+      - TRUST_PROXY=${TRUST_PROXY:-loopback,linklocal,uniquelocal}
+      - S3_ENDPOINT=${S3_ENDPOINT:-http://minio:9000}
+      - S3_REGION=${S3_REGION:-us-east-1}
+      - S3_BUCKET=${S3_BUCKET:-paperless-staging}
+      - S3_ACCESS_KEY_ID=${S3_ACCESS_KEY_ID:-staging_minio_admin}
+      - S3_SECRET_ACCESS_KEY=${S3_SECRET_ACCESS_KEY:-staging_minio_password}
+      - MAX_FILE_SIZE=${MAX_FILE_SIZE:-5242880}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o-mini}
+      - RESEND_API_KEY=${RESEND_API_KEY:-}
+      - EMAIL_FROM=${EMAIL_FROM:-noreply@example.com}
+    networks:
+      - staging-network
+
+  client:
+    build:
+      context: ./client
+      args:
+        - VITE_API_URL=${VITE_API_URL:-}
+        - VITE_BACKEND_URL=${VITE_BACKEND_URL:-}
+    restart: unless-stopped
+    depends_on:
+      - server
+    ports:
+      # Expose strictly on loopback (127.0.0.1) for Cloudflare Quick Tunnel.
+      # Never exposed to 0.0.0.0 or public interfaces.
+      - "127.0.0.1:${STAGING_PORT:-8080}:80"
+    networks:
+      - staging-network
+
+volumes:
+  staging_mongo_data:
+  staging_minio_data:
+
+networks:
+  staging-network:
+    driver: bridge

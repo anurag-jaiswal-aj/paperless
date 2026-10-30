@@ -7,6 +7,9 @@ import EmailService from '../services/EmailService.js';
 import crypto from 'crypto';
 import fs from 'fs';
 import { fileTypeFromFile } from 'file-type';
+import { pipeline } from 'stream';
+import path from 'path';
+import contentDisposition from 'content-disposition';
 
 // Helper to evaluate visibility rule
 const isQuestionVisible = (question, answers) => {
@@ -844,10 +847,54 @@ export const downloadResponseFile = async (req, res, next) => {
       return res.status(404).json({ success: false, message: 'File not found in response' });
     }
 
-    const presignedUrl = await storageService.getPresignedUrl(answer.value.key);
+    let fileData;
+    try {
+      fileData = await storageService.getFileStream(answer.value.key);
+    } catch (storageErr) {
+      if (
+        storageErr.name === 'NoSuchKey' ||
+        storageErr.name === 'NotFound' ||
+        storageErr.$metadata?.httpStatusCode === 404
+      ) {
+        return res.status(404).json({ success: false, message: 'File not found in storage' });
+      }
+      return next(storageErr);
+    }
 
-    // Redirect the user directly to the presigned S3 URL
-    res.redirect(presignedUrl);
+    if (!fileData || !fileData.stream || typeof fileData.stream.pipe !== 'function') {
+      return res.status(404).json({ success: false, message: 'File stream not found' });
+    }
+
+    // Determine safe content type
+    const rawMimeType = answer.value.mimeType || fileData.contentType || 'application/octet-stream';
+    const safeMimeType = /^[a-zA-Z0-9!#$&^_.+-]+\/[a-zA-Z0-9!#$&^_.+-]+$/.test(rawMimeType)
+      ? rawMimeType
+      : 'application/octet-stream';
+
+    // Extract base filename and sanitize to prevent path traversal, header injection, or control characters
+    const suppliedFilename = answer.value.originalName || (answer.value.key ? path.basename(answer.value.key) : 'download');
+    const baseFilename = path.basename(String(suppliedFilename).replace(/\\/g, '/'));
+    const sanitizedFilename = baseFilename.replace(/[\r\n\0]/g, '_').trim() || 'download';
+
+    res.setHeader('Content-Type', safeMimeType);
+    res.setHeader('Content-Disposition', contentDisposition(sanitizedFilename));
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+
+    const contentLength = fileData.contentLength || answer.value.size;
+    if (typeof contentLength === 'number' && contentLength > 0) {
+      res.setHeader('Content-Length', contentLength);
+    }
+
+    // Stream file with backpressure and safe error handling
+    pipeline(fileData.stream, res, (err) => {
+      if (err) {
+        if (!res.headersSent) {
+          return next(err);
+        }
+        console.error('Error during file stream transmission:', err.message);
+        res.destroy();
+      }
+    });
   } catch (error) {
     next(error);
   }

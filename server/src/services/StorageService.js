@@ -38,6 +38,15 @@ class StorageService {
   async getPresignedUrl(path) {
     return s3Provider.getPresignedUrl(path);
   }
+
+  /**
+   * Get a readable stream for a file from storage
+   * @param {string} path - The path/key of the file
+   * @returns {Promise<{ stream: import('stream').Readable, contentType?: string, contentLength?: number }>}
+   */
+  async getFileStream(path) {
+    return s3Provider.getFileStream(path);
+  }
 }
 
 export default new StorageService();
