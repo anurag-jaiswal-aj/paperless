@@ -158,9 +158,75 @@ describe('Auth Controller', () => {
       expect(res.status).toBe(200);
       expect(res.body.data.email).toBe(testUser.email);
     });
+
+    it('returns only allowlisted user fields and never exposes sensitive authentication or session metadata', async () => {
+      const loginRes = await request(app).post('/api/auth/register').send({
+        name: 'Allowlist Test User',
+        email: 'allowlist_audit@example.com',
+        password: 'password123'
+      });
+      const cookies = loginRes.headers['set-cookie'];
+
+      // Manually simulate active password reset and refresh token state on the user in the database
+      const dbUser = await User.findOne({ email: 'allowlist_audit@example.com' });
+      dbUser.getResetPasswordToken();
+      dbUser.lastLogoutAt = new Date();
+      await dbUser.save({ validateBeforeSave: false });
+
+      const res = await request(app)
+        .get('/api/auth/me')
+        .set('Cookie', cookies);
+
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+
+      // Verify allowed fields are present
+      expect(res.body.data.id).toBe(dbUser._id.toString());
+      expect(res.body.data._id).toBe(dbUser._id.toString());
+      expect(res.body.data.name).toBe('Allowlist Test User');
+      expect(res.body.data.email).toBe('allowlist_audit@example.com');
+      expect(res.body.data.createdAt).toBeDefined();
+
+      // Verify sensitive metadata is strictly excluded from serialization
+      expect(res.body.data.password).toBeUndefined();
+      expect(res.body.data.refreshTokens).toBeUndefined();
+      expect(res.body.data.resetPasswordToken).toBeUndefined();
+      expect(res.body.data.resetPasswordExpire).toBeUndefined();
+      expect(res.body.data.lastLogoutAt).toBeUndefined();
+
+      // Verify that the response keys only match the allowlist
+      const responseKeys = Object.keys(res.body.data).sort();
+      expect(responseKeys).toEqual(['_id', 'createdAt', 'email', 'id', 'name'].sort());
+    });
   });
 
   describe('POST /api/auth/logout', () => {
+    it('rejects GET /api/auth/logout with 404 and preserves active session in database', async () => {
+      const loginRes = await request(app).post('/api/auth/register').send({
+        name: 'Get Logout User',
+        email: 'get_logout_audit@example.com',
+        password: 'password123'
+      });
+      const cookies = loginRes.headers['set-cookie'];
+
+      // Attempt state-changing logout via GET
+      const getLogoutRes = await request(app)
+        .get('/api/auth/logout')
+        .set('Cookie', cookies);
+
+      expect(getLogoutRes.status).toBe(404);
+
+      // Verify session was NOT invalidated: authenticated requests to /api/auth/me still succeed
+      const meRes = await request(app)
+        .get('/api/auth/me')
+        .set('Cookie', cookies);
+      expect(meRes.status).toBe(200);
+      expect(meRes.body.data.email).toBe('get_logout_audit@example.com');
+
+      // Verify database tokens were NOT cleared
+      const dbUser = await User.findOne({ email: 'get_logout_audit@example.com' });
+      expect(dbUser.refreshTokens.length).toBeGreaterThan(0);
+    });
     it('clears cookies on logout with matching attributes', async () => {
       const res = await request(app).post('/api/auth/logout');
       expect(res.status).toBe(200);

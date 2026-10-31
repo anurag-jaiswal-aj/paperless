@@ -34,8 +34,7 @@ router.use(authLimiter);
 router.post('/register', register);
 router.post('/login', login);
 router.post('/refresh', refreshToken);
-router.post('/logout', logout); // using POST for logout is safer
-router.get('/logout', logout); // but allow GET for simplicity if accessed directly
+router.post('/logout', logout);
 
 // Password reset routes
 router.post('/forgotpassword', passwordLimiter, forgotPassword);

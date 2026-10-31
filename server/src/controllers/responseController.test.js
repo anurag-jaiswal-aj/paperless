@@ -8,7 +8,7 @@ import User from '../models/user.js';
 import Form from '../models/form.js';
 import Question from '../models/question.js';
 import Response from '../models/response.js';
-import responseRoutes from '../routes/responseRoutes.js';
+import responseRoutes, { upload, formatFileSize, getMulterErrorMessage, createMultipartUploadHandler } from '../routes/responseRoutes.js';
 import { formatCsvAnswer, sanitizeCsvCell, escapeCsvCell, isQuestionVisible, submitResponse } from './responseController.js';
 import { errorHandler } from '../middleware/errorHandler.js';
 import storageService from '../services/StorageService.js';
@@ -2005,6 +2005,245 @@ describe('Response Controller - Phase 2', () => {
       expect(isQuestionVisible(containsQuestion, [{ questionId: targetQId, value: ['orange', 'apple'] }])).toBe(true);
       expect(isQuestionVisible(containsQuestion, [{ questionId: targetQId, value: 'pineapple' }])).toBe(true);
       expect(isQuestionVisible(containsQuestion, [{ questionId: targetQId, value: 'banana' }])).toBe(false);
+    });
+  });
+
+  describe('SEC-03: Multipart Ingestion Boundaries and Multer Ingestion Limits', () => {
+    let multipartForm;
+    let fileQ;
+
+    beforeEach(async () => {
+      const user = await User.create({
+        name: 'Multipart Test Owner',
+        email: `owner_${Date.now()}@test.com`,
+        password: 'password123'
+      });
+
+      multipartForm = await Form.create({
+        ownerId: user._id,
+        title: 'Multipart Boundary Test Form',
+        status: 'published'
+      });
+
+      fileQ = await Question.create({
+        formId: multipartForm._id,
+        type: 'file',
+        label: 'Upload Document',
+        required: false,
+        order: 0
+      });
+    });
+
+    it('rejects multipart request exceeding files limit (> 10 files) with 400 and cleans up temporary files', async () => {
+      const unlinkSpy = vi.spyOn(fs, 'unlinkSync');
+
+      try {
+        let reqBuilder = request(app)
+          .post(`/api/responses/${multipartForm._id}`)
+          .field('answers', JSON.stringify([]));
+
+        // Attach 11 files (limit is 10)
+        for (let i = 1; i <= 11; i++) {
+          reqBuilder = reqBuilder.attach(`file_attachment_${i}`, Buffer.from(`file content ${i}`), {
+            filename: `document_${i}.txt`,
+            contentType: 'text/plain'
+          });
+        }
+
+        const res = await reqBuilder;
+
+        expect(res.status).toBe(400);
+        expect(res.body.success).toBe(false);
+        expect(res.body.message).toContain('Too many files uploaded');
+
+        // Verify no response was created in database
+        const savedResponses = await Response.find({ formId: multipartForm._id });
+        expect(savedResponses.length).toBe(0);
+      } finally {
+        unlinkSpy.mockRestore();
+      }
+    });
+
+    it('rejects multipart request exceeding fields limit (> 50 fields) with 400', async () => {
+      let reqBuilder = request(app)
+        .post(`/api/responses/${multipartForm._id}`);
+
+      // Add 52 fields (limit is 50)
+      for (let i = 1; i <= 52; i++) {
+        reqBuilder = reqBuilder.field(`extra_field_${i}`, `value_${i}`);
+      }
+
+      const res = await reqBuilder;
+
+      expect(res.status).toBe(400);
+      expect(res.body.success).toBe(false);
+      expect(res.body.message).toContain('Too many form fields');
+
+      // Verify no response was created in database
+      const savedResponses = await Response.find({ formId: multipartForm._id });
+      expect(savedResponses.length).toBe(0);
+    });
+
+    it('accepts legitimate multipart request with valid file within configured limits', async () => {
+      const validPdfBuffer = Buffer.from('%PDF-1.4\n%EOF\n');
+      const res = await request(app)
+        .post(`/api/responses/${multipartForm._id}`)
+        .field('answers', JSON.stringify([]))
+        .attach(`file_${fileQ._id.toString()}`, validPdfBuffer, {
+          filename: 'valid_attachment.pdf',
+          contentType: 'application/pdf'
+        });
+
+      expect(res.status).toBe(201);
+      expect(res.body.success).toBe(true);
+
+      const savedResponses = await Response.find({ formId: multipartForm._id });
+      expect(savedResponses.length).toBe(1);
+    });
+
+    it('rejects file exceeding 5MB limit with 400 Bad Request', async () => {
+      // 6MB buffer
+      const largeBuffer = Buffer.alloc(6 * 1024 * 1024, 0x61);
+
+      const res = await request(app)
+        .post(`/api/responses/${multipartForm._id}`)
+        .field('answers', JSON.stringify([]))
+        .attach(`file_${fileQ._id.toString()}`, largeBuffer, {
+          filename: 'oversized.pdf',
+          contentType: 'application/pdf'
+        });
+
+      expect(res.status).toBe(400);
+      expect(res.body.success).toBe(false);
+      expect(res.body.message).toContain('File size exceeds maximum limit');
+
+      const savedResponses = await Response.find({ formId: multipartForm._id });
+      expect(savedResponses.length).toBe(0);
+    });
+
+    it('sanitizes malformed non-Multer client upload errors with generic 400 response without leaking internal details', async () => {
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      try {
+        // Send a malformed multipart stream with broken boundary data
+        const res = await request(app)
+          .post(`/api/responses/${multipartForm._id}`)
+          .set('Content-Type', 'multipart/form-data; boundary=test_boundary')
+          .send('--test_boundary\r\nContent-Disposition: form-data; name="answers"\r\n\r\nincomplete_data');
+
+        expect(res.status).toBe(400);
+        expect(res.body.success).toBe(false);
+        expect(res.body.message).toBe('Invalid upload request');
+        // Ensure raw parser errors or internal details are not exposed
+        expect(res.body.message).not.toContain('Unexpected end');
+        expect(res.body.stack).toBeUndefined();
+
+        const savedResponses = await Response.find({ formId: multipartForm._id });
+        expect(savedResponses.length).toBe(0);
+      } finally {
+        consoleSpy.mockRestore();
+      }
+    });
+
+    it('routes unexpected internal upload failures to centralized error handler without swallowing as 400', async () => {
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const originalAny = upload.any;
+
+      try {
+        // Simulate unexpected internal server error during upload (e.g. filesystem permission failure)
+        upload.any = vi.fn().mockReturnValue((req, res, cb) => {
+          cb(new Error('EACCES: permission denied, open /var/run/secrets/paperless/temp_file'));
+        });
+
+        const res = await request(app)
+          .post(`/api/responses/${multipartForm._id}`)
+          .field('answers', JSON.stringify([]));
+
+        // Must NOT be swallowed as client 400 error; centralized handler returns 500
+        expect(res.status).toBe(500);
+        expect(res.body.success).toBe(false);
+
+        const savedResponses = await Response.find({ formId: multipartForm._id });
+        expect(savedResponses.length).toBe(0);
+      } finally {
+        upload.any = originalAny;
+        consoleSpy.mockRestore();
+      }
+    });
+
+    it('accurately formats file sizes including fractional MiB values without misleading down-rounding', () => {
+      expect(formatFileSize(5 * 1024 * 1024)).toBe('5MB');
+      expect(formatFileSize(10 * 1024 * 1024)).toBe('10MB');
+      expect(formatFileSize(1.5 * 1024 * 1024)).toBe('1.5MB');
+      expect(formatFileSize(512 * 1024)).toBe('512KB');
+      expect(formatFileSize(10000000)).toBe('9.54MB');
+      expect(formatFileSize(500)).toBe('500 bytes');
+      expect(formatFileSize(0)).toBe('5MB');
+      expect(formatFileSize(-10)).toBe('5MB');
+      expect(formatFileSize('invalid')).toBe('5MB');
+    });
+
+    it('generates consistent client error messages for all Multer limit error codes', () => {
+      expect(getMulterErrorMessage({ code: 'LIMIT_FILE_SIZE' }, { fileSize: 5242880 })).toBe('File size exceeds maximum limit of 5MB');
+      expect(getMulterErrorMessage({ code: 'LIMIT_FILE_COUNT' }, { files: 10 })).toBe('Too many files uploaded (maximum 10 allowed)');
+      expect(getMulterErrorMessage({ code: 'LIMIT_FIELD_COUNT' }, { fields: 50 })).toBe('Too many form fields (maximum 50 allowed)');
+      expect(getMulterErrorMessage({ code: 'LIMIT_PART_COUNT' }, { parts: 60 })).toBe('Too many multipart parts (maximum 60 allowed)');
+      expect(getMulterErrorMessage({ code: 'LIMIT_UNEXPECTED_FILE' })).toBe('Unexpected file field');
+      expect(getMulterErrorMessage({ code: 'UNKNOWN_CODE' })).toBe('File upload error');
+    });
+
+    it('rejects genuine multipart request exceeding configured parts limit with 400 and cleans up temporary files', async () => {
+      const unlinkSpy = vi.spyOn(fs, 'unlink');
+
+      try {
+        // Instantiate an isolated Multer instance with parts: 20 to avoid mutating the shared singleton
+        const isolatedUpload = multer({
+          dest: os.tmpdir(),
+          limits: {
+            ...upload.limits,
+            parts: 20
+          }
+        });
+        const isolatedHandler = createMultipartUploadHandler(isolatedUpload);
+
+        const testApp = express();
+        testApp.use(express.json());
+        testApp.use(cookieParser());
+        testApp.post('/api/responses/:formId', isolatedHandler, submitResponse);
+        testApp.use(errorHandler);
+
+        let reqBuilder = request(testApp)
+          .post(`/api/responses/${multipartForm._id}`);
+
+        // Attach 5 small files (well within files: 10 limit)
+        for (let i = 1; i <= 5; i++) {
+          reqBuilder = reqBuilder.attach(`file_${i}`, Buffer.from(`content ${i}`), {
+            filename: `doc_${i}.txt`,
+            contentType: 'text/plain'
+          });
+        }
+
+        // Add 16 text fields (well within fields: 50 limit)
+        // Total parts = 5 + 16 = 21 (exceeds parts: 20 limit)
+        for (let j = 1; j <= 16; j++) {
+          reqBuilder = reqBuilder.field(`field_${j}`, `value_${j}`);
+        }
+
+        const res = await reqBuilder;
+
+        expect(res.status).toBe(400);
+        expect(res.body.success).toBe(false);
+        expect(res.body.message).toBe('Too many multipart parts (maximum 20 allowed)');
+
+        // Verify no response was saved to database
+        const savedResponses = await Response.find({ formId: multipartForm._id });
+        expect(savedResponses.length).toBe(0);
+
+        // Verify temporary files cleanup occurred via Multer disk storage
+        expect(unlinkSpy).toHaveBeenCalled();
+      } finally {
+        unlinkSpy.mockRestore();
+      }
     });
   });
 });

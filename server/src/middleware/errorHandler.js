@@ -1,3 +1,5 @@
+import fs from 'fs';
+
 /**
  * Global Error Handler Middleware
  * Catches and formats errors consistently
@@ -6,6 +8,51 @@
 export const errorHandler = (err, req, res, next) => {
   console.error('Error:', err.message);
   console.error('Stack:', err.stack);
+
+  // Clean up any pending temporary files from aborted uploads
+  const filesToClean = req && (Array.isArray(req.files) ? req.files : (req.file ? [req.file] : []));
+  if (filesToClean && filesToClean.length > 0) {
+    for (const f of filesToClean) {
+      if (f.path && fs.existsSync(f.path)) {
+        try {
+          fs.unlinkSync(f.path);
+        } catch {
+          // Ignore unlink errors during cleanup
+        }
+      }
+    }
+  }
+
+  // Multer errors (file upload limits, invalid multipart)
+  if (err.name === 'MulterError') {
+    const maxFileSize = process.env.MAX_FILE_SIZE ? parseInt(process.env.MAX_FILE_SIZE, 10) : 5 * 1024 * 1024;
+    const maxFiles = process.env.MAX_UPLOAD_FILES ? parseInt(process.env.MAX_UPLOAD_FILES, 10) : 10;
+    const maxFields = process.env.MAX_UPLOAD_FIELDS ? parseInt(process.env.MAX_UPLOAD_FIELDS, 10) : 50;
+    const maxParts = process.env.MAX_UPLOAD_PARTS ? parseInt(process.env.MAX_UPLOAD_PARTS, 10) : 60;
+
+    const formattedSize = maxFileSize % (1024 * 1024) === 0
+      ? `${maxFileSize / (1024 * 1024)}MB`
+      : (maxFileSize >= 1024 * 1024
+        ? `${Number((maxFileSize / (1024 * 1024)).toFixed(2))}MB`
+        : (maxFileSize % 1024 === 0 ? `${maxFileSize / 1024}KB` : `${maxFileSize} bytes`));
+
+    let message = 'File upload error';
+    if (err.code === 'LIMIT_FILE_SIZE') {
+      message = `File size exceeds maximum limit of ${formattedSize}`;
+    } else if (err.code === 'LIMIT_FILE_COUNT') {
+      message = `Too many files uploaded (maximum ${maxFiles} allowed)`;
+    } else if (err.code === 'LIMIT_FIELD_COUNT') {
+      message = `Too many form fields (maximum ${maxFields} allowed)`;
+    } else if (err.code === 'LIMIT_PART_COUNT') {
+      message = `Too many multipart parts (maximum ${maxParts} allowed)`;
+    } else if (err.code === 'LIMIT_UNEXPECTED_FILE') {
+      message = 'Unexpected file field';
+    }
+    return res.status(400).json({
+      success: false,
+      message
+    });
+  }
 
   // Mongoose validation error
   if (err.name === 'ValidationError') {
@@ -67,7 +114,7 @@ export const errorHandler = (err, req, res, next) => {
 
   // Default error
   const statusCode = err.statusCode || (res.statusCode && res.statusCode >= 400 ? res.statusCode : 500);
-  const isProduction = process.env.NODE_ENV === 'production';
+  const isProduction = process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging';
   const message = (isProduction && statusCode === 500) ? 'Internal Server Error' : (err.message || 'Server Error');
 
   res.status(statusCode).json({
