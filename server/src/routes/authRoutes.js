@@ -14,13 +14,13 @@ import { protect } from '../middleware/authMiddleware.js';
 // Actually the instructions say "Add rate limiting using an established Express-compatible solution".
 import rateLimit from 'express-rate-limit';
 
-const authLimiter = rateLimit({
+export const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
   max: process.env.NODE_ENV === 'test' ? 1000 : 100, // Limit each IP to 100 requests per windowMs (elevated in test suite)
   message: { success: false, message: 'Too many requests from this IP, please try again later.' }
 });
 
-const passwordLimiter = rateLimit({
+export const passwordLimiter = rateLimit({
   windowMs: 60 * 60 * 1000, // 1 hour
   max: 10,
   message: { success: false, message: 'Too many password reset attempts, please try again later.' }

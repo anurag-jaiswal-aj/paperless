@@ -17,6 +17,7 @@ import jwt from 'jsonwebtoken';
 import multer from 'multer';
 import os from 'os';
 import fs from 'fs';
+import path from 'path';
 
 let mongoServer;
 const app = express();
@@ -2244,6 +2245,372 @@ describe('Response Controller - Phase 2', () => {
       } finally {
         unlinkSpy.mockRestore();
       }
+    });
+  });
+
+  describe('Cleanup Hardening: Temporary File Cleanup in submitResponse finally Block', () => {
+    let testOwner;
+    let testForm;
+    let testTextQuestion;
+    let singleUploadApp;
+    const singleUpload = multer({ dest: os.tmpdir() });
+
+    beforeEach(async () => {
+      testOwner = await User.create({
+        name: 'Cleanup Owner',
+        email: `cleanup_owner_${Date.now()}_${Math.random().toString(36).substring(7)}@test.com`,
+        password: 'password123'
+      });
+
+      testForm = await Form.create({
+        ownerId: testOwner._id,
+        title: 'Cleanup Hardening Form',
+        status: 'published'
+      });
+
+      testTextQuestion = await Question.create({
+        formId: testForm._id,
+        type: 'short_text',
+        label: 'Participant Name',
+        required: true,
+        order: 0
+      });
+
+      singleUploadApp = express();
+      singleUploadApp.use(express.json());
+      singleUploadApp.post('/api/responses/:formId/single', singleUpload.single('attachment'), submitResponse);
+      singleUploadApp.use(errorHandler);
+    });
+
+    describe('Unit Tests: req.file single file object cleanup', () => {
+      it('cleans up temporary file (req.file) on successful submission', async () => {
+        const tmpFile = path.join(os.tmpdir(), `test-file-success-${Date.now()}-${Math.random().toString(36).substring(7)}.tmp`);
+        fs.writeFileSync(tmpFile, 'temporary success file content');
+        expect(fs.existsSync(tmpFile)).toBe(true);
+
+        const unlinkSpy = vi.spyOn(fs, 'unlinkSync');
+
+        const req = {
+          params: { formId: testForm._id.toString() },
+          body: {
+            answers: [
+              { questionId: testTextQuestion._id.toString(), value: 'Alice' }
+            ]
+          },
+          file: {
+            fieldname: 'attachment',
+            originalname: 'alice.txt',
+            path: tmpFile,
+            size: 30,
+            mimetype: 'text/plain'
+          },
+          ip: '127.0.0.1'
+        };
+
+        const res = {
+          status: vi.fn().mockReturnThis(),
+          json: vi.fn().mockReturnThis()
+        };
+        const next = vi.fn();
+
+        try {
+          await submitResponse(req, res, next);
+
+          expect(res.status).toHaveBeenCalledWith(201);
+          expect(unlinkSpy).toHaveBeenCalledWith(tmpFile);
+          expect(fs.existsSync(tmpFile)).toBe(false);
+        } finally {
+          unlinkSpy.mockRestore();
+          if (fs.existsSync(tmpFile)) {
+            fs.unlinkSync(tmpFile);
+          }
+        }
+      });
+
+      it('cleans up temporary file (req.file) when validation fails with 400', async () => {
+        const tmpFile = path.join(os.tmpdir(), `test-file-fail-${Date.now()}-${Math.random().toString(36).substring(7)}.tmp`);
+        fs.writeFileSync(tmpFile, 'temporary failure file content');
+        expect(fs.existsSync(tmpFile)).toBe(true);
+
+        const unlinkSpy = vi.spyOn(fs, 'unlinkSync');
+
+        const req = {
+          params: { formId: testForm._id.toString() },
+          body: {
+            answers: [] // Missing required field Participant Name
+          },
+          file: {
+            fieldname: 'attachment',
+            originalname: 'fail.txt',
+            path: tmpFile,
+            size: 30,
+            mimetype: 'text/plain'
+          },
+          ip: '127.0.0.1'
+        };
+
+        const res = {
+          status: vi.fn().mockReturnThis(),
+          json: vi.fn().mockReturnThis()
+        };
+        const next = vi.fn();
+
+        try {
+          await submitResponse(req, res, next);
+
+          expect(res.status).toHaveBeenCalledWith(400);
+          expect(unlinkSpy).toHaveBeenCalledWith(tmpFile);
+          expect(fs.existsSync(tmpFile)).toBe(false);
+        } finally {
+          unlinkSpy.mockRestore();
+          if (fs.existsSync(tmpFile)) {
+            fs.unlinkSync(tmpFile);
+          }
+        }
+      });
+
+      it('cleans up temporary file (req.file) when form is not found (404)', async () => {
+        const tmpFile = path.join(os.tmpdir(), `test-file-404-${Date.now()}-${Math.random().toString(36).substring(7)}.tmp`);
+        fs.writeFileSync(tmpFile, 'temporary 404 file content');
+        expect(fs.existsSync(tmpFile)).toBe(true);
+
+        const unlinkSpy = vi.spyOn(fs, 'unlinkSync');
+
+        const nonExistentFormId = new mongoose.Types.ObjectId().toString();
+        const req = {
+          params: { formId: nonExistentFormId },
+          body: { answers: [] },
+          file: {
+            fieldname: 'attachment',
+            originalname: 'notfound.txt',
+            path: tmpFile,
+            size: 26,
+            mimetype: 'text/plain'
+          },
+          ip: '127.0.0.1'
+        };
+
+        const res = {
+          status: vi.fn().mockReturnThis(),
+          json: vi.fn().mockReturnThis()
+        };
+        const next = vi.fn();
+
+        try {
+          await submitResponse(req, res, next);
+
+          expect(res.status).toHaveBeenCalledWith(404);
+          expect(unlinkSpy).toHaveBeenCalledWith(tmpFile);
+          expect(fs.existsSync(tmpFile)).toBe(false);
+        } finally {
+          unlinkSpy.mockRestore();
+          if (fs.existsSync(tmpFile)) {
+            fs.unlinkSync(tmpFile);
+          }
+        }
+      });
+
+      it('cleans up temporary file (req.file) when an unexpected error occurs (500 path)', async () => {
+        const tmpFile = path.join(os.tmpdir(), `test-file-500-${Date.now()}-${Math.random().toString(36).substring(7)}.tmp`);
+        fs.writeFileSync(tmpFile, 'temporary 500 file content');
+        expect(fs.existsSync(tmpFile)).toBe(true);
+
+        const unlinkSpy = vi.spyOn(fs, 'unlinkSync');
+        const findSpy = vi.spyOn(Form, 'findById').mockRejectedValueOnce(new Error('Simulated DB crash'));
+
+        const req = {
+          params: { formId: testForm._id.toString() },
+          body: { answers: [] },
+          file: {
+            fieldname: 'attachment',
+            originalname: 'crash.txt',
+            path: tmpFile,
+            size: 26,
+            mimetype: 'text/plain'
+          },
+          ip: '127.0.0.1'
+        };
+
+        const res = {
+          status: vi.fn().mockReturnThis(),
+          json: vi.fn().mockReturnThis()
+        };
+        const next = vi.fn();
+
+        try {
+          await submitResponse(req, res, next);
+
+          expect(next).toHaveBeenCalled();
+          expect(next.mock.calls[0][0].message).toBe('Simulated DB crash');
+          expect(unlinkSpy).toHaveBeenCalledWith(tmpFile);
+          expect(fs.existsSync(tmpFile)).toBe(false);
+        } finally {
+          findSpy.mockRestore();
+          unlinkSpy.mockRestore();
+          if (fs.existsSync(tmpFile)) {
+            fs.unlinkSync(tmpFile);
+          }
+        }
+      });
+
+      it('handles requests gracefully when req.files and req.file are both absent', async () => {
+        const req = {
+          params: { formId: testForm._id.toString() },
+          body: {
+            answers: [
+              { questionId: testTextQuestion._id.toString(), value: 'No Files' }
+            ]
+          },
+          ip: '127.0.0.1'
+        };
+
+        const res = {
+          status: vi.fn().mockReturnThis(),
+          json: vi.fn().mockReturnThis()
+        };
+        const next = vi.fn();
+
+        await expect(submitResponse(req, res, next)).resolves.not.toThrow();
+        expect(res.status).toHaveBeenCalledWith(201);
+      });
+    });
+
+    describe('Unit Tests: req.files array cleanup', () => {
+      it('cleans up multiple temporary files (req.files) on successful submission', async () => {
+        const tmpFile1 = path.join(os.tmpdir(), `test-files-multi1-${Date.now()}-${Math.random().toString(36).substring(7)}.tmp`);
+        const tmpFile2 = path.join(os.tmpdir(), `test-files-multi2-${Date.now()}-${Math.random().toString(36).substring(7)}.tmp`);
+        fs.writeFileSync(tmpFile1, 'file 1 content');
+        fs.writeFileSync(tmpFile2, 'file 2 content');
+
+        const unlinkSpy = vi.spyOn(fs, 'unlinkSync');
+
+        const req = {
+          params: { formId: testForm._id.toString() },
+          body: {
+            answers: [
+              { questionId: testTextQuestion._id.toString(), value: 'Multi File' }
+            ]
+          },
+          files: [
+            { fieldname: 'doc1', originalname: 'doc1.tmp', path: tmpFile1, size: 14, mimetype: 'text/plain' },
+            { fieldname: 'doc2', originalname: 'doc2.tmp', path: tmpFile2, size: 14, mimetype: 'text/plain' }
+          ],
+          ip: '127.0.0.1'
+        };
+
+        const res = {
+          status: vi.fn().mockReturnThis(),
+          json: vi.fn().mockReturnThis()
+        };
+        const next = vi.fn();
+
+        try {
+          await submitResponse(req, res, next);
+
+          expect(res.status).toHaveBeenCalledWith(201);
+          expect(unlinkSpy).toHaveBeenCalledWith(tmpFile1);
+          expect(unlinkSpy).toHaveBeenCalledWith(tmpFile2);
+          expect(fs.existsSync(tmpFile1)).toBe(false);
+          expect(fs.existsSync(tmpFile2)).toBe(false);
+        } finally {
+          unlinkSpy.mockRestore();
+          if (fs.existsSync(tmpFile1)) fs.unlinkSync(tmpFile1);
+          if (fs.existsSync(tmpFile2)) fs.unlinkSync(tmpFile2);
+        }
+      });
+
+      it('cleans up multiple temporary files (req.files) on validation failure', async () => {
+        const tmpFile1 = path.join(os.tmpdir(), `test-files-fail1-${Date.now()}-${Math.random().toString(36).substring(7)}.tmp`);
+        const tmpFile2 = path.join(os.tmpdir(), `test-files-fail2-${Date.now()}-${Math.random().toString(36).substring(7)}.tmp`);
+        fs.writeFileSync(tmpFile1, 'fail 1 content');
+        fs.writeFileSync(tmpFile2, 'fail 2 content');
+
+        const unlinkSpy = vi.spyOn(fs, 'unlinkSync');
+
+        const req = {
+          params: { formId: testForm._id.toString() },
+          body: {
+            answers: [] // Missing required field
+          },
+          files: [
+            { fieldname: 'doc1', originalname: 'fail1.tmp', path: tmpFile1, size: 14, mimetype: 'text/plain' },
+            { fieldname: 'doc2', originalname: 'fail2.tmp', path: tmpFile2, size: 14, mimetype: 'text/plain' }
+          ],
+          ip: '127.0.0.1'
+        };
+
+        const res = {
+          status: vi.fn().mockReturnThis(),
+          json: vi.fn().mockReturnThis()
+        };
+        const next = vi.fn();
+
+        try {
+          await submitResponse(req, res, next);
+
+          expect(res.status).toHaveBeenCalledWith(400);
+          expect(unlinkSpy).toHaveBeenCalledWith(tmpFile1);
+          expect(unlinkSpy).toHaveBeenCalledWith(tmpFile2);
+          expect(fs.existsSync(tmpFile1)).toBe(false);
+          expect(fs.existsSync(tmpFile2)).toBe(false);
+        } finally {
+          unlinkSpy.mockRestore();
+          if (fs.existsSync(tmpFile1)) fs.unlinkSync(tmpFile1);
+          if (fs.existsSync(tmpFile2)) fs.unlinkSync(tmpFile2);
+        }
+      });
+    });
+
+    describe('Integration Tests: Express middleware with upload.single', () => {
+      it('cleans up single temporary file via upload.single middleware on successful submission', async () => {
+        const unlinkSpy = vi.spyOn(fs, 'unlinkSync');
+
+        try {
+          const res = await request(singleUploadApp)
+            .post(`/api/responses/${testForm._id}/single`)
+            .field('answers', JSON.stringify([
+              { questionId: testTextQuestion._id.toString(), value: 'Success integration test' }
+            ]))
+            .attach('attachment', Buffer.from('Integration upload content'), {
+              filename: 'test-single-success.txt',
+              contentType: 'text/plain'
+            });
+
+          expect(res.status).toBe(201);
+          expect(res.body.success).toBe(true);
+
+          expect(unlinkSpy).toHaveBeenCalled();
+          const unlinkedPath = unlinkSpy.mock.calls[0][0];
+          expect(typeof unlinkedPath).toBe('string');
+          expect(fs.existsSync(unlinkedPath)).toBe(false);
+        } finally {
+          unlinkSpy.mockRestore();
+        }
+      });
+
+      it('cleans up single temporary file via upload.single middleware on validation failure', async () => {
+        const unlinkSpy = vi.spyOn(fs, 'unlinkSync');
+
+        try {
+          const res = await request(singleUploadApp)
+            .post(`/api/responses/${testForm._id}/single`)
+            .field('answers', JSON.stringify([])) // Missing required field
+            .attach('attachment', Buffer.from('Integration failure content'), {
+              filename: 'test-single-fail.txt',
+              contentType: 'text/plain'
+            });
+
+          expect(res.status).toBe(400);
+          expect(res.body.success).toBe(false);
+
+          expect(unlinkSpy).toHaveBeenCalled();
+          const unlinkedPath = unlinkSpy.mock.calls[0][0];
+          expect(typeof unlinkedPath).toBe('string');
+          expect(fs.existsSync(unlinkedPath)).toBe(false);
+        } finally {
+          unlinkSpy.mockRestore();
+        }
+      });
     });
   });
 });

@@ -315,9 +315,10 @@ export const submitResponse = async (req, res, next) => {
     next(error);
   } finally {
     // Clean up temporary files from disk
-    if (req.files && Array.isArray(req.files)) {
-      for (const f of req.files) {
-        if (f.path && fs.existsSync(f.path)) {
+    const filesToClean = req && (Array.isArray(req.files) ? req.files : (req.file ? [req.file] : []));
+    if (filesToClean && filesToClean.length > 0) {
+      for (const f of filesToClean) {
+        if (f && f.path && fs.existsSync(f.path)) {
           try {
             fs.unlinkSync(f.path);
           } catch (e) {

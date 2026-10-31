@@ -13,7 +13,11 @@ describe('Error Handler and Not Found Middleware', () => {
   });
 
   afterEach(() => {
-    process.env.NODE_ENV = originalEnv;
+    if (originalEnv !== undefined) {
+      process.env.NODE_ENV = originalEnv;
+    } else {
+      delete process.env.NODE_ENV;
+    }
     vi.restoreAllMocks();
   });
 
@@ -32,6 +36,18 @@ describe('Error Handler and Not Found Middleware', () => {
 
     it('returns 404 status and error message in production without stack trace', async () => {
       process.env.NODE_ENV = 'production';
+      app.use(notFound);
+      app.use(errorHandler);
+
+      const res = await request(app).get('/api/unmapped-endpoint');
+      expect(res.status).toBe(404);
+      expect(res.body.success).toBe(false);
+      expect(res.body.message).toBe('Not Found - /api/unmapped-endpoint');
+      expect(res.body.stack).toBeUndefined();
+    });
+
+    it('returns 404 status and error message in staging without stack trace', async () => {
+      process.env.NODE_ENV = 'staging';
       app.use(notFound);
       app.use(errorHandler);
 
@@ -166,6 +182,20 @@ describe('Error Handler and Not Found Middleware', () => {
       app.use(errorHandler);
 
       const res = await request(app).get('/crash');
+      expect(res.status).toBe(500);
+      expect(res.body.success).toBe(false);
+      expect(res.body.message).toBe('Internal Server Error');
+      expect(res.body.stack).toBeUndefined();
+    });
+
+    it('sanitizes unexpected 500 errors in staging', async () => {
+      process.env.NODE_ENV = 'staging';
+      app.get('/crash-staging', () => {
+        throw new Error('Database password failed: supersecret123');
+      });
+      app.use(errorHandler);
+
+      const res = await request(app).get('/crash-staging');
       expect(res.status).toBe(500);
       expect(res.body.success).toBe(false);
       expect(res.body.message).toBe('Internal Server Error');

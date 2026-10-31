@@ -13,7 +13,7 @@ import rateLimit from 'express-rate-limit';
 
 const router = express.Router();
 
-const aiLimiter = rateLimit({
+export const aiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
   max: parseInt(process.env.AI_RATE_LIMIT, 10) || 20, // 20 requests per 15 minutes by default
   message: { success: false, message: 'AI rate limit exceeded. Please try again later.' }

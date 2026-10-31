@@ -6,7 +6,7 @@ import cookieParser from 'cookie-parser';
 import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
 import { MongoMemoryServer } from 'mongodb-memory-server';
-import authRoutes from '../routes/authRoutes';
+import authRoutes, { passwordLimiter } from '../routes/authRoutes';
 import User from '../models/user';
 import EmailService from '../services/EmailService';
 import { optionalAuth } from '../middleware/authMiddleware';
@@ -41,6 +41,11 @@ afterEach(async () => {
   await mongoose.disconnect();
   await mongoServer.stop();
   vi.clearAllMocks();
+  if (passwordLimiter && typeof passwordLimiter.resetKey === 'function') {
+    passwordLimiter.resetKey('127.0.0.1');
+    passwordLimiter.resetKey('::ffff:127.0.0.1');
+    passwordLimiter.resetKey('::1');
+  }
 });
 
 describe('Auth Controller', () => {
@@ -1369,15 +1374,23 @@ describe('Auth Controller', () => {
 
   describe('Rate Limiting', () => {
     it('actually enforces rate limit after repeated failures', async () => {
-      // Limit for forgot password is 10 requests per hour. Loop 11 times.
-      let finalStatus = 200;
-      for (let i = 0; i < 11; i++) {
-        const res = await request(app)
-          .post('/api/auth/forgotpassword')
-          .send({ email: 'test@example.com' });
-        finalStatus = res.status;
+      try {
+        // Limit for forgot password is 10 requests per hour. Loop 11 times.
+        let finalStatus = 200;
+        for (let i = 0; i < 11; i++) {
+          const res = await request(app)
+            .post('/api/auth/forgotpassword')
+            .send({ email: 'test@example.com' });
+          finalStatus = res.status;
+        }
+        expect(finalStatus).toBe(429); // Too many requests
+      } finally {
+        if (passwordLimiter && typeof passwordLimiter.resetKey === 'function') {
+          passwordLimiter.resetKey('127.0.0.1');
+          passwordLimiter.resetKey('::ffff:127.0.0.1');
+          passwordLimiter.resetKey('::1');
+        }
       }
-      expect(finalStatus).toBe(429); // Too many requests
     });
   });
 

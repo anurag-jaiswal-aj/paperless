@@ -1,7 +1,7 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import request from 'supertest';
 import express from 'express';
-import aiRoutes from '../routes/aiRoutes.js';
+import aiRoutes, { aiLimiter } from '../routes/aiRoutes.js';
 import AIService from '../services/AIService.js';
 import Response from '../models/response.js';
 import { buildSafeResponseDataset } from './aiController.js';
@@ -74,6 +74,15 @@ app.use(errorHandler);
 describe('AI Controller (Phase 6)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+    if (aiLimiter && typeof aiLimiter.resetKey === 'function') {
+      aiLimiter.resetKey('127.0.0.1');
+      aiLimiter.resetKey('::ffff:127.0.0.1');
+      aiLimiter.resetKey('::1');
+    }
   });
 
   describe('generateQuestionsHandler', () => {
@@ -289,16 +298,24 @@ describe('AI Controller (Phase 6)', () => {
     });
 
     it('enforces express-rate-limit on AI routes', async () => {
-      // Loop 21 times to trigger 429
-      AIService.improveWriting.mockResolvedValue({ improvedText: 'test' });
-      let finalStatus = 200;
-      for (let i = 0; i < 21; i++) {
-        const res = await request(app)
-          .post('/api/ai/writing/improve')
-          .send({ text: 'test', contentType: 'question' });
-        finalStatus = res.status;
+      try {
+        // Loop 21 times to trigger 429
+        AIService.improveWriting.mockResolvedValue({ improvedText: 'test' });
+        let finalStatus = 200;
+        for (let i = 0; i < 21; i++) {
+          const res = await request(app)
+            .post('/api/ai/writing/improve')
+            .send({ text: 'test', contentType: 'question' });
+          finalStatus = res.status;
+        }
+        expect(finalStatus).toBe(429);
+      } finally {
+        if (aiLimiter && typeof aiLimiter.resetKey === 'function') {
+          aiLimiter.resetKey('127.0.0.1');
+          aiLimiter.resetKey('::ffff:127.0.0.1');
+          aiLimiter.resetKey('::1');
+        }
       }
-      expect(finalStatus).toBe(429);
     });
   });
 });
