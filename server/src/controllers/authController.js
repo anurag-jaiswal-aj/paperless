@@ -248,7 +248,10 @@ export const logout = async (req, res) => {
             const safePattern = '^' + escapeRegex(decoded.sessionId) + ':';
             await User.findByIdAndUpdate(decoded.id, {
               $set: { lastLogoutAt: now },
-              $pull: { refreshTokens: { $regex: safePattern } }
+              $pull: {
+                refreshTokens: { $regex: safePattern },
+                rotatedTokens: { sessionId: decoded.sessionId }
+              }
             });
           } else {
             // Legacy token without sessionId:
@@ -260,7 +263,10 @@ export const logout = async (req, res) => {
               const safeLegacyPattern = '^(' + escapeRegex(tokenHash) + '$|' + escapeRegex(legacySessionId) + ':)';
               await User.findByIdAndUpdate(decoded.id, {
                 $set: { lastLogoutAt: now },
-                $pull: { refreshTokens: { $regex: safeLegacyPattern } }
+                $pull: {
+                  refreshTokens: { $regex: safeLegacyPattern },
+                  rotatedTokens: { sessionId: legacySessionId }
+                }
               });
             } else if (tokenType === 'access') {
               // Legacy access token without sessionId:
@@ -349,10 +355,22 @@ export const refreshToken = async (req, res) => {
       ? { _id: decoded.id, refreshTokens: buildSessionEntry(sessionId, oldTokenHash) }
       : { _id: decoded.id, refreshTokens: oldTokenHash };
 
+    const rotatedRecord = {
+      sessionId: newSessionId,
+      tokenHash: oldTokenHash,
+      rotatedAt: new Date()
+    };
+
     const user = await User.findOneAndUpdate(
       queryConditions,
       {
-        $set: { 'refreshTokens.$': newSessionEntry }
+        $set: { 'refreshTokens.$': newSessionEntry },
+        $push: {
+          rotatedTokens: {
+            $each: [rotatedRecord],
+            $slice: -20
+          }
+        }
       },
       {
         new: true,
@@ -361,6 +379,40 @@ export const refreshToken = async (req, res) => {
     );
 
     if (!user) {
+      // Token not found in active refreshTokens.
+      // Check if this token belongs to an existing user and was already rotated (Replay Attack).
+      if (decoded && decoded.id) {
+        const existingUser = await User.findById(decoded.id).select('refreshTokens rotatedTokens');
+        if (existingUser) {
+          const targetSessionId = sessionId || getLegacySessionId(oldTokenHash);
+          const safePattern = '^' + escapeRegex(targetSessionId) + ':';
+
+          // Check if this token was rotated very recently (grace window for concurrent requests)
+          const recentRotation = existingUser.rotatedTokens?.find(
+            (r) => r.tokenHash === oldTokenHash && (r.sessionId === targetSessionId || !r.sessionId)
+          );
+
+          const now = Date.now();
+          const ROTATION_GRACE_WINDOW_MS = 2000; // 2 seconds concurrency grace window
+
+          if (recentRotation && now - new Date(recentRotation.rotatedAt).getTime() <= ROTATION_GRACE_WINDOW_MS) {
+            // Concurrent in-flight request within grace window:
+            // Reject this request as token is already rotated, but do NOT revoke the session family.
+            return res.status(401).json({ success: false, message: 'Invalid or revoked refresh token' });
+          }
+
+          // Outside grace window or replaying an already-consumed token:
+          // Conclusively identify as replay attack: revoke the entire session family!
+          await User.updateOne(
+            { _id: decoded.id },
+            {
+              $set: { lastLogoutAt: new Date() },
+              $pull: { refreshTokens: { $regex: safePattern } }
+            }
+          );
+        }
+      }
+
       return res.status(401).json({ success: false, message: 'Invalid or revoked refresh token' });
     }
 
@@ -400,7 +452,7 @@ const sanitizeDiagnosticMessage = message => {
   if (typeof message !== 'string') return 'Unknown error';
   return message
     .replace(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g, '[REDACTED_EMAIL]')
-    .replace(/(https?:\/\/[^\s"'<>]+)?\/resetpassword\/[a-zA-Z0-9_%-]+/gi, '[REDACTED_RESET_LINK]')
+    .replace(/(https?:\/\/[^\s"'<>]+)?\/reset-?password\/[a-zA-Z0-9_%-]+/gi, '[REDACTED_RESET_LINK]')
     .replace(/\b[0-9a-fA-F]{40}\b/g, '[REDACTED_TOKEN]')
     .replace(/re_[a-zA-Z0-9_]{16,}/g, '[REDACTED_API_KEY]')
     .replace(/bearer\s+[a-zA-Z0-9._~+/-]+/gi, 'Bearer [REDACTED_TOKEN]');
@@ -483,13 +535,22 @@ export const forgotPassword = async (req, res, next) => {
 };
 
 /**
+ * @route   PUT /api/auth/resetpassword
  * @route   PUT /api/auth/resetpassword/:resettoken
- * @desc    Reset password
+ * @route   POST /api/auth/resetpassword
+ * @desc    Reset password (accepts token in request body or legacy URL param)
  * @access  Public
  */
 export const resetPassword = async (req, res, next) => {
   try {
     const { password } = req.body;
+    const rawToken = (typeof req.body?.token === 'string' && req.body.token.trim())
+      ? req.body.token.trim()
+      : (typeof req.params?.resettoken === 'string' ? req.params.resettoken.trim() : null);
+
+    if (!rawToken) {
+      return res.status(400).json({ success: false, message: 'Invalid or missing reset token' });
+    }
 
     if (!password || password.length < 6) {
       return res.status(400).json({ success: false, message: 'Please provide a valid password (min 6 chars)' });
@@ -497,25 +558,39 @@ export const resetPassword = async (req, res, next) => {
 
     const resetPasswordToken = crypto
       .createHash('sha256')
-      .update(req.params.resettoken)
+      .update(rawToken)
       .digest('hex');
 
-    const user = await User.findOne({
-      resetPasswordToken,
-      resetPasswordExpire: { $gt: Date.now() }
-    });
+    const salt = await bcrypt.genSalt(10);
+    const hashedPassword = await bcrypt.hash(password, salt);
+
+    // Atomically invalidate token and update password in one single-operation write to prevent TOCTOU reuse
+    const user = await User.findOneAndUpdate(
+      {
+        resetPasswordToken,
+        resetPasswordExpire: { $gt: Date.now() }
+      },
+      {
+        $set: {
+          password: hashedPassword,
+          refreshTokens: [],
+          rotatedTokens: [],
+          lastLogoutAt: new Date()
+        },
+        $unset: {
+          resetPasswordToken: 1,
+          resetPasswordExpire: 1
+        }
+      },
+      {
+        new: true,
+        select: '-password'
+      }
+    );
 
     if (!user) {
       return res.status(400).json({ success: false, message: 'Invalid or expired token' });
     }
-
-    const salt = await bcrypt.genSalt(10);
-    user.password = await bcrypt.hash(password, salt);
-    user.resetPasswordToken = undefined;
-    user.resetPasswordExpire = undefined;
-    user.refreshTokens = [];
-    user.lastLogoutAt = new Date();
-    await user.save();
 
     await sendTokenResponse(user, 200, res, 'Password reset successful');
   } catch (error) {

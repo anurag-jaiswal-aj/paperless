@@ -10,7 +10,7 @@ import { errorHandler } from '../middleware/errorHandler.js';
 // Mock auth middleware to easily simulate logged in user
 vi.mock('../middleware/authMiddleware.js', () => ({
   protect: (req, res, next) => {
-    req.user = { id: 'user1' };
+    req.user = { _id: 'user1', id: 'user1' };
     next();
   }
 }));
@@ -79,6 +79,7 @@ describe('AI Controller (Phase 6)', () => {
   afterEach(() => {
     vi.clearAllMocks();
     if (aiLimiter && typeof aiLimiter.resetKey === 'function') {
+      aiLimiter.resetKey('user1');
       aiLimiter.resetKey('127.0.0.1');
       aiLimiter.resetKey('::ffff:127.0.0.1');
       aiLimiter.resetKey('::1');

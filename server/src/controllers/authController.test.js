@@ -11,6 +11,8 @@ import User from '../models/user';
 import EmailService from '../services/EmailService';
 import { optionalAuth } from '../middleware/authMiddleware';
 import { resolveCookieSameSite, getBaseCookieOptions } from './authController';
+import { sanitizeRequestUrl } from '../server.js';
+import { notFound } from '../middleware/errorHandler.js';
 
 // Mock EmailService
 vi.mock('../services/EmailService', () => {
@@ -780,9 +782,10 @@ describe('Auth Controller', () => {
         .set('Cookie', [refresh3]);
       expect(logoutRes.status).toBe(200);
 
-      // Verify DB: 0 refresh tokens remain
+      // Verify DB: 0 refresh tokens and 0 rotated tokens remain
       const updatedUser = await User.findById(user._id);
       expect(updatedUser.refreshTokens.length).toBe(0);
+      expect(updatedUser.rotatedTokens.length).toBe(0);
 
       // Access and refresh are now rejected
       expect((await request(app).get('/api/auth/me').set('Cookie', [access1])).status).toBe(401);
@@ -1150,6 +1153,131 @@ describe('Auth Controller', () => {
       const dbUser2 = await User.findById(user2._id);
       expect(dbUser2.refreshTokens.length).toBe(0);
     });
+
+    it('rejects replayed token within grace window with 401 without revoking active sessions', async () => {
+      const regRes = await request(app).post('/api/auth/register').send({
+        name: 'Grace Window User',
+        email: 'grace@example.com',
+        password: 'password123'
+      });
+      const initialCookies = regRes.headers['set-cookie'];
+
+      // Rotate token once (Token 1 -> Token 2)
+      const refreshRes1 = await request(app)
+        .post('/api/auth/refresh')
+        .set('Cookie', initialCookies);
+      expect(refreshRes1.status).toBe(200);
+      const successorCookies = refreshRes1.headers['set-cookie'];
+
+      // Immediate replay of Token 1 (within 2-second grace window)
+      const replayRes = await request(app)
+        .post('/api/auth/refresh')
+        .set('Cookie', initialCookies);
+      expect(replayRes.status).toBe(401);
+      expect(replayRes.body.message).toContain('Invalid or revoked refresh token');
+
+      // Assert that active session family was NOT revoked
+      const userInDb = await User.findOne({ email: 'grace@example.com' });
+      expect(userInDb.refreshTokens.length).toBeGreaterThan(0);
+
+      // Successor token (Token 2) continues to work
+      const successorAccessRes = await request(app)
+        .get('/api/auth/me')
+        .set('Cookie', successorCookies);
+      expect(successorAccessRes.status).toBe(200);
+    });
+
+    it('revokes entire session family when a rotated token is replayed outside the grace window', async () => {
+      const regRes = await request(app).post('/api/auth/register').send({
+        name: 'Replay Test User',
+        email: 'replay@example.com',
+        password: 'password123'
+      });
+      const initialCookies = regRes.headers['set-cookie'];
+
+      // Rotate token once (Token 1 -> Token 2)
+      const refreshRes1 = await request(app)
+        .post('/api/auth/refresh')
+        .set('Cookie', initialCookies);
+      expect(refreshRes1.status).toBe(200);
+      const rotatedCookies = refreshRes1.headers['set-cookie'];
+
+      // Age the rotated token record in database beyond the 10-second grace window
+      await User.updateOne(
+        { email: 'replay@example.com' },
+        { $set: { 'rotatedTokens.$[].rotatedAt': new Date(Date.now() - 15000) } }
+      );
+
+      // Replay stale initial token (Token 1)
+      const replayRes = await request(app)
+        .post('/api/auth/refresh')
+        .set('Cookie', initialCookies);
+      expect(replayRes.status).toBe(401);
+      expect(replayRes.body.message).toContain('Invalid or revoked refresh token');
+
+      // Assert that the session family was revoked in the DB
+      const userAfterReplay = await User.findOne({ email: 'replay@example.com' });
+      expect(userAfterReplay.refreshTokens.length).toBe(0);
+
+      // Assert that successor token (Token 2) is also now revoked
+      const refreshRes2 = await request(app)
+        .post('/api/auth/refresh')
+        .set('Cookie', rotatedCookies);
+      expect(refreshRes2.status).toBe(401);
+    });
+
+    it('preserves other active sessions when one session suffers a replay revocation', async () => {
+      await request(app).post('/api/auth/register').send({
+        name: 'Multi Session User',
+        email: 'multisession@example.com',
+        password: 'password123'
+      });
+
+      // Login Device A
+      const loginA = await request(app).post('/api/auth/login').send({
+        email: 'multisession@example.com',
+        password: 'password123'
+      });
+      const cookiesA = loginA.headers['set-cookie'];
+
+      // Login Device B
+      const loginB = await request(app).post('/api/auth/login').send({
+        email: 'multisession@example.com',
+        password: 'password123'
+      });
+      const cookiesB = loginB.headers['set-cookie'];
+
+      // Rotate Device A (A1 -> A2)
+      const rotateA = await request(app)
+        .post('/api/auth/refresh')
+        .set('Cookie', cookiesA);
+      expect(rotateA.status).toBe(200);
+
+      // Age rotated tokens beyond 10-second grace window
+      await User.updateOne(
+        { email: 'multisession@example.com' },
+        { $set: { 'rotatedTokens.$[].rotatedAt': new Date(Date.now() - 15000) } }
+      );
+
+      // Replay Device A stale token (A1)
+      const replayA = await request(app)
+        .post('/api/auth/refresh')
+        .set('Cookie', cookiesA);
+      expect(replayA.status).toBe(401);
+
+      // Device B session remains completely valid
+      const refreshB = await request(app)
+        .post('/api/auth/refresh')
+        .set('Cookie', cookiesB);
+      expect(refreshB.status).toBe(200);
+
+      // Device B access token works for protected routes
+      const meB = await request(app)
+        .get('/api/auth/me')
+        .set('Cookie', cookiesB);
+      expect(meB.status).toBe(200);
+      expect(meB.body.data.email).toBe('multisession@example.com');
+    });
   });
 
   describe('Password Reset Flow', () => {
@@ -1369,6 +1497,133 @@ describe('Auth Controller', () => {
 
       const user = await User.findOne({ email: testUser.email.toLowerCase() });
       expect(user.resetPasswordToken).toBeDefined();
+    });
+
+    it('resets password with token in request body via PUT /api/auth/resetpassword', async () => {
+      const user = await User.findOne({ email: testUser.email });
+      const resetToken = user.getResetPasswordToken();
+      await user.save({ validateBeforeSave: false });
+
+      const res = await request(app)
+        .put('/api/auth/resetpassword')
+        .send({ token: resetToken, password: 'newbodypassword123' });
+
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+      expect(res.body.message).toBe('Password reset successful');
+      expect(res.body.data.user.email).toBe(testUser.email);
+
+      const updatedUser = await User.findOne({ email: testUser.email });
+      expect(updatedUser.resetPasswordToken).toBeUndefined();
+    });
+
+    it('resets password with token in request body via POST /api/auth/resetpassword', async () => {
+      const user = await User.findOne({ email: testUser.email });
+      const resetToken = user.getResetPasswordToken();
+      await user.save({ validateBeforeSave: false });
+
+      const res = await request(app)
+        .post('/api/auth/resetpassword')
+        .send({ token: resetToken, password: 'newpostpassword123' });
+
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+      expect(res.body.message).toBe('Password reset successful');
+    });
+
+    it('rejects password reset when token is missing from both url and body', async () => {
+      const res = await request(app)
+        .put('/api/auth/resetpassword')
+        .send({ password: 'somepassword123' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.message).toContain('Invalid or missing reset token');
+    });
+
+    it('handles concurrent password resets atomically so only one request succeeds', async () => {
+      const user = await User.findOne({ email: testUser.email });
+      const resetToken = user.getResetPasswordToken();
+      await user.save({ validateBeforeSave: false });
+
+      const [res1, res2] = await Promise.all([
+        request(app)
+          .put(`/api/auth/resetpassword/${resetToken}`)
+          .send({ password: 'concurrentPassword1' }),
+        request(app)
+          .put(`/api/auth/resetpassword/${resetToken}`)
+          .send({ password: 'concurrentPassword2' })
+      ]);
+
+      const statuses = [res1.status, res2.status].sort();
+      expect(statuses).toEqual([200, 400]);
+
+      const successRes = res1.status === 200 ? res1 : res2;
+      const failRes = res1.status === 400 ? res1 : res2;
+
+      expect(successRes.body.success).toBe(true);
+      expect(failRes.body.success).toBe(false);
+      expect(failRes.body.message).toContain('Invalid or expired token');
+
+      // Token must be completely cleared from database
+      const finalUser = await User.findOne({ email: testUser.email });
+      expect(finalUser.resetPasswordToken).toBeUndefined();
+    });
+  });
+
+  describe('URL Log Sanitization (Morgan)', () => {
+    it('redacts reset token from URL path to prevent exposure in HTTP logs', () => {
+      const url1 = '/api/auth/resetpassword/abcdef1234567890';
+      expect(sanitizeRequestUrl(url1)).toBe('/api/auth/resetpassword/[REDACTED]');
+
+      const url2 = '/api/auth/resetpassword/token-with-dashes_and_underscores';
+      expect(sanitizeRequestUrl(url2)).toBe('/api/auth/resetpassword/[REDACTED]');
+
+      const url3 = '/api/auth/reset-password/hyphenated-route-token-1234';
+      expect(sanitizeRequestUrl(url3)).toBe('/api/auth/reset-password/[REDACTED]');
+
+      const url4 = '/api/auth/resetpassword/url%20encoded%2Etoken';
+      expect(sanitizeRequestUrl(url4)).toBe('/api/auth/resetpassword/[REDACTED]');
+
+      const url5 = '/api/auth/login';
+      expect(sanitizeRequestUrl(url5)).toBe('/api/auth/login');
+
+      const nonString = sanitizeRequestUrl(null);
+      expect(nonString).toBe('');
+    });
+
+    it('redacts reset tokens from query strings in URL paths', () => {
+      const url1 = '/api/auth/resetpassword?token=secrettoken123';
+      expect(sanitizeRequestUrl(url1)).toBe('/api/auth/resetpassword?token=[REDACTED]');
+
+      const url2 = '/api/auth/resetpassword?foo=bar&token=secrettoken123&baz=1';
+      expect(sanitizeRequestUrl(url2)).toBe('/api/auth/resetpassword?foo=bar&token=[REDACTED]&baz=1');
+
+      const url3 = '/api/auth/resetpassword?resetToken=secrettoken123';
+      expect(sanitizeRequestUrl(url3)).toBe('/api/auth/resetpassword?resetToken=[REDACTED]');
+
+      const url4 = '/api/auth/reset-password?reset-token=secrettoken123';
+      expect(sanitizeRequestUrl(url4)).toBe('/api/auth/reset-password?reset-token=[REDACTED]');
+    });
+
+    it('notFound 404 handler redacts reset tokens from error messages and logs', () => {
+      let nextError = null;
+      const req = { originalUrl: '/api/auth/resetpassword/super-secret-token-value-xyz' };
+      const res = { status: vi.fn() };
+      const next = (err) => { nextError = err; };
+
+      notFound(req, res, next);
+
+      expect(res.status).toHaveBeenCalledWith(404);
+      expect(nextError).toBeInstanceOf(Error);
+      expect(nextError.message).not.toContain('super-secret-token-value-xyz');
+      expect(nextError.message).toContain('[REDACTED]');
+      expect(nextError.statusCode).toBe(404);
+
+      let hyphenError = null;
+      const reqHyphen = { originalUrl: '/api/auth/reset-password/another-secret-token' };
+      notFound(reqHyphen, res, (err) => { hyphenError = err; });
+      expect(hyphenError.message).not.toContain('another-secret-token');
+      expect(hyphenError.message).toContain('/reset-password/[REDACTED]');
     });
   });
 

@@ -3,6 +3,7 @@ import express from 'express';
 import request from 'supertest';
 import rateLimit from 'express-rate-limit';
 import { resolveTrustProxy } from '../server.js';
+import { getAiRateLimitKey } from '../routes/aiRoutes.js';
 
 describe('Trust Proxy and Rate Limiting Security', () => {
   describe('resolveTrustProxy Configuration', () => {
@@ -207,6 +208,26 @@ describe('Trust Proxy and Rate Limiting Security', () => {
 
       expect(res.status).toBe(200);
       expect(res.body.ip).toBe('2406:7400:113:a2a2:845f:9b5d:f9dd:5603');
+    });
+  });
+
+  describe('AI Route Limiter Key Generator (SEC-03)', () => {
+    it('keys rate limiting by user._id when user is authenticated', () => {
+      const reqWithUser = {
+        user: { _id: '507f191e810c19729de860ea' },
+        ip: '203.0.113.1'
+      };
+      const key = getAiRateLimitKey(reqWithUser);
+      expect(key).toBe('507f191e810c19729de860ea');
+    });
+
+    it('falls back to client IP when user is unauthenticated', () => {
+      const reqWithoutUser = {
+        user: null,
+        ip: '203.0.113.1'
+      };
+      const key = getAiRateLimitKey(reqWithoutUser);
+      expect(key).toBe('203.0.113.1');
     });
   });
 });

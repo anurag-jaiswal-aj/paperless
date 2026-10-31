@@ -11,6 +11,8 @@ import { fileTypeFromFile } from 'file-type';
 import { pipeline } from 'stream';
 import path from 'path';
 import contentDisposition from 'content-disposition';
+import { validateDocxZip } from '../utils/docxValidator.js';
+import { cleanupRequestTempFiles } from '../utils/fileCleanup.js';
 
 // Helper to evaluate visibility rule
 export const isQuestionVisible = (question, answers) => {
@@ -223,24 +225,42 @@ export const submitResponse = async (req, res, next) => {
             return res.status(400).json({ success: false, message: `Question "${question.label}" has an unrecognized file signature` });
           }
 
-          const validMimes = [
-            'image/jpeg',
-            'image/png',
-            'application/pdf',
-            'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-            'application/msword',
-            'application/x-cfb',
-            'application/zip'
-          ];
+          let canonicalMime = null;
+          const isDocx =
+            magic.mime === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
+            (magic.mime === 'application/zip' && (file.mimetype === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' || file.originalname.toLowerCase().endsWith('.docx')));
 
-          if (!validMimes.includes(magic.mime) && magic.ext !== 'doc') {
-             return res.status(400).json({ success: false, message: `Question "${question.label}" content does not match allowed types` });
+          if (magic.mime === 'image/jpeg') {
+            canonicalMime = 'image/jpeg';
+          } else if (magic.mime === 'image/png') {
+            canonicalMime = 'image/png';
+          } else if (magic.mime === 'application/pdf') {
+            canonicalMime = 'application/pdf';
+          } else if (magic.mime === 'application/msword' || magic.mime === 'application/x-cfb' || magic.ext === 'doc') {
+            canonicalMime = 'application/msword';
+          } else if (isDocx) {
+            const docxResult = validateDocxZip(file.path);
+            if (!docxResult.valid) {
+              return res.status(400).json({ success: false, message: `Question "${question.label}" content does not match allowed types` });
+            }
+            canonicalMime = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
           }
 
-          const fileExt = file.originalname.split('.').pop().replace(/[^a-zA-Z0-9]/g, '');
+          if (!canonicalMime) {
+            return res.status(400).json({ success: false, message: `Question "${question.label}" content does not match allowed types` });
+          }
+
+          const MIME_TO_SAFE_EXT = {
+            'image/jpeg': 'jpg',
+            'image/png': 'png',
+            'application/pdf': 'pdf',
+            'application/msword': 'doc',
+            'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx'
+          };
+          const safeExt = MIME_TO_SAFE_EXT[canonicalMime] || 'bin';
           const fileId = crypto.randomUUID();
-          const storageKey = `forms/${form._id}/responses/${fileId}.${fileExt}`;
-          filesToUpload.push({ file, question, key: storageKey });
+          const storageKey = `forms/${form._id}/responses/${fileId}.${safeExt}`;
+          filesToUpload.push({ file, question, key: storageKey, canonicalMime });
         }
 
         if (question.type !== 'file') {
@@ -258,14 +278,14 @@ export const submitResponse = async (req, res, next) => {
       for (const item of filesToUpload) {
         const fileStream = fs.createReadStream(item.file.path);
         fileStream.on('error', () => {}); // Ignore stream errors caused by async file deletion in tests
-        await storageService.uploadFile(fileStream, item.key, item.file.mimetype);
+        await storageService.uploadFile(fileStream, item.key, item.canonicalMime);
         uploadedKeys.push(item.key);
         validAnswersToSave.push({
           questionId: item.question._id,
           value: {
             key: item.key,
             originalName: item.file.originalname,
-            mimeType: item.file.mimetype,
+            mimeType: item.canonicalMime,
             size: item.file.size
           }
         });
@@ -315,18 +335,7 @@ export const submitResponse = async (req, res, next) => {
     next(error);
   } finally {
     // Clean up temporary files from disk
-    const filesToClean = req && (Array.isArray(req.files) ? req.files : (req.file ? [req.file] : []));
-    if (filesToClean && filesToClean.length > 0) {
-      for (const f of filesToClean) {
-        if (f && f.path && fs.existsSync(f.path)) {
-          try {
-            fs.unlinkSync(f.path);
-          } catch (e) {
-            console.error('Failed to delete temp file:', e);
-          }
-        }
-      }
-    }
+    cleanupRequestTempFiles(req);
   }
 };
 

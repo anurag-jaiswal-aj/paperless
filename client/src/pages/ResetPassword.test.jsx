@@ -18,17 +18,21 @@ vi.mock('../utils/api', () => {
   };
 });
 
-const renderWithProviders = (ui) => {
+const renderWithProviders = (ui, initialPath = '/resetpassword/testtoken') => {
   const store = configureStore({
     reducer: {
       auth: authReducer
     }
   });
+  window.history.pushState({}, 'Test', initialPath);
   return render(
     <Provider store={store}>
       <BrowserRouter>
         <Routes>
           <Route path="/resetpassword/:token" element={ui} />
+          <Route path="/reset-password/:token" element={ui} />
+          <Route path="/reset-password" element={ui} />
+          <Route path="/resetpassword" element={ui} />
         </Routes>
       </BrowserRouter>
     </Provider>
@@ -60,7 +64,7 @@ describe('ResetPassword Component', () => {
     expect(api.put).not.toHaveBeenCalled();
   });
 
-  it('handles successful reset password', async () => {
+  it('handles successful reset password with route param token', async () => {
     api.put.mockResolvedValueOnce({
       data: { success: true, data: { user: { id: '1' } } }
     });
@@ -75,8 +79,32 @@ describe('ResetPassword Component', () => {
     fireEvent.click(screen.getByRole('button', { name: /reset password/i }));
 
     await waitFor(() => {
-      expect(api.put).toHaveBeenCalledWith('/api/auth/resetpassword/testtoken', {
+      expect(api.put).toHaveBeenCalledWith('/api/auth/resetpassword', {
+        token: 'testtoken',
         password: 'password123'
+      });
+      expect(screen.getByText('Password reset successfully! Logging you in...')).toBeTruthy();
+    });
+  });
+
+  it('handles successful reset password with query param token', async () => {
+    api.put.mockResolvedValueOnce({
+      data: { success: true, data: { user: { id: '2' } } }
+    });
+
+    renderWithProviders(<ResetPassword />, '/reset-password?token=query_token_abc123');
+
+    const passwordInputs = screen.getAllByPlaceholderText('••••••••');
+
+    fireEvent.change(passwordInputs[0], { target: { value: 'newsecret987' } });
+    fireEvent.change(passwordInputs[1], { target: { value: 'newsecret987' } });
+
+    fireEvent.click(screen.getByRole('button', { name: /reset password/i }));
+
+    await waitFor(() => {
+      expect(api.put).toHaveBeenCalledWith('/api/auth/resetpassword', {
+        token: 'query_token_abc123',
+        password: 'newsecret987'
       });
       expect(screen.getByText('Password reset successfully! Logging you in...')).toBeTruthy();
     });

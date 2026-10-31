@@ -1,5 +1,6 @@
 import express from 'express';
-import rateLimit from 'express-rate-limit';
+import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
+import crypto from 'crypto';
 import {
   submitResponse,
   getResponses,
@@ -12,15 +13,24 @@ import { protect } from '../middleware/authMiddleware.js';
 
 const router = express.Router();
 
-const submissionLimiter = rateLimit({
+export const getSubmissionRateLimitKey = (req) =>
+  `${req.params?.formId || 'global'}:${req.ip ? ipKeyGenerator(req.ip) : 'unknown'}`;
+
+export const submissionLimiter = rateLimit({
   windowMs: 60 * 60 * 1000, // 1 hour
-  max: process.env.NODE_ENV === 'test' ? 1000 : 50, // Limit each IP to 50 submissions per hour (elevated in test suite)
+  max: process.env.NODE_ENV === 'test' ? 1000 : 50, // Limit each IP to 50 submissions per hour per form
+  keyGenerator: getSubmissionRateLimitKey,
+  standardHeaders: true,
+  legacyHeaders: false,
   message: { success: false, message: 'Too many submissions from this IP, please try again later.' }
 });
 
 import multer from 'multer';
 import os from 'os';
-import fs from 'fs';
+import path from 'path';
+import { cleanupRequestTempFiles } from '../utils/fileCleanup.js';
+
+export { cleanupRequestTempFiles };
 
 export const maxUploadFileSize = process.env.MAX_FILE_SIZE ? parseInt(process.env.MAX_FILE_SIZE, 10) : 5 * 1024 * 1024; // 5MB default
 export const maxUploadFiles = process.env.MAX_UPLOAD_FILES ? parseInt(process.env.MAX_UPLOAD_FILES, 10) : 10;
@@ -74,8 +84,25 @@ export const getMulterErrorMessage = (err, limits = {}) => {
   return 'File upload error';
 };
 
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, os.tmpdir());
+  },
+  filename: (req, file, cb) => {
+    // Generate opaque unique filename to prevent path traversal via user-supplied fieldname
+    const randomId = crypto.randomUUID();
+    const filename = `upload-${randomId}.tmp`;
+    if (!req._trackedTempFiles) {
+      req._trackedTempFiles = new Set();
+    }
+    const fullPath = path.join(os.tmpdir(), filename);
+    req._trackedTempFiles.add(fullPath);
+    cb(null, filename);
+  }
+});
+
 export const upload = multer({
-  dest: os.tmpdir(),
+  storage,
   limits: {
     fileSize: maxUploadFileSize,
     files: maxUploadFiles,
@@ -86,25 +113,36 @@ export const upload = multer({
 
 /**
  * Factory to create a middleware wrapper for Multer to enforce multipart boundaries,
- * clean up temporary files immediately upon rejection,
+ * clean up temporary files immediately upon rejection, client abort, or connection close,
  * and return clear, sanitized HTTP 400 responses without leaking internal paths.
  */
 export const createMultipartUploadHandler = (uploadInstance = upload) => (req, res, next) => {
+  let cleanedUp = false;
+  const cleanup = () => {
+    if (cleanedUp) return;
+    cleanedUp = true;
+    cleanupRequestTempFiles(req);
+  };
+
+  // Register abort and close listeners to clean up temporary files if client disconnects
+  const onAbort = () => {
+    cleanup();
+  };
+  const onClose = () => {
+    if (!req.complete) {
+      cleanup();
+    }
+  };
+
+  req.on('aborted', onAbort);
+  req.on('close', onClose);
+
   uploadInstance.any()(req, res, (err) => {
+    req.removeListener('aborted', onAbort);
+    req.removeListener('close', onClose);
+
     if (err) {
-      // Clean up temporary files written before the limit error was encountered
-      const filesToClean = req && (Array.isArray(req.files) ? req.files : (req.file ? [req.file] : []));
-      if (filesToClean && filesToClean.length > 0) {
-        for (const f of filesToClean) {
-          if (f.path && fs.existsSync(f.path)) {
-            try {
-              fs.unlinkSync(f.path);
-            } catch {
-              // Ignore unlink errors during cleanup
-            }
-          }
-        }
-      }
+      cleanup();
 
       if (err instanceof multer.MulterError || err.name === 'MulterError') {
         const message = getMulterErrorMessage(err, uploadInstance.limits);

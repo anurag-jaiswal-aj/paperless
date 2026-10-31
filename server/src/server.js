@@ -91,8 +91,15 @@ const connectDB = async () => {
   }
 };
 
+import { sanitizeRequestUrl } from './utils/helpers.js';
+export { sanitizeRequestUrl };
+
 // Middleware
 app.use(helmet()); // Security headers
+morgan.token('url', (req) => {
+  const rawUrl = req.originalUrl || req.url || '';
+  return sanitizeRequestUrl(rawUrl);
+});
 app.use(morgan('dev')); // HTTP request logging
 app.use(
   cors({

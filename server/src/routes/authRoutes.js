@@ -38,6 +38,8 @@ router.post('/logout', logout);
 
 // Password reset routes
 router.post('/forgotpassword', passwordLimiter, forgotPassword);
+router.post('/resetpassword', passwordLimiter, resetPassword);
+router.put('/resetpassword', passwordLimiter, resetPassword);
 router.put('/resetpassword/:resettoken', passwordLimiter, resetPassword);
 
 // Protected routes

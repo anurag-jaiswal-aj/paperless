@@ -8,7 +8,7 @@ import User from '../models/user.js';
 import Form from '../models/form.js';
 import Question from '../models/question.js';
 import Response from '../models/response.js';
-import responseRoutes, { upload, formatFileSize, getMulterErrorMessage, createMultipartUploadHandler } from '../routes/responseRoutes.js';
+import responseRoutes, { upload, formatFileSize, getMulterErrorMessage, createMultipartUploadHandler, getSubmissionRateLimitKey } from '../routes/responseRoutes.js';
 import { formatCsvAnswer, sanitizeCsvCell, escapeCsvCell, isQuestionVisible, submitResponse } from './responseController.js';
 import { errorHandler } from '../middleware/errorHandler.js';
 import storageService from '../services/StorageService.js';
@@ -18,6 +18,84 @@ import multer from 'multer';
 import os from 'os';
 import fs from 'fs';
 import path from 'path';
+
+const crc32 = (buf) => {
+  const table = [];
+  for (let i = 0; i < 256; i++) {
+    let c = i;
+    for (let k = 0; k < 8; k++) c = ((c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1));
+    table[i] = c;
+  }
+  let crc = 0 ^ (-1);
+  for (let i = 0; i < buf.length; i++) crc = (crc >>> 8) ^ table[(crc ^ buf[i]) & 0xFF];
+  return (crc ^ (-1)) >>> 0;
+};
+
+const createZipBuffer = (files) => {
+  const localHeaders = [];
+  const cdHeaders = [];
+  let offset = 0;
+
+  for (const file of files) {
+    const nameBuf = Buffer.from(file.name, 'utf8');
+    const dataBuf = Buffer.from(file.data || '', 'utf8');
+    const crc = crc32(dataBuf);
+
+    // Local Header
+    const lh = Buffer.alloc(30 + nameBuf.length + dataBuf.length);
+    lh.writeUInt32LE(0x04034b50, 0);
+    lh.writeUInt16LE(20, 4);
+    lh.writeUInt16LE(0, 6);
+    lh.writeUInt16LE(0, 8);
+    lh.writeUInt16LE(0, 10);
+    lh.writeUInt16LE(0, 12);
+    lh.writeUInt32LE(crc, 14);
+    lh.writeUInt32LE(dataBuf.length, 18);
+    lh.writeUInt32LE(dataBuf.length, 22);
+    lh.writeUInt16LE(nameBuf.length, 26);
+    lh.writeUInt16LE(0, 28);
+    nameBuf.copy(lh, 30);
+    dataBuf.copy(lh, 30 + nameBuf.length);
+    localHeaders.push(lh);
+
+    // Central Directory Header
+    const cd = Buffer.alloc(46 + nameBuf.length);
+    cd.writeUInt32LE(0x02014b50, 0);
+    cd.writeUInt16LE(20, 4);
+    cd.writeUInt16LE(20, 6);
+    cd.writeUInt16LE(0, 8);
+    cd.writeUInt16LE(0, 10);
+    cd.writeUInt16LE(0, 12);
+    cd.writeUInt16LE(0, 14);
+    cd.writeUInt32LE(crc, 16);
+    cd.writeUInt32LE(dataBuf.length, 20);
+    cd.writeUInt32LE(dataBuf.length, 24);
+    cd.writeUInt16LE(nameBuf.length, 28);
+    cd.writeUInt16LE(0, 30);
+    cd.writeUInt16LE(0, 32);
+    cd.writeUInt16LE(0, 34);
+    cd.writeUInt16LE(0, 36);
+    cd.writeUInt32LE(0, 38);
+    cd.writeUInt32LE(offset, 42);
+    nameBuf.copy(cd, 46);
+    cdHeaders.push(cd);
+
+    offset += lh.length;
+  }
+
+  const cdBuf = Buffer.concat(cdHeaders);
+  const eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(0x06054b50, 0);
+  eocd.writeUInt16LE(0, 4);
+  eocd.writeUInt16LE(0, 6);
+  eocd.writeUInt16LE(files.length, 8);
+  eocd.writeUInt16LE(files.length, 10);
+  eocd.writeUInt32LE(cdBuf.length, 12);
+  eocd.writeUInt32LE(offset, 16);
+  eocd.writeUInt16LE(0, 20);
+
+  return Buffer.concat([...localHeaders, cdBuf, eocd]);
+};
 
 let mongoServer;
 const app = express();
@@ -775,6 +853,76 @@ describe('Response Controller - Phase 2', () => {
 
       createSpy.mockRestore();
       deleteSpy.mockRestore();
+    });
+
+    it('should accept genuine DOCX file upload and persist canonical MIME type', async () => {
+      const validDocx = createZipBuffer([
+        { name: '[Content_Types].xml', data: '<Types/>' },
+        { name: 'word/document.xml', data: '<w:document/>' }
+      ]);
+
+      const res = await request(app)
+        .post(`/api/responses/${form._id}`)
+        .field('answers', JSON.stringify([
+          { questionId: qText._id, value: 'John' },
+          { questionId: qEmail._id, value: 'test@test.com' },
+          { questionId: qChoice._id, value: 'Blue' }
+        ]))
+        .attach(`file_${qFile._id.toString()}`, validDocx, {
+          filename: 'valid.docx',
+          contentType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+        });
+
+      expect(res.status).toBe(201);
+      const response = await Response.findOne({ formId: form._id });
+      const fileAnswer = response.answers.find(a => a.questionId.toString() === qFile._id.toString());
+      expect(fileAnswer).toBeDefined();
+      expect(fileAnswer.value.mimeType).toBe('application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+      expect(fileAnswer.value.originalName).toBe('valid.docx');
+    });
+
+    it('should reject arbitrary ZIP archive disguised as DOCX', async () => {
+      const arbitraryZip = createZipBuffer([
+        { name: 'random.txt', data: 'not a docx' }
+      ]);
+
+      const res = await request(app)
+        .post(`/api/responses/${form._id}`)
+        .field('answers', JSON.stringify([
+          { questionId: qText._id, value: 'John' },
+          { questionId: qEmail._id, value: 'test@test.com' },
+          { questionId: qChoice._id, value: 'Blue' }
+        ]))
+        .attach(`file_${qFile._id.toString()}`, arbitraryZip, {
+          filename: 'fake.docx',
+          contentType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+        });
+
+      expect(res.status).toBe(400);
+      expect(res.body.message).toContain('content does not match allowed types');
+    });
+
+    it('should reject DOCX archive containing prohibited executable payload', async () => {
+      const maliciousDocx = createZipBuffer([
+        { name: '[Content_Types].xml', data: '<Types/>' },
+        { name: 'word/document.xml', data: '<w:document/>' },
+        { name: 'malware.exe', data: 'MZ...' }
+      ]);
+
+      const res = await request(app)
+        .post(`/api/responses/${form._id}`)
+        .field('answers', JSON.stringify([
+          { questionId: qText._id, value: 'John' },
+          { questionId: qEmail._id, value: 'test@test.com' },
+          { questionId: qChoice._id, value: 'Blue' }
+        ]))
+        .attach(`file_${qFile._id.toString()}`, maliciousDocx, {
+          filename: 'malicious.docx',
+          contentType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+        });
+
+      expect(res.status).toBe(400);
+      expect(res.body.message).toContain('content does not match allowed types');
     });
   });
 
@@ -2611,6 +2759,88 @@ describe('Response Controller - Phase 2', () => {
           unlinkSpy.mockRestore();
         }
       });
+    });
+  });
+
+  describe('SEC-04 and SEC-06 Hardening: Filename, Storage Extension, and Rate Limit Keys', () => {
+    it('isolates submission rate limit keys per form and per IP', () => {
+      const key1 = getSubmissionRateLimitKey({ params: { formId: 'form-123' }, ip: '1.2.3.4' });
+      const key2 = getSubmissionRateLimitKey({ params: { formId: 'form-456' }, ip: '1.2.3.4' });
+      const key3 = getSubmissionRateLimitKey({ params: { formId: 'form-123' }, ip: '5.6.7.8' });
+
+      expect(key1).not.toBe(key2);
+      expect(key1).not.toBe(key3);
+      expect(key1).toContain('form-123');
+      expect(key2).toContain('form-456');
+    });
+
+    it('generates opaque random filename in multer diskStorage ignoring user fieldname', () => {
+      const req = {};
+      const file = { fieldname: '../../traversal-payload' };
+      let generatedFilename = null;
+
+      upload.storage.getFilename(req, file, (err, filename) => {
+        generatedFilename = filename;
+      });
+
+      expect(generatedFilename).toMatch(/^upload-[0-9a-f-]+\.tmp$/);
+      expect(generatedFilename).not.toContain('..');
+      expect(generatedFilename).not.toContain('traversal-payload');
+      expect(req._trackedTempFiles).toBeInstanceOf(Set);
+      expect(req._trackedTempFiles.size).toBe(1);
+    });
+
+    it('derives stored file extension strictly from canonical MIME type regardless of client originalname', async () => {
+      const user = await User.create({
+        name: 'Safe Ext User',
+        email: `safe_ext_${Date.now()}@test.com`,
+        password: 'password123'
+      });
+
+      const form = await Form.create({
+        ownerId: user._id,
+        title: 'Safe Extension Form',
+        status: 'published'
+      });
+
+      const fileQ = await Question.create({
+        formId: form._id,
+        type: 'file',
+        label: 'Attachment',
+        required: true,
+        order: 0
+      });
+
+      const uploadSpy = vi.spyOn(storageService, 'uploadFile');
+
+      try {
+        const validPdfBuffer = Buffer.from('%PDF-1.4\n%EOF\n');
+        // Client attempts to name the file exploit.php or exploit.exe
+        const res = await request(app)
+          .post(`/api/responses/${form._id}`)
+          .field('answers', JSON.stringify([]))
+          .attach(`file_${fileQ._id.toString()}`, validPdfBuffer, {
+            filename: 'exploit.exe',
+            contentType: 'application/pdf'
+          });
+
+        expect(res.status).toBe(201);
+        expect(uploadSpy).toHaveBeenCalled();
+        const uploadedStorageKey = uploadSpy.mock.calls[0][1];
+        const uploadedMime = uploadSpy.mock.calls[0][2];
+
+        // Storage key must end with .pdf (from canonicalMime), NOT .exe
+        expect(uploadedStorageKey.endsWith('.pdf')).toBe(true);
+        expect(uploadedStorageKey.endsWith('.exe')).toBe(false);
+        expect(uploadedMime).toBe('application/pdf');
+
+        const savedResponse = await Response.findOne({ formId: form._id });
+        const answer = savedResponse.answers.find(a => a.questionId.toString() === fileQ._id.toString());
+        expect(answer.value.key.endsWith('.pdf')).toBe(true);
+        expect(answer.value.originalName).toBe('exploit.exe');
+      } finally {
+        uploadSpy.mockRestore();
+      }
     });
   });
 });

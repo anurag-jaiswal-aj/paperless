@@ -29,6 +29,19 @@ const userSchema = new mongoose.Schema({
     type: [String],
     default: []
   },
+  rotatedTokens: {
+    type: [
+      {
+        sessionId: String,
+        tokenHash: String,
+        rotatedAt: {
+          type: Date,
+          default: Date.now
+        }
+      }
+    ],
+    default: []
+  },
   lastLogoutAt: Date,
   resetPasswordToken: String,
   resetPasswordExpire: Date,

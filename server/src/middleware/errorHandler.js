@@ -1,4 +1,5 @@
-import fs from 'fs';
+import { cleanupRequestTempFiles } from '../utils/fileCleanup.js';
+import { sanitizeRequestUrl } from '../utils/helpers.js';
 
 /**
  * Global Error Handler Middleware
@@ -10,18 +11,7 @@ export const errorHandler = (err, req, res, next) => {
   console.error('Stack:', err.stack);
 
   // Clean up any pending temporary files from aborted uploads
-  const filesToClean = req && (Array.isArray(req.files) ? req.files : (req.file ? [req.file] : []));
-  if (filesToClean && filesToClean.length > 0) {
-    for (const f of filesToClean) {
-      if (f.path && fs.existsSync(f.path)) {
-        try {
-          fs.unlinkSync(f.path);
-        } catch {
-          // Ignore unlink errors during cleanup
-        }
-      }
-    }
-  }
+  cleanupRequestTempFiles(req);
 
   // Multer errors (file upload limits, invalid multipart)
   if (err.name === 'MulterError') {
@@ -128,7 +118,8 @@ export const errorHandler = (err, req, res, next) => {
  * 404 Not Found Handler
  */
 export const notFound = (req, res, next) => {
-  const error = new Error(`Not Found - ${req.originalUrl}`);
+  const safeUrl = sanitizeRequestUrl(req.originalUrl);
+  const error = new Error(`Not Found - ${safeUrl}`);
   error.statusCode = 404;
   res.status(404);
   next(error);

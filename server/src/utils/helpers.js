@@ -49,3 +49,16 @@ export const formatDate = (date) => {
     day: 'numeric'
   });
 };
+
+/**
+ * Sanitize request URL by redacting sensitive tokens in path or query string
+ */
+export const sanitizeRequestUrl = (url) => {
+  if (typeof url !== 'string') return '';
+  return url
+    .replace(/\/reset-?password\/[a-zA-Z0-9_%~.-]+/gi, (match) => {
+      const prefix = match.toLowerCase().startsWith('/reset-password') ? '/reset-password' : '/resetpassword';
+      return `${prefix}/[REDACTED]`;
+    })
+    .replace(/([?&](?:token|resettoken|reset-token)=)[^&#\s]+/gi, '$1[REDACTED]');
+};

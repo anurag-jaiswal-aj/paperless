@@ -9,13 +9,18 @@ import {
   responseCategorizeHandler
 } from '../controllers/aiController.js';
 import { protect } from '../middleware/authMiddleware.js';
-import rateLimit from 'express-rate-limit';
+import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 
 const router = express.Router();
+
+export const getAiRateLimitKey = (req) => req?.user?._id?.toString() || (req?.ip ? ipKeyGenerator(req.ip) : 'unknown');
 
 export const aiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
   max: parseInt(process.env.AI_RATE_LIMIT, 10) || 20, // 20 requests per 15 minutes by default
+  keyGenerator: getAiRateLimitKey,
+  standardHeaders: true,
+  legacyHeaders: false,
   message: { success: false, message: 'AI rate limit exceeded. Please try again later.' }
 });
 

@@ -1,12 +1,14 @@
 import { useState } from 'react';
-import { useNavigate, useParams, Link } from 'react-router-dom';
+import { useNavigate, useParams, useSearchParams, Link } from 'react-router-dom';
 import api from '../utils/api';
 import { useDispatch } from 'react-redux';
 import { loginSuccess } from '../store/authSlice';
 import { FiAlertCircle, FiCheckCircle } from 'react-icons/fi';
 
 const ResetPassword = () => {
-  const { token } = useParams();
+  const { token: paramToken } = useParams();
+  const [searchParams] = useSearchParams();
+  const token = paramToken || searchParams.get('token') || '';
   const navigate = useNavigate();
   const dispatch = useDispatch();
 
@@ -27,7 +29,7 @@ const ResetPassword = () => {
     setError('');
 
     try {
-      const response = await api.put(`/api/auth/resetpassword/${token}`, { password });
+      const response = await api.put('/api/auth/resetpassword', { token, password });
       if (response.data.success) {
         setSuccess('Password reset successfully! Logging you in...');
         dispatch(
@@ -35,6 +37,7 @@ const ResetPassword = () => {
             user: response.data.data.user
           })
         );
+        api.notifyAuthLogin?.(response.data.data.user);
         setTimeout(() => {
           navigate('/dashboard');
         }, 1500);
