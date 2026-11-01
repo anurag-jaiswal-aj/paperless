@@ -1,0 +1,11 @@
+node_modules
+dist
+.env
+.env.*
+coverage
+.git
+.DS_Store
+*.log
+npm-debug.log*
+vitest.config.js
+

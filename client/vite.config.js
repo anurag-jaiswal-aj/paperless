@@ -7,6 +7,7 @@ const targetPort = process.env.BACKEND_PORT || process.env.VITE_BACKEND_PORT || 
 export default defineConfig({
   plugins: [react()],
   server: {
+    host: '127.0.0.1',
     port: 5173,
     open: true,
     proxy: {

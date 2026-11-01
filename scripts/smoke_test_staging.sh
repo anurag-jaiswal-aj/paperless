@@ -22,6 +22,17 @@ TOTAL_COUNT=0
 COOKIE_JAR=""
 OVERSIZED_TEMP=""
 SMALL_TEMP=""
+SMOKE_USER_ID=""
+
+cleanup_smoke_user() {
+  if [[ -n "${SMOKE_USER_ID:-}" && "${SMOKE_USER_ID}" =~ ^[0-9a-fA-F]{24}$ ]]; then
+    if command -v docker &>/dev/null; then
+      docker compose --env-file .env.staging -f docker-compose.staging.yml exec -T mongo \
+        mongosh paperless_staging --quiet --eval "const r = db.users.deleteOne({ _id: ObjectId('${SMOKE_USER_ID}') }); print(JSON.stringify(r));" >/dev/null 2>&1 || true
+    fi
+    SMOKE_USER_ID=""
+  fi
+}
 
 cleanup() {
   local exit_code=$?
@@ -35,6 +46,7 @@ cleanup() {
   if [[ -n "${SMALL_TEMP:-}" && -f "${SMALL_TEMP}" ]]; then
     rm -f "${SMALL_TEMP}"
   fi
+  cleanup_smoke_user
   if [[ ${exit_code} -eq 0 && "${1:-}" == "SIGNAL" ]]; then
     exit 130
   fi
@@ -370,6 +382,7 @@ REGISTER_CODE=$(echo "${REGISTER_RESP}" | tail -n 1)
 
 if [[ "${REGISTER_CODE}" == "201" ]]; then
   log_pass "Ephemeral smoke user registration succeeded (HTTP 201)"
+  SMOKE_USER_ID=$(echo "${REGISTER_BODY}" | jq -r '.data.user.id // .data.user._id // empty' 2>/dev/null || true)
 else
   log_fail "Ephemeral smoke user registration failed (HTTP ${REGISTER_CODE}): ${REGISTER_BODY}"
 fi
@@ -388,7 +401,10 @@ fi
 # Verify allowlist fields present
 USER_DATA_EMAIL=$(echo "${AUTH_ME_ACTIVE_BODY}" | jq -r '.data.email // empty' 2>/dev/null || true)
 USER_DATA_NAME=$(echo "${AUTH_ME_ACTIVE_BODY}" | jq -r '.data.name // empty' 2>/dev/null || true)
-USER_DATA_ID=$(echo "${AUTH_ME_ACTIVE_BODY}" | jq -r '.data.id // empty' 2>/dev/null || true)
+USER_DATA_ID=$(echo "${AUTH_ME_ACTIVE_BODY}" | jq -r '.data.id // .data._id // empty' 2>/dev/null || true)
+if [[ -z "${SMOKE_USER_ID:-}" && -n "${USER_DATA_ID:-}" ]]; then
+  SMOKE_USER_ID="${USER_DATA_ID}"
+fi
 
 if [[ "${USER_DATA_EMAIL}" == "${EPHEMERAL_EMAIL}" && -n "${USER_DATA_NAME}" && -n "${USER_DATA_ID}" ]]; then
   log_pass "Authenticated GET /api/auth/me returned expected user profile fields"
@@ -429,6 +445,33 @@ fi
 
 rm -f "${COOKIE_JAR}"
 COOKIE_JAR=""
+
+# 4.8 Targeted database cleanup of ephemeral smoke test user
+if [[ -n "${SMOKE_USER_ID:-}" && "${SMOKE_USER_ID}" =~ ^[0-9a-fA-F]{24}$ ]]; then
+  log_info "4.8 Cleaning up ephemeral smoke user (${SMOKE_USER_ID}) from database..."
+  if command -v docker &>/dev/null; then
+    CLEANUP_ACK=$(docker compose --env-file .env.staging -f docker-compose.staging.yml exec -T mongo \
+      mongosh paperless_staging --quiet --eval "const r = db.users.deleteOne({ _id: ObjectId('${SMOKE_USER_ID}') }); print(JSON.stringify(r));" 2>/dev/null || true)
+    CLEANUP_ACK_DELETED=$(echo "${CLEANUP_ACK}" | jq -r '.deletedCount // empty' 2>/dev/null || true)
+    CLEANUP_ACK_STATUS=$(echo "${CLEANUP_ACK}" | jq -r '.acknowledged // empty' 2>/dev/null || true)
+
+    if [[ "${CLEANUP_ACK_STATUS}" == "true" && "${CLEANUP_ACK_DELETED}" == "1" ]]; then
+      log_pass "Ephemeral smoke user (${SMOKE_USER_ID}) verified deleted from database"
+      SMOKE_USER_ID=""
+    elif [[ "${CLEANUP_ACK_STATUS}" == "true" && "${CLEANUP_ACK_DELETED}" == "0" ]]; then
+      log_info "Ephemeral smoke user (${SMOKE_USER_ID}) was already absent from database"
+      SMOKE_USER_ID=""
+    else
+      log_fail "Failed to delete ephemeral smoke user (${SMOKE_USER_ID}): ${CLEANUP_ACK}"
+    fi
+  else
+    log_fail "Docker CLI unavailable; cannot execute MongoDB cleanup for user ${SMOKE_USER_ID}"
+  fi
+elif [[ -z "${SMOKE_USER_ID:-}" ]]; then
+  log_info "4.8 Skipping user cleanup: registration did not generate a user ID"
+else
+  log_fail "4.8 Invalid smoke user ID format ('${SMOKE_USER_ID}'); aborting unsafe deletion"
+fi
 
 # ==============================================================================
 # Suite 5: Multipart Upload Ingestion Boundary Validation
