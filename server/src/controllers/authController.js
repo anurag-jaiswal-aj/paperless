@@ -3,8 +3,13 @@ import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
 import User from '../models/user.js';
 import EmailService from '../services/EmailService.js';
+import { validatePassword } from '../utils/passwordPolicy.js';
 
 const emailService = new EmailService();
+
+// Pre-computed valid 10-round bcrypt hash used for constant-time dummy verification
+// to equalize login response latency when authenticating against non-existent accounts.
+const DUMMY_HASH = bcrypt.hashSync('paperless-auth-timing-mitigation-dummy-salt', 10);
 
 /**
  * Generate JWT Token
@@ -146,8 +151,9 @@ export const register = async (req, res, next) => {
       return res.status(400).json({ success: false, message: 'Please provide a valid email' });
     }
 
-    if (password.length < 6) {
-      return res.status(400).json({ success: false, message: 'Password must be at least 6 characters' });
+    const policyResult = validatePassword(password);
+    if (!policyResult.valid) {
+      return res.status(400).json({ success: false, message: policyResult.message });
     }
 
     const existingUser = await User.findOne({ email: normalizedEmail });
@@ -186,6 +192,7 @@ export const login = async (req, res, next) => {
     const normalizedEmail = typeof email === 'string' ? email.trim().toLowerCase() : '';
     const user = await User.findOne({ email: normalizedEmail });
     if (!user) {
+      await bcrypt.compare(typeof password === 'string' ? password : '', DUMMY_HASH);
       return res.status(401).json({ success: false, message: 'Invalid credentials' });
     }
 
@@ -552,8 +559,9 @@ export const resetPassword = async (req, res, next) => {
       return res.status(400).json({ success: false, message: 'Invalid or missing reset token' });
     }
 
-    if (!password || password.length < 6) {
-      return res.status(400).json({ success: false, message: 'Please provide a valid password (min 6 chars)' });
+    const policyResult = validatePassword(password);
+    if (!policyResult.valid) {
+      return res.status(400).json({ success: false, message: policyResult.message });
     }
 
     const resetPasswordToken = crypto

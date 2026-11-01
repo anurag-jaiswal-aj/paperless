@@ -5,6 +5,7 @@ import mongoose from 'mongoose';
 import cookieParser from 'cookie-parser';
 import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
+import bcrypt from 'bcryptjs';
 import { MongoMemoryServer } from 'mongodb-memory-server';
 import authRoutes, { passwordLimiter } from '../routes/authRoutes';
 import User from '../models/user';
@@ -97,6 +98,36 @@ describe('Auth Controller', () => {
         .post('/api/auth/register')
         .send({ ...testUser, password: '123' });
       expect(res.status).toBe(400);
+      expect(res.body.success).toBe(false);
+      expect(res.body.message).toBe('Password must be at least 10 characters');
+    });
+
+    it('rejects registration with a 9-character password', async () => {
+      const res = await request(app)
+        .post('/api/auth/register')
+        .send({ ...testUser, email: 'nine_chars@example.com', password: '123456789' });
+      expect(res.status).toBe(400);
+      expect(res.body.success).toBe(false);
+      expect(res.body.message).toBe('Password must be at least 10 characters');
+    });
+
+    it('rejects registration with a common blocklisted password', async () => {
+      const res = await request(app)
+        .post('/api/auth/register')
+        .send({ ...testUser, email: 'common_pass@example.com', password: 'administrator' });
+      expect(res.status).toBe(400);
+      expect(res.body.success).toBe(false);
+      expect(res.body.message).toBe('Password is too common or easily guessed');
+    });
+
+    it('rejects registration with a password exceeding 72 UTF-8 bytes', async () => {
+      const longPassword = 'a'.repeat(73);
+      const res = await request(app)
+        .post('/api/auth/register')
+        .send({ ...testUser, email: 'long_pass@example.com', password: longPassword });
+      expect(res.status).toBe(400);
+      expect(res.body.success).toBe(false);
+      expect(res.body.message).toBe('Password exceeds maximum length of 72 bytes');
     });
   });
 
@@ -145,6 +176,39 @@ describe('Auth Controller', () => {
       expect(res.status).toBe(200);
       expect(res.body.success).toBe(true);
       expect(res.body.data.user.email).toBe('casesensitive@example.com');
+    });
+
+    it('executes bcrypt compare for non-existent users to equalize timing and returns generic 401', async () => {
+      const compareSpy = vi.spyOn(bcrypt, 'compare');
+      const res = await request(app)
+        .post('/api/auth/login')
+        .send({ email: 'nonexistent_account@example.com', password: 'password123' });
+
+      expect(res.status).toBe(401);
+      expect(res.body.success).toBe(false);
+      expect(res.body.message).toBe('Invalid credentials');
+      expect(compareSpy).toHaveBeenCalled();
+      compareSpy.mockRestore();
+    });
+
+    it('allows existing account with password shorter than 10 characters to log in successfully (backward compatibility)', async () => {
+      // Seed an existing user directly with a legacy 6-character password hash
+      const legacyHashed = await bcrypt.hash('pass6c', 10);
+      await User.create({
+        name: 'Legacy User',
+        email: 'legacy_user@example.com',
+        password: legacyHashed
+      });
+
+      const res = await request(app)
+        .post('/api/auth/login')
+        .send({ email: 'legacy_user@example.com', password: 'pass6c' });
+
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+      expect(res.body.data.user.email).toBe('legacy_user@example.com');
+      const cookies = res.headers['set-cookie'];
+      expect(cookies.find(c => c.startsWith('token='))).toBeDefined();
     });
   });
 
@@ -1567,6 +1631,48 @@ describe('Auth Controller', () => {
       // Token must be completely cleared from database
       const finalUser = await User.findOne({ email: testUser.email });
       expect(finalUser.resetPasswordToken).toBeUndefined();
+    });
+
+    it('rejects password reset with password shorter than 10 characters', async () => {
+      const user = await User.findOne({ email: testUser.email });
+      const resetToken = user.getResetPasswordToken();
+      await user.save({ validateBeforeSave: false });
+
+      const res = await request(app)
+        .put(`/api/auth/resetpassword/${resetToken}`)
+        .send({ password: 'short9chr' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.success).toBe(false);
+      expect(res.body.message).toBe('Password must be at least 10 characters');
+    });
+
+    it('rejects password reset with common blocklisted password', async () => {
+      const user = await User.findOne({ email: testUser.email });
+      const resetToken = user.getResetPasswordToken();
+      await user.save({ validateBeforeSave: false });
+
+      const res = await request(app)
+        .put(`/api/auth/resetpassword/${resetToken}`)
+        .send({ password: 'changeme123' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.success).toBe(false);
+      expect(res.body.message).toBe('Password is too common or easily guessed');
+    });
+
+    it('rejects password reset with password exceeding 72 UTF-8 bytes', async () => {
+      const user = await User.findOne({ email: testUser.email });
+      const resetToken = user.getResetPasswordToken();
+      await user.save({ validateBeforeSave: false });
+
+      const res = await request(app)
+        .put(`/api/auth/resetpassword/${resetToken}`)
+        .send({ password: 'a'.repeat(73) });
+
+      expect(res.status).toBe(400);
+      expect(res.body.success).toBe(false);
+      expect(res.body.message).toBe('Password exceeds maximum length of 72 bytes');
     });
   });
 
