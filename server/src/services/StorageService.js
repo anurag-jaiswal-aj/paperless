@@ -47,6 +47,15 @@ class StorageService {
   async getFileStream(path) {
     return s3Provider.getFileStream(path);
   }
+
+  /**
+   * Check storage bucket accessibility
+   * @param {number} [timeoutMs=3000] - Timeout in milliseconds
+   * @returns {Promise<{ ok: boolean, status: string, error?: string }>}
+   */
+  async checkBucketAccess(timeoutMs = 3000) {
+    return s3Provider.checkBucketAccess(timeoutMs);
+  }
 }
 
 export default new StorageService();

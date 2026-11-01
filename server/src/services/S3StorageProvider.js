@@ -1,4 +1,4 @@
-import { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
+import { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand, HeadBucketCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { Readable } from 'stream';
 
@@ -130,6 +130,80 @@ class S3StorageProvider {
       contentType: response.ContentType,
       contentLength: response.ContentLength
     };
+  }
+
+  /**
+   * Checks S3/MinIO bucket reachability and availability.
+   *
+   * @param {number} [timeoutMs=3000] - Timeout in milliseconds
+   * @returns {Promise<{ ok: boolean, status: string, error?: string }>}
+   */
+  async checkBucketAccess(timeoutMs = 3000) {
+    if (this.isMock) {
+      return { ok: true, status: 'mock' };
+    }
+
+    if (!this.client || this.initError) {
+      return {
+        ok: false,
+        status: 'misconfigured',
+        error: this.initError ? this.initError.message : 'Storage client not initialized'
+      };
+    }
+
+    let timeoutId;
+    let abortSignal;
+
+    if (typeof AbortSignal.timeout === 'function') {
+      abortSignal = AbortSignal.timeout(timeoutMs);
+    } else {
+      const controller = new AbortController();
+      timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+      abortSignal = controller.signal;
+    }
+
+    try {
+      const command = new HeadBucketCommand({
+        Bucket: this.bucket
+      });
+
+      await this.client.send(command, { abortSignal });
+
+      return {
+        ok: true,
+        status: 'connected'
+      };
+    } catch (error) {
+      const httpStatus = error?.$metadata?.httpStatusCode;
+      const errorName = error?.name;
+      const errorCode = error?.code;
+
+      if (errorName === 'AbortError' || errorName === 'TimeoutError') {
+        return { ok: false, status: 'timeout', error: 'storage_timeout' };
+      }
+
+      if (httpStatus === 404 || errorName === 'NotFound' || errorName === 'NoSuchBucket') {
+        return { ok: false, status: 'bucket_not_found', error: 'bucket_not_found' };
+      }
+
+      if (httpStatus === 403 || errorName === 'AccessDenied') {
+        return { ok: false, status: 'bucket_access_denied', error: 'bucket_access_denied' };
+      }
+
+      if (errorCode === 'ECONNREFUSED' || errorCode === 'ENOTFOUND' || errorCode === 'EHOSTUNREACH') {
+        return { ok: false, status: 'unreachable', error: 'storage_unreachable' };
+      }
+
+      return {
+        ok: false,
+        status: 'error',
+        error: 'storage_unavailable'
+      };
+    } finally {
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+      }
+    }
   }
 }
 

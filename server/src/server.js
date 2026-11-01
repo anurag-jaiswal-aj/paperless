@@ -30,6 +30,9 @@ import aiRoutes from './routes/aiRoutes.js';
 import { errorHandler, notFound } from './middleware/errorHandler.js';
 import { csrfProtection } from './middleware/csrfProtection.js';
 
+// Import services
+import storageService from './services/StorageService.js';
+
 // Initialize Express app
 const app = express();
 
@@ -125,14 +128,26 @@ app.get(['/health', '/api/health'], (req, res) => {
   });
 });
 
-// Database readiness probe
-const readinessHandler = (req, res) => {
+// Dependency readiness probe (Database and Storage)
+const readinessHandler = async (req, res) => {
   const isDbReady = mongoose.connection.readyState === 1;
-  const statusCode = isDbReady ? 200 : 503;
+  let storageResult;
+
+  try {
+    storageResult = await storageService.checkBucketAccess();
+  } catch (err) {
+    storageResult = { ok: false, status: 'error' };
+  }
+
+  const isStorageReady = Boolean(storageResult && storageResult.ok);
+  const isReady = isDbReady && isStorageReady;
+  const statusCode = isReady ? 200 : 503;
+
   res.status(statusCode).json({
-    success: isDbReady,
-    status: isDbReady ? 'ready' : 'not_ready',
+    success: isReady,
+    status: isReady ? 'ready' : 'not_ready',
     database: isDbReady ? 'connected' : 'disconnected',
+    storage: storageResult?.status || 'disconnected',
     timestamp: new Date().toISOString()
   });
 };
@@ -266,4 +281,4 @@ if (process.env.NODE_ENV !== 'test') {
   });
 }
 
-export { app, connectDB, server };
+export { app, connectDB, server, readinessHandler };

@@ -46,6 +46,14 @@ describe('StorageService and S3StorageProvider', () => {
       expect(spy).toHaveBeenCalledWith('test/path');
       expect(result).toBe(mockResult);
     });
+
+    it('delegates checkBucketAccess to s3Provider', async () => {
+      const mockResult = { ok: true, status: 'connected' };
+      const spy = vi.spyOn(s3Provider, 'checkBucketAccess').mockResolvedValueOnce(mockResult);
+      const result = await storageService.checkBucketAccess(2000);
+      expect(spy).toHaveBeenCalledWith(2000);
+      expect(result).toBe(mockResult);
+    });
   });
 
   describe('S3StorageProvider - Mock fallback when credentials unconfigured', () => {
@@ -188,6 +196,116 @@ describe('StorageService and S3StorageProvider', () => {
       expect(provider.client).not.toBeNull();
       expect(provider.isMock).toBe(false);
       expect(provider.initError).toBeNull();
+    });
+  });
+
+  describe('S3StorageProvider - checkBucketAccess', () => {
+    it('returns mock status when provider is in mock mode', async () => {
+      const provider = new S3StorageProvider();
+      provider.isMock = true;
+      provider.client = null;
+
+      const result = await provider.checkBucketAccess();
+      expect(result).toEqual({ ok: true, status: 'mock' });
+    });
+
+    it('returns misconfigured status when client is unconfigured in production', async () => {
+      process.env.NODE_ENV = 'production';
+      delete process.env.S3_REGION;
+      delete process.env.S3_BUCKET;
+      delete process.env.S3_ACCESS_KEY_ID;
+      delete process.env.S3_SECRET_ACCESS_KEY;
+
+      const provider = new S3StorageProvider();
+      const result = await provider.checkBucketAccess();
+      expect(result.ok).toBe(false);
+      expect(result.status).toBe('misconfigured');
+      expect(result.error).toContain('Missing credentials/config');
+    });
+
+    it('returns connected status when HeadBucketCommand succeeds', async () => {
+      const mockSend = vi.fn().mockResolvedValueOnce({});
+      const provider = new S3StorageProvider();
+      provider.isMock = false;
+      provider.bucket = 'paperless-test';
+      provider.client = { send: mockSend };
+
+      const result = await provider.checkBucketAccess(3000);
+      expect(mockSend).toHaveBeenCalledTimes(1);
+      const commandArg = mockSend.mock.calls[0][0];
+      expect(commandArg.input.Bucket).toBe('paperless-test');
+      expect(result).toEqual({ ok: true, status: 'connected' });
+    });
+
+    it('returns bucket_not_found on 404 / NotFound error', async () => {
+      const notFoundErr = new Error('NotFound');
+      notFoundErr.name = 'NotFound';
+      notFoundErr.$metadata = { httpStatusCode: 404 };
+
+      const mockSend = vi.fn().mockRejectedValueOnce(notFoundErr);
+      const provider = new S3StorageProvider();
+      provider.isMock = false;
+      provider.bucket = 'paperless-test';
+      provider.client = { send: mockSend };
+
+      const result = await provider.checkBucketAccess();
+      expect(result).toEqual({ ok: false, status: 'bucket_not_found', error: 'bucket_not_found' });
+    });
+
+    it('returns bucket_access_denied on 403 / AccessDenied error', async () => {
+      const accessDeniedErr = new Error('AccessDenied');
+      accessDeniedErr.name = 'AccessDenied';
+      accessDeniedErr.$metadata = { httpStatusCode: 403 };
+
+      const mockSend = vi.fn().mockRejectedValueOnce(accessDeniedErr);
+      const provider = new S3StorageProvider();
+      provider.isMock = false;
+      provider.bucket = 'paperless-test';
+      provider.client = { send: mockSend };
+
+      const result = await provider.checkBucketAccess();
+      expect(result).toEqual({ ok: false, status: 'bucket_access_denied', error: 'bucket_access_denied' });
+    });
+
+    it('returns unreachable on connection refused', async () => {
+      const connErr = new Error('connect ECONNREFUSED 127.0.0.1:9000');
+      connErr.code = 'ECONNREFUSED';
+
+      const mockSend = vi.fn().mockRejectedValueOnce(connErr);
+      const provider = new S3StorageProvider();
+      provider.isMock = false;
+      provider.bucket = 'paperless-test';
+      provider.client = { send: mockSend };
+
+      const result = await provider.checkBucketAccess();
+      expect(result).toEqual({ ok: false, status: 'unreachable', error: 'storage_unreachable' });
+    });
+
+    it('returns timeout on AbortError or TimeoutError', async () => {
+      const timeoutErr = new Error('Request aborted');
+      timeoutErr.name = 'AbortError';
+
+      const mockSend = vi.fn().mockRejectedValueOnce(timeoutErr);
+      const provider = new S3StorageProvider();
+      provider.isMock = false;
+      provider.bucket = 'paperless-test';
+      provider.client = { send: mockSend };
+
+      const result = await provider.checkBucketAccess();
+      expect(result).toEqual({ ok: false, status: 'timeout', error: 'storage_timeout' });
+    });
+
+    it('returns generic error on unexpected exception', async () => {
+      const genericErr = new Error('Unexpected S3 crash');
+
+      const mockSend = vi.fn().mockRejectedValueOnce(genericErr);
+      const provider = new S3StorageProvider();
+      provider.isMock = false;
+      provider.bucket = 'paperless-test';
+      provider.client = { send: mockSend };
+
+      const result = await provider.checkBucketAccess();
+      expect(result).toEqual({ ok: false, status: 'error', error: 'storage_unavailable' });
     });
   });
 });
