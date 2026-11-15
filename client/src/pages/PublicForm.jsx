@@ -1,8 +1,13 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { useParams } from 'react-router-dom';
 import api from '../utils/api';
 import Loader from '../components/Loader';
 import { FiCheckCircle, FiAlertCircle } from 'react-icons/fi';
+
+const generateIdempotencyKey = () =>
+  typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+    ? crypto.randomUUID()
+    : `idem_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
 
 const PublicForm = () => {
   const { id } = useParams();
@@ -13,6 +18,12 @@ const PublicForm = () => {
   const [submitting, setSubmitting] = useState(false);
   const [submitted, setSubmitted] = useState(false);
   const [error, setError] = useState('');
+  const isSubmittingRef = useRef(false);
+  const idempotencyKeyRef = useRef('');
+
+  useEffect(() => {
+    idempotencyKeyRef.current = generateIdempotencyKey();
+  }, [id]);
 
   const isQuestionVisible = (question) => {
     if (!question.visibilityRule || !question.visibilityRule.targetQuestionId) {
@@ -58,6 +69,7 @@ const PublicForm = () => {
   }, [fetchForm]);
 
   const handleAnswerChange = (questionId, value) => {
+    idempotencyKeyRef.current = generateIdempotencyKey();
     setAnswers({
       ...answers,
       [questionId]: value
@@ -66,24 +78,43 @@ const PublicForm = () => {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+    if (isSubmittingRef.current || submitting) {
+      return;
+    }
     setError('');
 
     // Validate required questions (only visible ones)
     const visibleQuestions = questions.filter(isQuestionVisible);
     const requiredQuestions = visibleQuestions.filter((q) => q.required);
     for (const q of requiredQuestions) {
-      if (answers[q._id] === undefined || answers[q._id] === '' || (Array.isArray(answers[q._id]) && answers[q._id].length === 0)) {
+      if (
+        answers[q._id] === undefined ||
+        answers[q._id] === '' ||
+        (Array.isArray(answers[q._id]) && answers[q._id].length === 0)
+      ) {
         setError(`Please answer: ${q.label}`);
         return;
       }
     }
 
+    // Client-side file validation (5MB max)
+    const MAX_FILE_SIZE = 5 * 1024 * 1024;
+    for (const q of visibleQuestions) {
+      if (q.type === 'file' && answers[q._id] instanceof File) {
+        if (answers[q._id].size > MAX_FILE_SIZE) {
+          setError(`File "${answers[q._id].name}" exceeds maximum allowed size of 5MB`);
+          return;
+        }
+      }
+    }
+
+    isSubmittingRef.current = true;
     setSubmitting(true);
 
     try {
       const formattedAnswers = Object.entries(answers)
         .filter(([qId]) => {
-          const q = questions.find(question => question._id === qId);
+          const q = questions.find((question) => question._id === qId);
           return q && isQuestionVisible(q);
         })
         .map(([questionId, value]) => ({
@@ -91,14 +122,14 @@ const PublicForm = () => {
           value
         }));
 
-      const hasFiles = formattedAnswers.some(ans => ans.value instanceof File);
+      const hasFiles = formattedAnswers.some((ans) => ans.value instanceof File);
 
       let response;
       if (hasFiles) {
         const formData = new FormData();
 
         // Strip out file objects from the JSON answers array to avoid sending empty {}
-        const jsonAnswers = formattedAnswers.map(ans => {
+        const jsonAnswers = formattedAnswers.map((ans) => {
           if (ans.value instanceof File) {
             return { questionId: ans.questionId, value: null };
           }
@@ -107,7 +138,7 @@ const PublicForm = () => {
 
         formData.append('answers', JSON.stringify(jsonAnswers));
 
-        formattedAnswers.forEach(ans => {
+        formattedAnswers.forEach((ans) => {
           if (ans.value instanceof File) {
             formData.append(`file_${ans.questionId}`, ans.value);
           }
@@ -115,11 +146,20 @@ const PublicForm = () => {
 
         response = await api.post(`/api/responses/${id}`, formData, {
           headers: {
-            'Content-Type': 'multipart/form-data'
+            'Content-Type': 'multipart/form-data',
+            'Idempotency-Key': idempotencyKeyRef.current
           }
         });
       } else {
-        response = await api.post(`/api/responses/${id}`, { answers: formattedAnswers });
+        response = await api.post(
+          `/api/responses/${id}`,
+          { answers: formattedAnswers },
+          {
+            headers: {
+              'Idempotency-Key': idempotencyKeyRef.current
+            }
+          }
+        );
       }
 
       if (response.data.success) {
@@ -128,6 +168,7 @@ const PublicForm = () => {
     } catch (err) {
       setError(err.response?.data?.message || 'Failed to submit response');
     } finally {
+      isSubmittingRef.current = false;
       setSubmitting(false);
     }
   };
@@ -218,7 +259,7 @@ const PublicForm = () => {
                     const current = answers[questionId] || [];
                     const newValue = e.target.checked
                       ? [...current, option]
-                      : current.filter(v => v !== option);
+                      : current.filter((v) => v !== option);
                     handleAnswerChange(questionId, newValue);
                   }}
                   className="w-4 h-4"
@@ -281,7 +322,16 @@ const PublicForm = () => {
         return (
           <input
             type="file"
-            onChange={(e) => handleAnswerChange(questionId, e.target.files[0])}
+            accept="image/jpeg,image/png,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            onChange={(e) => {
+              const file = e.target.files[0];
+              if (file && file.size > 5 * 1024 * 1024) {
+                setError(`File "${file.name}" exceeds maximum allowed size of 5MB`);
+              } else {
+                setError('');
+              }
+              handleAnswerChange(questionId, file);
+            }}
             required={question.required && !answers[questionId]}
             className="input file:mr-4 file:py-2 file:px-4 file:rounded file:border-0 file:text-sm file:font-semibold file:bg-gray-100 dark:file:bg-surface-input file:text-black dark:file:text-text-primary"
           />
@@ -331,11 +381,11 @@ const PublicForm = () => {
   return (
     <div className="flex-1 py-16 md:py-24 px-4 theme-transition">
       <div className="container mx-auto max-w-3xl">
-        <div className={`card p-8 md:p-10 mb-8 border-t-8 border-t-gray-900 dark:border-t-text-primary`}>
+        <div
+          className={`card p-8 md:p-10 mb-8 border-t-8 border-t-gray-900 dark:border-t-text-primary`}
+        >
           <h1 className="text-3xl md:text-4xl font-extrabold mb-4">{form.title}</h1>
-          {form.description && (
-            <p className="opacity-70 text-lg">{form.description}</p>
-          )}
+          {form.description && <p className="opacity-70 text-lg">{form.description}</p>}
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-8">
@@ -347,14 +397,13 @@ const PublicForm = () => {
           )}
 
           {questions.filter(isQuestionVisible).map((question) => (
-            <div
-              key={question._id}
-              className={`card p-6 md:p-8`}
-            >
+            <div key={question._id} className={`card p-6 md:p-8`}>
               <label className="block mb-5">
                 <span className="font-semibold text-lg md:text-xl">
                   {question.label}
-                  {question.required && <span className="text-red-600 dark:text-red-400 ml-1.5">*</span>}
+                  {question.required && (
+                    <span className="text-red-600 dark:text-red-400 ml-1.5">*</span>
+                  )}
                 </span>
               </label>
               {renderQuestion(question)}
@@ -362,11 +411,7 @@ const PublicForm = () => {
           ))}
 
           <div className="pt-4">
-            <button
-              type="submit"
-              disabled={submitting}
-              className="btn btn-lg w-full btn-primary"
-            >
+            <button type="submit" disabled={submitting} className="btn btn-lg w-full btn-primary">
               {submitting ? 'Submitting...' : 'Submit Response'}
             </button>
           </div>

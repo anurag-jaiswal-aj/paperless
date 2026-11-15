@@ -9,8 +9,7 @@ const questionSchema = new mongoose.Schema({
   formId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Form',
-    required: true,
-    index: true
+    required: true
   },
   type: {
     type: String,

@@ -8,8 +8,7 @@ const formSchema = new mongoose.Schema({
   ownerId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
-    required: true,
-    index: true
+    required: true
   },
   title: {
     type: String,
@@ -25,10 +24,69 @@ const formSchema = new mongoose.Schema({
   },
   status: {
     type: String,
-    enum: ['draft', 'published', 'closed'],
+    enum: ['draft', 'published', 'closed', 'deleting', 'delete_failed'],
     default: 'draft'
   },
+  nextQuestionOrder: {
+    type: Number,
+    default: 0
+  },
+  deletionProgress: {
+    stage: {
+      type: String,
+      enum: [
+        'pending',
+        's3_cleanup',
+        'mongo_cleanup',
+        'mongo_responses',
+        'mongo_questions',
+        'mongo_form',
+        'completed',
+        'failed'
+      ],
+      default: 'pending'
+    },
+    totalFiles: { type: Number, default: 0 },
+    deletedFiles: { type: Number, default: 0 },
+    failedKeys: { type: [String], default: [] },
+    unresolvedKeys: { type: [String], default: [] },
+    leaseId: { type: String, default: null },
+    leaseExpiresAt: { type: Date, default: null },
+    epoch: { type: Number, default: 0 },
+    error: { type: String, default: null },
+    startedAt: { type: Date, default: null },
+    updatedAt: { type: Date, default: null }
+  },
+  reorderState: {
+    inProgress: { type: Boolean, default: false },
+    previousOrders: [
+      {
+        questionId: { type: mongoose.Schema.Types.ObjectId, ref: 'Question' },
+        order: { type: Number }
+      }
+    ],
+    targetOrders: [
+      {
+        questionId: { type: mongoose.Schema.Types.ObjectId, ref: 'Question' },
+        order: { type: Number }
+      }
+    ],
+    updatedAt: { type: Date, default: null }
+  },
+  activeSubmissions: {
+    type: Number,
+    default: 0,
+    min: 0
+  },
+  activeSubmissionsExpiresAt: {
+    type: Date,
+    default: null
+  },
   version: {
+    type: Number,
+    default: 0
+  },
+  lifecycleVersion: {
     type: Number,
     default: 0
   },
@@ -48,7 +106,13 @@ formSchema.pre('save', function (next) {
   next();
 });
 
-// Index for owner queries
-formSchema.index({ ownerId: 1, createdAt: -1 });
+// Index for owner queries and deterministic pagination
+formSchema.index({ ownerId: 1, createdAt: -1, _id: -1 });
+
+// Compound index for deletion recovery, lease expiration, and startup sweep
+formSchema.index({ status: 1, 'deletionProgress.leaseExpiresAt': 1 });
+
+// Index for active submission concurrency checks
+formSchema.index({ status: 1, activeSubmissions: 1 });
 
 export default mongoose.model('Form', formSchema);

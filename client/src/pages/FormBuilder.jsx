@@ -3,7 +3,15 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { useSelector, useDispatch } from 'react-redux';
 import { DragDropContext, Draggable } from 'react-beautiful-dnd';
 import { StrictModeDroppable } from '../components/StrictModeDroppable';
-import { setCurrentForm, setQuestions, addQuestion, updateQuestion, removeQuestion, reorderQuestions, setLoading } from '../store/formSlice';
+import {
+  setCurrentForm,
+  setQuestions,
+  addQuestion,
+  updateQuestion,
+  removeQuestion,
+  reorderQuestions,
+  setLoading
+} from '../store/formSlice';
 import api from '../utils/api';
 import { FiPlus, FiTrash2, FiMove, FiZap } from 'react-icons/fi';
 import Loader from '../components/Loader';
@@ -60,6 +68,7 @@ const FormBuilder = () => {
   const flushFormUpdateRef = useRef();
 
   const isMountedRef = useRef(true);
+  const isUnmountingFlushRef = useRef(false);
   const activeFormIdRef = useRef(id);
 
   const statusUpdateSeqRef = useRef(0);
@@ -156,94 +165,133 @@ const FormBuilder = () => {
     };
   }, []);
 
-  const flushQuestionUpdate = useCallback(async (questionId, explicitSeq = null) => {
-    if (!isMountedRef.current || activeFormIdRef.current !== id) return;
-    if (deletedQuestionsRef.current.has(questionId)) return;
-
-    if (questionPendingTimersRef.current[questionId]) {
-      clearTimeout(questionPendingTimersRef.current[questionId]);
-      delete questionPendingTimersRef.current[questionId];
-    }
-
-    if (questionInFlightRef.current[questionId]) {
-      return;
-    }
-
-    const updates = questionPendingUpdatesRef.current[questionId];
-    if (!updates || Object.keys(updates).length === 0) return;
-
-    const payloadToSend = { ...updates };
-    delete questionPendingUpdatesRef.current[questionId];
-
-    const seq = explicitSeq !== null ? explicitSeq : ((questionSeqRef.current[questionId] || 0) + 1);
-    questionSeqRef.current[questionId] = seq;
-
-    questionInFlightRef.current[questionId] = true;
-    setSaveStatus('saving');
-
-    const qVersion = questionVersionsRef.current[questionId];
-    const requestPayload = {
-      ...payloadToSend,
-      ...(qVersion !== undefined ? { version: qVersion } : {})
-    };
-
-    try {
-      const response = await api.put(`/api/forms/${id}/questions/${questionId}`, requestPayload);
-      questionInFlightRef.current[questionId] = false;
-
+  const flushQuestionUpdate = useCallback(
+    async (questionId, explicitSeq = null) => {
       if (
-        !isMountedRef.current ||
-        activeFormIdRef.current !== id ||
-        deletedQuestionsRef.current.has(questionId) ||
-        seq !== questionSeqRef.current[questionId]
-      ) {
+        (!isMountedRef.current && !isUnmountingFlushRef.current) ||
+        activeFormIdRef.current !== id
+      )
+        return;
+      if (deletedQuestionsRef.current.has(questionId)) return;
+
+      if (questionPendingTimersRef.current[questionId]) {
+        clearTimeout(questionPendingTimersRef.current[questionId]);
+        delete questionPendingTimersRef.current[questionId];
+      }
+
+      if (questionInFlightRef.current[questionId]) {
         return;
       }
 
-      if (response.data?.success && response.data?.data) {
-        questionConflictRetriesRef.current[questionId] = 0;
-        if (response.data.data.version !== undefined) {
-          questionVersionsRef.current[questionId] = response.data.data.version;
-        }
+      const updates = questionPendingUpdatesRef.current[questionId];
+      if (!updates || Object.keys(updates).length === 0) return;
 
-        const hasNewerPending = Boolean(
-          questionPendingUpdatesRef.current[questionId] &&
-          Object.keys(questionPendingUpdatesRef.current[questionId]).length > 0
-        );
+      const payloadToSend = { ...updates };
+      delete questionPendingUpdatesRef.current[questionId];
 
-        const currentQ = questionsRef.current.find((q) => q._id === questionId);
-        const mergedData = {
-          ...response.data.data,
-          order: currentQ ? currentQ.order : response.data.data.order
-        };
+      const seq =
+        explicitSeq !== null ? explicitSeq : (questionSeqRef.current[questionId] || 0) + 1;
+      questionSeqRef.current[questionId] = seq;
 
-        if (hasNewerPending) {
-          Object.assign(mergedData, questionPendingUpdatesRef.current[questionId]);
-        }
-
-        dispatch(updateQuestion(mergedData));
-
-        if (hasNewerPending) {
-          flushQuestionUpdateRef.current?.(questionId);
-        } else {
-          checkIfAllSaved();
-        }
-      }
-    } catch (err) {
-      questionInFlightRef.current[questionId] = false;
-
-      if (
-        !isMountedRef.current ||
-        activeFormIdRef.current !== id ||
-        deletedQuestionsRef.current.has(questionId)
-      ) {
-        return;
+      questionInFlightRef.current[questionId] = true;
+      if (isMountedRef.current) {
+        setSaveStatus('saving');
       }
 
-      if (err.response?.status === 409) {
-        const latestServerDoc = err.response.data?.data;
-        if (latestServerDoc?.version !== undefined) {
-          questionVersionsRef.current[questionId] = latestServerDoc.version;
+      const qVersion = questionVersionsRef.current[questionId];
+      const requestPayload = {
+        ...payloadToSend,
+        ...(qVersion !== undefined ? { version: qVersion } : {})
+      };
+
+      try {
+        const response = await api.put(`/api/forms/${id}/questions/${questionId}`, requestPayload);
+        questionInFlightRef.current[questionId] = false;
+
+        if (
+          (!isMountedRef.current && !isUnmountingFlushRef.current) ||
+          activeFormIdRef.current !== id ||
+          deletedQuestionsRef.current.has(questionId)
+        ) {
+          return;
+        }
+
+        if (response.data?.success && response.data?.data) {
+          questionConflictRetriesRef.current[questionId] = 0;
+          if (response.data.data.version !== undefined) {
+            questionVersionsRef.current[questionId] = response.data.data.version;
+          }
+
+          const hasNewerPending = Boolean(
+            questionPendingUpdatesRef.current[questionId] &&
+            Object.keys(questionPendingUpdatesRef.current[questionId]).length > 0
+          );
+
+          if (isMountedRef.current && seq === questionSeqRef.current[questionId]) {
+            const currentQ = questionsRef.current.find((q) => q._id === questionId);
+            const mergedData = {
+              ...response.data.data,
+              order: currentQ ? currentQ.order : response.data.data.order
+            };
+
+            if (hasNewerPending) {
+              Object.assign(mergedData, questionPendingUpdatesRef.current[questionId]);
+            }
+
+            dispatch(updateQuestion(mergedData));
+          }
+
+          if (hasNewerPending) {
+            flushQuestionUpdateRef.current?.(questionId);
+          } else if (isMountedRef.current) {
+            checkIfAllSaved();
+          }
+        }
+      } catch (err) {
+        questionInFlightRef.current[questionId] = false;
+
+        if (
+          (!isMountedRef.current && !isUnmountingFlushRef.current) ||
+          activeFormIdRef.current !== id ||
+          deletedQuestionsRef.current.has(questionId)
+        ) {
+          return;
+        }
+
+        if (err.response?.status === 409) {
+          const latestServerDoc = err.response.data?.data;
+          if (latestServerDoc?.version !== undefined) {
+            questionVersionsRef.current[questionId] = latestServerDoc.version;
+          }
+
+          questionPendingUpdatesRef.current[questionId] = {
+            ...payloadToSend,
+            ...(questionPendingUpdatesRef.current[questionId] || {})
+          };
+
+          if (isMountedRef.current && latestServerDoc) {
+            const currentQ = questionsRef.current.find((q) => q._id === questionId);
+            const userEdits = questionPendingUpdatesRef.current[questionId] || {};
+            const reconciled = {
+              ...latestServerDoc,
+              order: currentQ ? currentQ.order : latestServerDoc.order,
+              ...userEdits
+            };
+            dispatch(updateQuestion(reconciled));
+          }
+
+          const retries = (questionConflictRetriesRef.current[questionId] || 0) + 1;
+          questionConflictRetriesRef.current[questionId] = retries;
+
+          if (retries <= MAX_OCC_RETRIES) {
+            flushQuestionUpdateRef.current?.(questionId);
+            return;
+          }
+
+          if (isMountedRef.current) {
+            setSaveStatus('error');
+          }
+          return;
         }
 
         questionPendingUpdatesRef.current[questionId] = {
@@ -251,52 +299,31 @@ const FormBuilder = () => {
           ...(questionPendingUpdatesRef.current[questionId] || {})
         };
 
-        if (latestServerDoc) {
-          const currentQ = questionsRef.current.find((q) => q._id === questionId);
-          const userEdits = questionPendingUpdatesRef.current[questionId] || {};
-          const reconciled = {
-            ...latestServerDoc,
-            order: currentQ ? currentQ.order : latestServerDoc.order,
-            ...userEdits
-          };
-          dispatch(updateQuestion(reconciled));
+        if (isMountedRef.current) {
+          setSaveStatus('error');
+          alert(err.response?.data?.message || 'Failed to update question');
         }
-
-        const retries = (questionConflictRetriesRef.current[questionId] || 0) + 1;
-        questionConflictRetriesRef.current[questionId] = retries;
-
-        if (retries <= MAX_OCC_RETRIES) {
-          flushQuestionUpdateRef.current?.(questionId);
-          return;
-        }
-
-        setSaveStatus('error');
-        return;
       }
-
-      questionPendingUpdatesRef.current[questionId] = {
-        ...payloadToSend,
-        ...(questionPendingUpdatesRef.current[questionId] || {})
-      };
-
-      setSaveStatus('error');
-      alert(err.response?.data?.message || 'Failed to update question');
-    }
-  }, [id, dispatch, checkIfAllSaved]);
+    },
+    [id, dispatch, checkIfAllSaved]
+  );
 
   const flushAllPendingQuestionUpdates = useCallback(async () => {
     const pendingIds = Object.keys(questionPendingUpdatesRef.current);
-    for (const qId of pendingIds) {
-      if (questionPendingTimersRef.current[qId]) {
-        clearTimeout(questionPendingTimersRef.current[qId]);
-        delete questionPendingTimersRef.current[qId];
-      }
-      await flushQuestionUpdate(qId);
-    }
+    return Promise.all(
+      pendingIds.map((qId) => {
+        if (questionPendingTimersRef.current[qId]) {
+          clearTimeout(questionPendingTimersRef.current[qId]);
+          delete questionPendingTimersRef.current[qId];
+        }
+        return flushQuestionUpdate(qId);
+      })
+    );
   }, [flushQuestionUpdate]);
 
   const flushFormUpdate = useCallback(async () => {
-    if (!isMountedRef.current || activeFormIdRef.current !== id) return;
+    if ((!isMountedRef.current && !isUnmountingFlushRef.current) || activeFormIdRef.current !== id)
+      return;
     if (formPendingTimerRef.current) {
       clearTimeout(formPendingTimerRef.current);
       formPendingTimerRef.current = null;
@@ -304,12 +331,14 @@ const FormBuilder = () => {
 
     if (formInFlightRef.current) return;
 
-    const currentTitle = formPendingUpdatesRef.current.title !== undefined
-      ? formPendingUpdatesRef.current.title
-      : formDataRef.current.title;
-    const currentDesc = formPendingUpdatesRef.current.description !== undefined
-      ? formPendingUpdatesRef.current.description
-      : formDataRef.current.description;
+    const currentTitle =
+      formPendingUpdatesRef.current.title !== undefined
+        ? formPendingUpdatesRef.current.title
+        : formDataRef.current.title;
+    const currentDesc =
+      formPendingUpdatesRef.current.description !== undefined
+        ? formPendingUpdatesRef.current.description
+        : formDataRef.current.description;
 
     if (
       currentTitle === lastSavedFormRef.current.title &&
@@ -321,7 +350,9 @@ const FormBuilder = () => {
 
     formPendingUpdatesRef.current = {};
     formInFlightRef.current = true;
-    setSaveStatus('saving');
+    if (isMountedRef.current) {
+      setSaveStatus('saving');
+    }
 
     const currentSeq = ++formUpdateSeqRef.current;
     const requestPayload = {
@@ -335,7 +366,7 @@ const FormBuilder = () => {
       formInFlightRef.current = false;
 
       if (
-        isMountedRef.current &&
+        (isMountedRef.current || isUnmountingFlushRef.current) &&
         activeFormIdRef.current === id &&
         currentSeq === formUpdateSeqRef.current
       ) {
@@ -354,14 +385,14 @@ const FormBuilder = () => {
           } else {
             lastSavedFormRef.current.description = currentDesc;
           }
-          if (response.data.data) {
+          if (isMountedRef.current && response.data.data) {
             dispatch(setCurrentForm(response.data.data));
           }
 
           const hasNewer = Object.keys(formPendingUpdatesRef.current).length > 0;
           if (hasNewer) {
             flushFormUpdateRef.current?.();
-          } else {
+          } else if (isMountedRef.current) {
             checkIfAllSaved();
           }
         }
@@ -370,7 +401,7 @@ const FormBuilder = () => {
       formInFlightRef.current = false;
 
       if (
-        isMountedRef.current &&
+        (isMountedRef.current || isUnmountingFlushRef.current) &&
         activeFormIdRef.current === id &&
         currentSeq === formUpdateSeqRef.current
       ) {
@@ -382,12 +413,14 @@ const FormBuilder = () => {
 
           const pendingEdits = {
             ...(currentTitle !== lastSavedFormRef.current.title ? { title: currentTitle } : {}),
-            ...(currentDesc !== lastSavedFormRef.current.description ? { description: currentDesc } : {}),
+            ...(currentDesc !== lastSavedFormRef.current.description
+              ? { description: currentDesc }
+              : {}),
             ...formPendingUpdatesRef.current
           };
           formPendingUpdatesRef.current = pendingEdits;
 
-          if (latestDoc) {
+          if (latestDoc && isMountedRef.current) {
             const reconciledForm = {
               ...latestDoc,
               ...formDataRef.current,
@@ -439,6 +472,7 @@ const FormBuilder = () => {
 
   useEffect(() => {
     isMountedRef.current = true;
+    isUnmountingFlushRef.current = false;
     activeFormIdRef.current = id;
     deletedQuestionsRef.current.clear();
     questionSeqRef.current = {};
@@ -462,6 +496,7 @@ const FormBuilder = () => {
     fetchFormData();
 
     return () => {
+      isUnmountingFlushRef.current = true;
       // Best-effort flush for any pending edits before unmounting
       flushAllPendingQuestionUpdates();
       flushFormUpdate();
@@ -561,118 +596,150 @@ const FormBuilder = () => {
     }
   };
 
-  const handleDebouncedQuestionUpdate = useCallback((questionId, updates) => {
-    if (deletedQuestionsRef.current.has(questionId)) return;
+  const handleDebouncedQuestionUpdate = useCallback(
+    (questionId, updates) => {
+      if (deletedQuestionsRef.current.has(questionId)) return;
 
-    // Optimistic update in Redux for immediate UI responsiveness
-    dispatch(updateQuestion({ _id: questionId, ...updates }));
+      // Optimistic update in Redux for immediate UI responsiveness
+      dispatch(updateQuestion({ _id: questionId, ...updates }));
 
-    // Accumulate pending updates
-    questionPendingUpdatesRef.current[questionId] = {
-      ...(questionPendingUpdatesRef.current[questionId] || {}),
-      ...updates
-    };
+      // Accumulate pending updates
+      questionPendingUpdatesRef.current[questionId] = {
+        ...(questionPendingUpdatesRef.current[questionId] || {}),
+        ...updates
+      };
 
-    setSaveStatus('unsaved');
+      setSaveStatus('unsaved');
 
-    // Increment sequence number
-    const seq = (questionSeqRef.current[questionId] || 0) + 1;
-    questionSeqRef.current[questionId] = seq;
+      // Increment sequence number
+      const seq = (questionSeqRef.current[questionId] || 0) + 1;
+      questionSeqRef.current[questionId] = seq;
 
-    // Schedule debounced flush
-    if (questionPendingTimersRef.current[questionId]) {
-      clearTimeout(questionPendingTimersRef.current[questionId]);
-    }
-    questionPendingTimersRef.current[questionId] = setTimeout(() => {
-      flushQuestionUpdate(questionId, seq);
-    }, 300);
-  }, [dispatch, flushQuestionUpdate]);
+      // Schedule debounced flush
+      if (questionPendingTimersRef.current[questionId]) {
+        clearTimeout(questionPendingTimersRef.current[questionId]);
+      }
+      questionPendingTimersRef.current[questionId] = setTimeout(() => {
+        flushQuestionUpdate(questionId, seq);
+      }, 300);
+    },
+    [dispatch, flushQuestionUpdate]
+  );
 
-  const handleImmediateQuestionUpdate = useCallback(async (questionId, updates) => {
-    if (deletedQuestionsRef.current.has(questionId)) return;
+  const handleImmediateQuestionUpdate = useCallback(
+    async (questionId, updates) => {
+      if (deletedQuestionsRef.current.has(questionId)) return;
 
-    // Clear any pending debounce timer
-    if (questionPendingTimersRef.current[questionId]) {
-      clearTimeout(questionPendingTimersRef.current[questionId]);
-      delete questionPendingTimersRef.current[questionId];
-    }
+      // Clear any pending debounce timer
+      if (questionPendingTimersRef.current[questionId]) {
+        clearTimeout(questionPendingTimersRef.current[questionId]);
+        delete questionPendingTimersRef.current[questionId];
+      }
 
-    // Merge with any existing pending updates
-    const combinedUpdates = {
-      ...(questionPendingUpdatesRef.current[questionId] || {}),
-      ...updates
-    };
-    delete questionPendingUpdatesRef.current[questionId];
+      // Merge with any existing pending updates
+      const combinedUpdates = {
+        ...(questionPendingUpdatesRef.current[questionId] || {}),
+        ...updates
+      };
+      delete questionPendingUpdatesRef.current[questionId];
 
-    // Optimistic Redux update
-    dispatch(updateQuestion({ _id: questionId, ...combinedUpdates }));
+      // Optimistic Redux update
+      dispatch(updateQuestion({ _id: questionId, ...combinedUpdates }));
 
-    // Increment sequence
-    const seq = (questionSeqRef.current[questionId] || 0) + 1;
-    questionSeqRef.current[questionId] = seq;
+      // Increment sequence
+      const seq = (questionSeqRef.current[questionId] || 0) + 1;
+      questionSeqRef.current[questionId] = seq;
 
-    questionInFlightRef.current[questionId] = true;
-    setSaveStatus('saving');
+      questionInFlightRef.current[questionId] = true;
+      setSaveStatus('saving');
 
-    const qVersion = questionVersionsRef.current[questionId];
-    const requestPayload = {
-      ...combinedUpdates,
-      ...(qVersion !== undefined ? { version: qVersion } : {})
-    };
+      const qVersion = questionVersionsRef.current[questionId];
+      const requestPayload = {
+        ...combinedUpdates,
+        ...(qVersion !== undefined ? { version: qVersion } : {})
+      };
 
-    try {
-      const response = await api.put(`/api/forms/${id}/questions/${questionId}`, requestPayload);
-      questionInFlightRef.current[questionId] = false;
+      try {
+        const response = await api.put(`/api/forms/${id}/questions/${questionId}`, requestPayload);
+        questionInFlightRef.current[questionId] = false;
 
-      if (
-        isMountedRef.current &&
-        activeFormIdRef.current === id &&
-        !deletedQuestionsRef.current.has(questionId) &&
-        seq === questionSeqRef.current[questionId]
-      ) {
-        if (response.data?.success && response.data?.data) {
-          questionConflictRetriesRef.current[questionId] = 0;
-          if (response.data.data.version !== undefined) {
-            questionVersionsRef.current[questionId] = response.data.data.version;
-          }
+        if (
+          isMountedRef.current &&
+          activeFormIdRef.current === id &&
+          !deletedQuestionsRef.current.has(questionId) &&
+          seq === questionSeqRef.current[questionId]
+        ) {
+          if (response.data?.success && response.data?.data) {
+            questionConflictRetriesRef.current[questionId] = 0;
+            if (response.data.data.version !== undefined) {
+              questionVersionsRef.current[questionId] = response.data.data.version;
+            }
 
-          const hasNewerPending = Boolean(
-            questionPendingUpdatesRef.current[questionId] &&
-            Object.keys(questionPendingUpdatesRef.current[questionId]).length > 0
-          );
+            const hasNewerPending = Boolean(
+              questionPendingUpdatesRef.current[questionId] &&
+              Object.keys(questionPendingUpdatesRef.current[questionId]).length > 0
+            );
 
-          const currentQ = questionsRef.current.find((q) => q._id === questionId);
-          const mergedData = {
-            ...response.data.data,
-            order: currentQ ? currentQ.order : response.data.data.order
-          };
+            const currentQ = questionsRef.current.find((q) => q._id === questionId);
+            const mergedData = {
+              ...response.data.data,
+              order: currentQ ? currentQ.order : response.data.data.order
+            };
 
-          if (hasNewerPending) {
-            Object.assign(mergedData, questionPendingUpdatesRef.current[questionId]);
-          }
+            if (hasNewerPending) {
+              Object.assign(mergedData, questionPendingUpdatesRef.current[questionId]);
+            }
 
-          dispatch(updateQuestion(mergedData));
+            dispatch(updateQuestion(mergedData));
 
-          if (hasNewerPending) {
-            flushQuestionUpdate(questionId);
-          } else {
-            checkIfAllSaved();
+            if (hasNewerPending) {
+              flushQuestionUpdate(questionId);
+            } else {
+              checkIfAllSaved();
+            }
           }
         }
-      }
-    } catch (err) {
-      questionInFlightRef.current[questionId] = false;
+      } catch (err) {
+        questionInFlightRef.current[questionId] = false;
 
-      if (
-        isMountedRef.current &&
-        activeFormIdRef.current === id &&
-        !deletedQuestionsRef.current.has(questionId) &&
-        seq === questionSeqRef.current[questionId]
-      ) {
-        if (err.response?.status === 409) {
-          const latestServerDoc = err.response.data?.data;
-          if (latestServerDoc?.version !== undefined) {
-            questionVersionsRef.current[questionId] = latestServerDoc.version;
+        if (
+          isMountedRef.current &&
+          activeFormIdRef.current === id &&
+          !deletedQuestionsRef.current.has(questionId) &&
+          seq === questionSeqRef.current[questionId]
+        ) {
+          if (err.response?.status === 409) {
+            const latestServerDoc = err.response.data?.data;
+            if (latestServerDoc?.version !== undefined) {
+              questionVersionsRef.current[questionId] = latestServerDoc.version;
+            }
+
+            questionPendingUpdatesRef.current[questionId] = {
+              ...combinedUpdates,
+              ...(questionPendingUpdatesRef.current[questionId] || {})
+            };
+
+            if (latestServerDoc) {
+              const currentQ = questionsRef.current.find((q) => q._id === questionId);
+              const userEdits = questionPendingUpdatesRef.current[questionId] || {};
+              const reconciled = {
+                ...latestServerDoc,
+                order: currentQ ? currentQ.order : latestServerDoc.order,
+                ...userEdits
+              };
+              dispatch(updateQuestion(reconciled));
+            }
+
+            const retries = (questionConflictRetriesRef.current[questionId] || 0) + 1;
+            questionConflictRetriesRef.current[questionId] = retries;
+
+            if (retries <= MAX_OCC_RETRIES) {
+              flushQuestionUpdate(questionId);
+              return;
+            }
+
+            setSaveStatus('error');
+            return;
           }
 
           questionPendingUpdatesRef.current[questionId] = {
@@ -680,39 +747,13 @@ const FormBuilder = () => {
             ...(questionPendingUpdatesRef.current[questionId] || {})
           };
 
-          if (latestServerDoc) {
-            const currentQ = questionsRef.current.find((q) => q._id === questionId);
-            const userEdits = questionPendingUpdatesRef.current[questionId] || {};
-            const reconciled = {
-              ...latestServerDoc,
-              order: currentQ ? currentQ.order : latestServerDoc.order,
-              ...userEdits
-            };
-            dispatch(updateQuestion(reconciled));
-          }
-
-          const retries = (questionConflictRetriesRef.current[questionId] || 0) + 1;
-          questionConflictRetriesRef.current[questionId] = retries;
-
-          if (retries <= MAX_OCC_RETRIES) {
-            flushQuestionUpdate(questionId);
-            return;
-          }
-
           setSaveStatus('error');
-          return;
+          alert(err.response?.data?.message || 'Failed to update question');
         }
-
-        questionPendingUpdatesRef.current[questionId] = {
-          ...combinedUpdates,
-          ...(questionPendingUpdatesRef.current[questionId] || {})
-        };
-
-        setSaveStatus('error');
-        alert(err.response?.data?.message || 'Failed to update question');
       }
-    }
-  }, [id, dispatch, flushQuestionUpdate, checkIfAllSaved]);
+    },
+    [id, dispatch, flushQuestionUpdate, checkIfAllSaved]
+  );
 
   const handleRetry = useCallback(() => {
     questionConflictRetriesRef.current = {};
@@ -723,7 +764,7 @@ const FormBuilder = () => {
   }, [flushAllPendingQuestionUpdates, flushFormUpdate]);
 
   const handleAddQuestion = async (questionData = null) => {
-    flushAllPendingQuestionUpdates();
+    await flushAllPendingQuestionUpdates();
 
     const newQuestion = questionData || {
       type: 'short_text',
@@ -782,7 +823,7 @@ const FormBuilder = () => {
     dispatch(reorderQuestions(items));
 
     // Flush pending question updates so latest labels/options are saved
-    flushAllPendingQuestionUpdates();
+    await flushAllPendingQuestionUpdates();
 
     // Update server
     try {
@@ -967,29 +1008,29 @@ const FormBuilder = () => {
 
             {/* AI Actions */}
             <div className="flex gap-3 mb-6 items-center flex-wrap">
-              <button
-                onClick={() => setShowAIModal(true)}
-                className="btn btn-primary"
-              >
+              <button onClick={() => setShowAIModal(true)} className="btn btn-primary">
                 <FiZap /> AI Suggest Questions
               </button>
 
-              <button
-                onClick={handleConsultant}
-                className="btn btn-secondary"
-              >
+              <button onClick={handleConsultant} className="btn btn-secondary">
                 Form Consultant
               </button>
 
               <div className="ml-auto flex items-center gap-3">
                 {saveStatus === 'saving' && (
-                  <span className="text-sm opacity-70 flex items-center gap-1.5" data-testid="save-status-saving">
+                  <span
+                    className="text-sm opacity-70 flex items-center gap-1.5"
+                    data-testid="save-status-saving"
+                  >
                     <span className="inline-block w-2 h-2 rounded-full bg-blue-500 animate-pulse" />
                     Saving...
                   </span>
                 )}
                 {saveStatus === 'saved' && (
-                  <span className="text-sm text-green-600 dark:text-green-400 flex items-center gap-1" data-testid="save-status-saved">
+                  <span
+                    className="text-sm text-green-600 dark:text-green-400 flex items-center gap-1"
+                    data-testid="save-status-saved"
+                  >
                     All changes saved
                   </span>
                 )}
@@ -1033,7 +1074,10 @@ const FormBuilder = () => {
                             className={`card p-6 theme-transition`}
                           >
                             <div className="flex items-start gap-4">
-                              <div {...provided.dragHandleProps} className="mt-2 cursor-move opacity-50 hover:opacity-100">
+                              <div
+                                {...provided.dragHandleProps}
+                                className="mt-2 cursor-move opacity-50 hover:opacity-100"
+                              >
                                 <FiMove size={20} />
                               </div>
 
@@ -1042,13 +1086,19 @@ const FormBuilder = () => {
                                   <input
                                     type="text"
                                     value={question.label}
-                                    onChange={(e) => handleDebouncedQuestionUpdate(question._id, { label: e.target.value })}
+                                    onChange={(e) =>
+                                      handleDebouncedQuestionUpdate(question._id, {
+                                        label: e.target.value
+                                      })
+                                    }
                                     onBlur={() => flushQuestionUpdate(question._id)}
                                     className="text-lg font-medium w-full bg-transparent focus:outline-none theme-transition flex-1"
                                     placeholder="Question text"
                                   />
                                   <button
-                                    onClick={() => handleImproveWording('question', question.label, question._id)}
+                                    onClick={() =>
+                                      handleImproveWording('question', question.label, question._id)
+                                    }
                                     className="text-sm opacity-50 hover:opacity-100 flex items-center shrink-0 mt-1"
                                     title="Improve question wording with AI"
                                   >
@@ -1058,8 +1108,14 @@ const FormBuilder = () => {
 
                                 <div className="flex gap-3 flex-wrap items-center">
                                   <CustomSelect
-                                    value={question.type === 'checkbox' ? 'multiple_choice' : question.type}
-                                    onChange={(val) => handleImmediateQuestionUpdate(question._id, { type: val })}
+                                    value={
+                                      question.type === 'checkbox'
+                                        ? 'multiple_choice'
+                                        : question.type
+                                    }
+                                    onChange={(val) =>
+                                      handleImmediateQuestionUpdate(question._id, { type: val })
+                                    }
                                     options={QUESTION_TYPES}
                                   />
 
@@ -1067,7 +1123,11 @@ const FormBuilder = () => {
                                     <input
                                       type="checkbox"
                                       checked={Boolean(question.required)}
-                                      onChange={(e) => handleImmediateQuestionUpdate(question._id, { required: e.target.checked })}
+                                      onChange={(e) =>
+                                        handleImmediateQuestionUpdate(question._id, {
+                                          required: e.target.checked
+                                        })
+                                      }
                                       className="w-4 h-4"
                                     />
                                     Required
@@ -1083,7 +1143,9 @@ const FormBuilder = () => {
 
                                 {/* Visibility Rule Section */}
                                 <div className="mt-3 text-sm bg-gray-500 bg-opacity-10 p-3 rounded">
-                                  <div className="font-semibold mb-2 opacity-70">Conditional Visibility</div>
+                                  <div className="font-semibold mb-2 opacity-70">
+                                    Conditional Visibility
+                                  </div>
                                   <div className="flex gap-2 flex-wrap">
                                     <CustomSelect
                                       value={question.visibilityRule?.targetQuestionId || ''}
@@ -1091,13 +1153,18 @@ const FormBuilder = () => {
                                         const newRule = val
                                           ? { targetQuestionId: val, operator: 'equals', value: '' }
                                           : null;
-                                        handleImmediateQuestionUpdate(question._id, { visibilityRule: newRule });
+                                        handleImmediateQuestionUpdate(question._id, {
+                                          visibilityRule: newRule
+                                        });
                                       }}
                                       options={[
                                         { value: '', label: 'Always Visible' },
                                         ...questions
-                                          .filter(q => q._id !== question._id && q.order < question.order)
-                                          .map(q => ({ value: q._id, label: q.label }))
+                                          .filter(
+                                            (q) =>
+                                              q._id !== question._id && q.order < question.order
+                                          )
+                                          .map((q) => ({ value: q._id, label: q.label }))
                                       ]}
                                     />
 
@@ -1105,9 +1172,14 @@ const FormBuilder = () => {
                                       <>
                                         <CustomSelect
                                           value={question.visibilityRule.operator || 'equals'}
-                                          onChange={(val) => handleImmediateQuestionUpdate(question._id, {
-                                            visibilityRule: { ...question.visibilityRule, operator: val }
-                                          })}
+                                          onChange={(val) =>
+                                            handleImmediateQuestionUpdate(question._id, {
+                                              visibilityRule: {
+                                                ...question.visibilityRule,
+                                                operator: val
+                                              }
+                                            })
+                                          }
                                           options={[
                                             { value: 'equals', label: 'Equals' },
                                             { value: 'not_equals', label: 'Does not equal' },
@@ -1118,9 +1190,14 @@ const FormBuilder = () => {
                                           type="text"
                                           placeholder="Value"
                                           value={question.visibilityRule.value || ''}
-                                          onChange={(e) => handleDebouncedQuestionUpdate(question._id, {
-                                            visibilityRule: { ...question.visibilityRule, value: e.target.value }
-                                          })}
+                                          onChange={(e) =>
+                                            handleDebouncedQuestionUpdate(question._id, {
+                                              visibilityRule: {
+                                                ...question.visibilityRule,
+                                                value: e.target.value
+                                              }
+                                            })
+                                          }
                                           onBlur={() => flushQuestionUpdate(question._id)}
                                           className="input px-2 py-1 text-black w-24 h-8 text-sm"
                                         />
@@ -1130,7 +1207,12 @@ const FormBuilder = () => {
                                 </div>
 
                                 {/* Options for choice questions */}
-                                {['single_choice', 'multiple_choice', 'checkbox', 'dropdown'].includes(question.type) && (
+                                {[
+                                  'single_choice',
+                                  'multiple_choice',
+                                  'checkbox',
+                                  'dropdown'
+                                ].includes(question.type) && (
                                   <div className="mt-4 space-y-2">
                                     {(question.options || []).map((option, optIndex) => (
                                       <div key={optIndex} className="flex gap-2">
@@ -1140,7 +1222,9 @@ const FormBuilder = () => {
                                           onChange={(e) => {
                                             const newOptions = [...question.options];
                                             newOptions[optIndex] = e.target.value;
-                                            handleDebouncedQuestionUpdate(question._id, { options: newOptions });
+                                            handleDebouncedQuestionUpdate(question._id, {
+                                              options: newOptions
+                                            });
                                           }}
                                           onBlur={() => flushQuestionUpdate(question._id)}
                                           className="flex-1 px-3 py-1 rounded text-sm focus:outline-none theme-transition"
@@ -1148,8 +1232,12 @@ const FormBuilder = () => {
                                         />
                                         <button
                                           onClick={() => {
-                                            const newOptions = question.options.filter((_, i) => i !== optIndex);
-                                            handleImmediateQuestionUpdate(question._id, { options: newOptions });
+                                            const newOptions = question.options.filter(
+                                              (_, i) => i !== optIndex
+                                            );
+                                            handleImmediateQuestionUpdate(question._id, {
+                                              options: newOptions
+                                            });
                                           }}
                                           className="text-red-600 hover:opacity-70"
                                         >
@@ -1160,7 +1248,9 @@ const FormBuilder = () => {
                                     <button
                                       onClick={() => {
                                         const newOptions = [...(question.options || []), ''];
-                                        handleImmediateQuestionUpdate(question._id, { options: newOptions });
+                                        handleImmediateQuestionUpdate(question._id, {
+                                          options: newOptions
+                                        });
                                       }}
                                       className="text-sm opacity-70 hover:opacity-100"
                                     >
@@ -1193,7 +1283,9 @@ const FormBuilder = () => {
               <div className="glass-backdrop overflow-y-auto">
                 <div className="glass-panel max-w-2xl my-8">
                   <h2 className="text-2xl font-bold mb-4">AI Question Generation</h2>
-                  <p className="opacity-70 mb-4">Enter a topic and AI will suggest relevant questions for your form.</p>
+                  <p className="opacity-70 mb-4">
+                    Enter a topic and AI will suggest relevant questions for your form.
+                  </p>
 
                   {!proposedQuestions.length ? (
                     <>
@@ -1230,10 +1322,17 @@ const FormBuilder = () => {
                         <h3 className="font-bold mb-2 text-lg">Proposed Questions</h3>
                         <div className="space-y-2 max-h-60 overflow-y-auto pr-2">
                           {proposedQuestions.map((q, idx) => (
-                            <div key={idx} className="p-3 border border-gray-500 border-opacity-30 rounded">
+                            <div
+                              key={idx}
+                              className="p-3 border border-gray-500 border-opacity-30 rounded"
+                            >
                               <p className="font-semibold">{q.label}</p>
-                              {q.description && <p className="text-sm opacity-70">{q.description}</p>}
-                              <p className="text-xs opacity-50 mt-1 uppercase">{q.type.replace('_', ' ')}</p>
+                              {q.description && (
+                                <p className="text-sm opacity-70">{q.description}</p>
+                              )}
+                              <p className="text-xs opacity-50 mt-1 uppercase">
+                                {q.type.replace('_', ' ')}
+                              </p>
                             </div>
                           ))}
                         </div>
@@ -1276,15 +1375,14 @@ const FormBuilder = () => {
                       <div className="p-4 border-2 border-primary border-opacity-50 rounded bg-primary bg-opacity-5">
                         <p className="font-medium text-lg mb-2">{improvements.improvedText}</p>
                         {improvements.changesSummary && (
-                          <p className="text-sm opacity-70">Changes: {improvements.changesSummary}</p>
+                          <p className="text-sm opacity-70">
+                            Changes: {improvements.changesSummary}
+                          </p>
                         )}
                       </div>
 
                       <div className="flex gap-3 mt-6">
-                        <button
-                          onClick={applyImprovement}
-                          className="btn flex-1 btn-primary"
-                        >
+                        <button onClick={applyImprovement} className="btn flex-1 btn-primary">
                           Apply
                         </button>
                         <button
@@ -1311,7 +1409,9 @@ const FormBuilder = () => {
                   <h2 className="text-2xl font-bold mb-4">Form Consultant</h2>
 
                   {aiLoading ? (
-                    <div className="py-8"><Loader /></div>
+                    <div className="py-8">
+                      <Loader />
+                    </div>
                   ) : consultantData ? (
                     <div className="space-y-6">
                       <div className="p-4 border rounded bg-gray-500 bg-opacity-10">
@@ -1324,16 +1424,24 @@ const FormBuilder = () => {
                           <h3 className="font-bold text-lg">Recommendations</h3>
                           {consultantData.recommendations.map((rec, i) => (
                             <div key={i} className="p-4 border rounded relative">
-                              <span className={`absolute top-2 right-2 text-xs px-2 py-1 rounded capitalize ${
-                                rec.severity === 'warning' ? 'bg-red-500 text-white' :
-                                rec.severity === 'suggestion' ? 'bg-yellow-500 text-black' :
-                                'bg-blue-500 text-white'
-                              }`}>
+                              <span
+                                className={`absolute top-2 right-2 text-xs px-2 py-1 rounded capitalize ${
+                                  rec.severity === 'warning'
+                                    ? 'bg-red-500 text-white'
+                                    : rec.severity === 'suggestion'
+                                      ? 'bg-yellow-500 text-black'
+                                      : 'bg-blue-500 text-white'
+                                }`}
+                              >
                                 {rec.severity}
                               </span>
-                              <div className="font-bold mb-1 opacity-70 capitalize">{rec.category} Issue</div>
+                              <div className="font-bold mb-1 opacity-70 capitalize">
+                                {rec.category} Issue
+                              </div>
                               <p className="mb-2">{rec.issue}</p>
-                              <div className="text-sm font-semibold text-green-500 mb-1">Suggestion:</div>
+                              <div className="text-sm font-semibold text-green-500 mb-1">
+                                Suggestion:
+                              </div>
                               <p className="text-sm">{rec.suggestion}</p>
                             </div>
                           ))}

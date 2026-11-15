@@ -46,13 +46,26 @@ describe('Responses Phase 7 AI Features', () => {
     // Mock initial data load
     api.get.mockImplementation((url) => {
       if (url.includes('/api/forms/')) {
-        return Promise.resolve({ data: { success: true, data: { form: { _id: '123', title: 'Test Form' } } } });
+        return Promise.resolve({
+          data: { success: true, data: { form: { _id: '123', title: 'Test Form' } } }
+        });
       }
       if (url.includes('/api/responses/') && url.includes('limit=10')) {
-        return Promise.resolve({ data: { success: true, data: [{ _id: 'r1', answers: [] }, { _id: 'r2', answers: [] }], pagination: { pages: 1, page: 1 } } });
+        return Promise.resolve({
+          data: {
+            success: true,
+            data: [
+              { _id: 'r1', answers: [] },
+              { _id: 'r2', answers: [] }
+            ],
+            pagination: { pages: 1, page: 1 }
+          }
+        });
       }
       if (url.includes('/analytics')) {
-        return Promise.resolve({ data: { success: true, data: { totalResponses: 2, analytics: [] } } });
+        return Promise.resolve({
+          data: { success: true, data: { totalResponses: 2, analytics: [] } }
+        });
       }
       return Promise.resolve({ data: {} });
     });
@@ -107,12 +120,14 @@ describe('Responses Phase 7 AI Features', () => {
       data: {
         success: true,
         data: {
-          themes: [{
-            name: 'Theme 1',
-            description: 'Theme desc',
-            supportingResponses: ['Response 1'],
-            sentiment: 'neutral'
-          }]
+          themes: [
+            {
+              name: 'Theme 1',
+              description: 'Theme desc',
+              supportingResponses: ['Response 1'],
+              sentiment: 'neutral'
+            }
+          ]
         }
       }
     });
@@ -139,11 +154,13 @@ describe('Responses Phase 7 AI Features', () => {
       data: {
         success: true,
         data: {
-          categories: [{
-            name: 'Category 1',
-            description: 'Cat desc',
-            responseIndexes: [0, 999] // 999 is out of bounds malformed index
-          }],
+          categories: [
+            {
+              name: 'Category 1',
+              description: 'Cat desc',
+              responseIndexes: [0, 999] // 999 is out of bounds malformed index
+            }
+          ],
           uncategorizedResponseIndexes: [1]
         }
       }
@@ -163,10 +180,18 @@ describe('Responses Phase 7 AI Features', () => {
   it('renders choice question analytics using distribution structure without crashing', async () => {
     api.get.mockImplementation((url) => {
       if (url.includes('/api/forms/')) {
-        return Promise.resolve({ data: { success: true, data: { form: { _id: '123', title: 'Test Form' } } } });
+        return Promise.resolve({
+          data: { success: true, data: { form: { _id: '123', title: 'Test Form' } } }
+        });
       }
       if (url.includes('/api/responses/') && url.includes('limit=10')) {
-        return Promise.resolve({ data: { success: true, data: [{ _id: 'r1', answers: [] }], pagination: { pages: 1, page: 1 } } });
+        return Promise.resolve({
+          data: {
+            success: true,
+            data: [{ _id: 'r1', answers: [] }],
+            pagination: { pages: 1, page: 1 }
+          }
+        });
       }
       if (url.includes('/analytics')) {
         return Promise.resolve({
@@ -208,10 +233,18 @@ describe('Responses Phase 7 AI Features', () => {
   it('handles empty choice distribution safely', async () => {
     api.get.mockImplementation((url) => {
       if (url.includes('/api/forms/')) {
-        return Promise.resolve({ data: { success: true, data: { form: { _id: '123', title: 'Test Form' } } } });
+        return Promise.resolve({
+          data: { success: true, data: { form: { _id: '123', title: 'Test Form' } } }
+        });
       }
       if (url.includes('/api/responses/') && url.includes('limit=10')) {
-        return Promise.resolve({ data: { success: true, data: [{ _id: 'r1', answers: [] }], pagination: { pages: 1, page: 1 } } });
+        return Promise.resolve({
+          data: {
+            success: true,
+            data: [{ _id: 'r1', answers: [] }],
+            pagination: { pages: 1, page: 1 }
+          }
+        });
       }
       if (url.includes('/analytics')) {
         return Promise.resolve({
@@ -250,10 +283,18 @@ describe('Responses Phase 7 AI Features', () => {
   it('renders numeric question analytics with min, max, and average', async () => {
     api.get.mockImplementation((url) => {
       if (url.includes('/api/forms/')) {
-        return Promise.resolve({ data: { success: true, data: { form: { _id: '123', title: 'Test Form' } } } });
+        return Promise.resolve({
+          data: { success: true, data: { form: { _id: '123', title: 'Test Form' } } }
+        });
       }
       if (url.includes('/api/responses/') && url.includes('limit=10')) {
-        return Promise.resolve({ data: { success: true, data: [{ _id: 'r1', answers: [] }], pagination: { pages: 1, page: 1 } } });
+        return Promise.resolve({
+          data: {
+            success: true,
+            data: [{ _id: 'r1', answers: [] }],
+            pagination: { pages: 1, page: 1 }
+          }
+        });
       }
       if (url.includes('/analytics')) {
         return Promise.resolve({
@@ -298,10 +339,18 @@ describe('Responses Phase 7 AI Features', () => {
   it('renders rating question analytics with average and star distribution', async () => {
     api.get.mockImplementation((url) => {
       if (url.includes('/api/forms/')) {
-        return Promise.resolve({ data: { success: true, data: { form: { _id: '123', title: 'Test Form' } } } });
+        return Promise.resolve({
+          data: { success: true, data: { form: { _id: '123', title: 'Test Form' } } }
+        });
       }
       if (url.includes('/api/responses/') && url.includes('limit=10')) {
-        return Promise.resolve({ data: { success: true, data: [{ _id: 'r1', answers: [] }], pagination: { pages: 1, page: 1 } } });
+        return Promise.resolve({
+          data: {
+            success: true,
+            data: [{ _id: 'r1', answers: [] }],
+            pagination: { pages: 1, page: 1 }
+          }
+        });
       }
       if (url.includes('/analytics')) {
         return Promise.resolve({
@@ -342,7 +391,9 @@ describe('Responses Phase 7 AI Features', () => {
   it('renders file-upload answers with original filename and semantic download link without crashing', async () => {
     api.get.mockImplementation((url) => {
       if (url.includes('/api/forms/')) {
-        return Promise.resolve({ data: { success: true, data: { form: { _id: '123', title: 'Job Application' } } } });
+        return Promise.resolve({
+          data: { success: true, data: { form: { _id: '123', title: 'Job Application' } } }
+        });
       }
       if (url.includes('/api/responses/') && url.includes('limit=10')) {
         return Promise.resolve({
@@ -371,7 +422,9 @@ describe('Responses Phase 7 AI Features', () => {
         });
       }
       if (url.includes('/analytics')) {
-        return Promise.resolve({ data: { success: true, data: { totalResponses: 1, analytics: [] } } });
+        return Promise.resolve({
+          data: { success: true, data: { totalResponses: 1, analytics: [] } }
+        });
       }
       return Promise.resolve({ data: {} });
     });
@@ -394,7 +447,9 @@ describe('Responses Phase 7 AI Features', () => {
   it('handles file answers with raw questionId string without crashing', async () => {
     api.get.mockImplementation((url) => {
       if (url.includes('/api/forms/')) {
-        return Promise.resolve({ data: { success: true, data: { form: { _id: '123', title: 'File Form' } } } });
+        return Promise.resolve({
+          data: { success: true, data: { form: { _id: '123', title: 'File Form' } } }
+        });
       }
       if (url.includes('/api/responses/') && url.includes('limit=10')) {
         return Promise.resolve({
@@ -422,7 +477,9 @@ describe('Responses Phase 7 AI Features', () => {
         });
       }
       if (url.includes('/analytics')) {
-        return Promise.resolve({ data: { success: true, data: { totalResponses: 1, analytics: [] } } });
+        return Promise.resolve({
+          data: { success: true, data: { totalResponses: 1, analytics: [] } }
+        });
       }
       return Promise.resolve({ data: {} });
     });
@@ -441,7 +498,9 @@ describe('Responses Phase 7 AI Features', () => {
   it('handles file answers with missing questionId or metadata gracefully without crashing', async () => {
     api.get.mockImplementation((url) => {
       if (url.includes('/api/forms/')) {
-        return Promise.resolve({ data: { success: true, data: { form: { _id: '123', title: 'Orphan File Form' } } } });
+        return Promise.resolve({
+          data: { success: true, data: { form: { _id: '123', title: 'Orphan File Form' } } }
+        });
       }
       if (url.includes('/api/responses/') && url.includes('limit=10')) {
         return Promise.resolve({
@@ -468,7 +527,9 @@ describe('Responses Phase 7 AI Features', () => {
         });
       }
       if (url.includes('/analytics')) {
-        return Promise.resolve({ data: { success: true, data: { totalResponses: 1, analytics: [] } } });
+        return Promise.resolve({
+          data: { success: true, data: { totalResponses: 1, analytics: [] } }
+        });
       }
       return Promise.resolve({ data: {} });
     });
@@ -487,7 +548,9 @@ describe('Responses Phase 7 AI Features', () => {
   it('preserves string, number, array, empty, and null answer rendering', async () => {
     api.get.mockImplementation((url) => {
       if (url.includes('/api/forms/')) {
-        return Promise.resolve({ data: { success: true, data: { form: { _id: '123', title: 'Survey' } } } });
+        return Promise.resolve({
+          data: { success: true, data: { form: { _id: '123', title: 'Survey' } } }
+        });
       }
       if (url.includes('/api/responses/') && url.includes('limit=10')) {
         return Promise.resolve({
@@ -526,7 +589,9 @@ describe('Responses Phase 7 AI Features', () => {
         });
       }
       if (url.includes('/analytics')) {
-        return Promise.resolve({ data: { success: true, data: { totalResponses: 1, analytics: [] } } });
+        return Promise.resolve({
+          data: { success: true, data: { totalResponses: 1, analytics: [] } }
+        });
       }
       return Promise.resolve({ data: {} });
     });
@@ -547,7 +612,9 @@ describe('Responses Phase 7 AI Features', () => {
   it('handles unexpected plain objects without crashing the page', async () => {
     api.get.mockImplementation((url) => {
       if (url.includes('/api/forms/')) {
-        return Promise.resolve({ data: { success: true, data: { form: { _id: '123', title: 'Crash Test' } } } });
+        return Promise.resolve({
+          data: { success: true, data: { form: { _id: '123', title: 'Crash Test' } } }
+        });
       }
       if (url.includes('/api/responses/') && url.includes('limit=10')) {
         return Promise.resolve({
@@ -576,7 +643,9 @@ describe('Responses Phase 7 AI Features', () => {
         });
       }
       if (url.includes('/analytics')) {
-        return Promise.resolve({ data: { success: true, data: { totalResponses: 1, analytics: [] } } });
+        return Promise.resolve({
+          data: { success: true, data: { totalResponses: 1, analytics: [] } }
+        });
       }
       return Promise.resolve({ data: {} });
     });
@@ -587,6 +656,95 @@ describe('Responses Phase 7 AI Features', () => {
       expect(screen.getByText('Custom Metadata')).toBeTruthy();
       expect(screen.getByText(/arbitraryKey/i)).toBeTruthy();
       expect(screen.getByText('Empty Object')).toBeTruthy();
+    });
+  });
+
+  describe('Stage 4.3.5 Batch D: Frontend Crash Guards and Error Resilience', () => {
+    it('D3: renders safely without crashing when analytics payload lacks inner analytics array', async () => {
+      api.get.mockImplementation((url) => {
+        if (url.includes('/api/forms/')) {
+          return Promise.resolve({
+            data: { success: true, data: { form: { _id: '123', title: 'Survey' } } }
+          });
+        }
+        if (url.includes('/api/responses/') && url.includes('limit=10')) {
+          return Promise.resolve({
+            data: {
+              success: true,
+              data: [
+                {
+                  _id: 'r1',
+                  createdAt: '2026-10-29T12:00:00.000Z',
+                  answers: [{ _id: 'a1', questionId: { _id: 'q1', label: 'Q1' }, value: 'Ans' }]
+                }
+              ],
+              pagination: { pages: 1, page: 1, total: 1 }
+            }
+          });
+        }
+        if (url.includes('/analytics')) {
+          // Inner analytics property is undefined
+          return Promise.resolve({ data: { success: true, data: { totalResponses: 1 } } });
+        }
+        return Promise.resolve({ data: {} });
+      });
+
+      renderComponent();
+
+      await waitFor(() => {
+        expect(screen.getByText('Survey')).toBeTruthy();
+        expect(screen.getByText('Response #1')).toBeTruthy();
+      });
+    });
+
+    it('D4: renders dedicated error card with retry button on fetch failure', async () => {
+      let fail = true;
+      api.get.mockImplementation((url) => {
+        if (fail) {
+          const err = new Error('Network error');
+          err.response = { data: { message: 'Failed to connect to backend server' } };
+          return Promise.reject(err);
+        }
+        if (url.includes('/api/forms/')) {
+          return Promise.resolve({
+            data: { success: true, data: { form: { _id: '123', title: 'Survey' } } }
+          });
+        }
+        if (url.includes('/api/responses/') && url.includes('limit=10')) {
+          return Promise.resolve({
+            data: {
+              success: true,
+              data: [],
+              pagination: { pages: 0, page: 1, total: 0 }
+            }
+          });
+        }
+        if (url.includes('/analytics')) {
+          return Promise.resolve({
+            data: { success: true, data: { totalResponses: 0, analytics: [] } }
+          });
+        }
+        return Promise.resolve({ data: {} });
+      });
+
+      renderComponent();
+
+      await waitFor(() => {
+        expect(screen.getByText('Failed to load responses')).toBeTruthy();
+        expect(screen.getByText('Failed to connect to backend server')).toBeTruthy();
+        expect(screen.getByRole('button', { name: /retry/i })).toBeTruthy();
+      });
+
+      // Does not show misleading "No responses yet" card
+      expect(screen.queryByText('No responses yet')).toBeNull();
+
+      // Click retry after fixing failure
+      fail = false;
+      fireEvent.click(screen.getByRole('button', { name: /retry/i }));
+
+      await waitFor(() => {
+        expect(screen.getByText('No responses yet')).toBeTruthy();
+      });
     });
   });
 });

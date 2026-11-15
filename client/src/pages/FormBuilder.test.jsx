@@ -96,12 +96,15 @@ vi.mock('react-beautiful-dnd', () => ({
       {children}
     </div>
   ),
-  Draggable: ({ children }) => children({ draggableProps: {}, dragHandleProps: {}, innerRef: vi.fn() }),
-  Droppable: ({ children }) => children({ droppableProps: {}, innerRef: vi.fn(), placeholder: null }),
+  Draggable: ({ children }) =>
+    children({ draggableProps: {}, dragHandleProps: {}, innerRef: vi.fn() }),
+  Droppable: ({ children }) =>
+    children({ droppableProps: {}, innerRef: vi.fn(), placeholder: null })
 }));
 
 vi.mock('../components/StrictModeDroppable', () => ({
-  StrictModeDroppable: ({ children }) => children({ droppableProps: {}, innerRef: vi.fn(), placeholder: null })
+  StrictModeDroppable: ({ children }) =>
+    children({ droppableProps: {}, innerRef: vi.fn(), placeholder: null })
 }));
 
 describe('FormBuilder Phase 6 AI Features', () => {
@@ -131,8 +134,22 @@ describe('FormBuilder Phase 6 AI Features', () => {
             data: {
               form: { _id: '123', title: 'Test Form', description: 'Desc', status: 'draft' },
               questions: [
-                { _id: 'q1', label: 'Question 1', type: 'short_text', order: 0, required: false, options: [] },
-                { _id: 'q2', label: 'Question 2', type: 'single_choice', order: 1, required: false, options: ['Opt 1', 'Opt 2'] }
+                {
+                  _id: 'q1',
+                  label: 'Question 1',
+                  type: 'short_text',
+                  order: 0,
+                  required: false,
+                  options: []
+                },
+                {
+                  _id: 'q2',
+                  label: 'Question 2',
+                  type: 'single_choice',
+                  order: 1,
+                  required: false,
+                  options: ['Opt 1', 'Opt 2']
+                }
               ]
             }
           }
@@ -174,7 +191,10 @@ describe('FormBuilder Phase 6 AI Features', () => {
     const generateBtn = screen.getByRole('button', { name: /Generate Questions/i });
     fireEvent.click(generateBtn);
 
-    expect(api.post).toHaveBeenCalledWith('/api/ai/questions/generate', { topic: 'Feedback', formId: '123' });
+    expect(api.post).toHaveBeenCalledWith('/api/ai/questions/generate', {
+      topic: 'Feedback',
+      formId: '123'
+    });
 
     await waitFor(() => {
       expect(screen.getByText('Proposed Questions')).toBeTruthy();
@@ -182,7 +202,9 @@ describe('FormBuilder Phase 6 AI Features', () => {
     });
 
     const acceptBtn = screen.getByText('Accept All');
-    api.post.mockResolvedValueOnce({ data: { success: true, data: { _id: 'q2', label: 'New Q1' } } });
+    api.post.mockResolvedValueOnce({
+      data: { success: true, data: { _id: 'q2', label: 'New Q1' } }
+    });
     fireEvent.click(acceptBtn);
 
     await waitFor(() => {
@@ -194,7 +216,9 @@ describe('FormBuilder Phase 6 AI Features', () => {
     renderComponent();
 
     fireEvent.click(screen.getByText(/AI Suggest Questions/i));
-    fireEvent.change(screen.getByPlaceholderText(/e.g., Customer Satisfaction/i), { target: { value: 'Feedback' } });
+    fireEvent.change(screen.getByPlaceholderText(/e.g., Customer Satisfaction/i), {
+      target: { value: 'Feedback' }
+    });
 
     api.post.mockResolvedValueOnce({
       data: { success: true, data: [{ label: 'New Q1', type: 'short_text' }] }
@@ -290,14 +314,19 @@ describe('FormBuilder Phase 6 AI Features', () => {
     const typeComboboxes = screen.getAllByText('Short Text');
     fireEvent.click(typeComboboxes[0]);
 
-    api.put.mockResolvedValueOnce({ data: { success: true, data: { _id: 'q1', type: 'long_text' } } });
+    api.put.mockResolvedValueOnce({
+      data: { success: true, data: { _id: 'q1', type: 'long_text' } }
+    });
 
     // Click 'Long Text'
     const longTextOption = screen.getByText('Long Text');
     fireEvent.click(longTextOption);
 
     await waitFor(() => {
-      expect(api.put).toHaveBeenCalledWith('/api/forms/123/questions/q1', expect.objectContaining({ type: 'long_text' }));
+      expect(api.put).toHaveBeenCalledWith(
+        '/api/forms/123/questions/q1',
+        expect.objectContaining({ type: 'long_text' })
+      );
     });
   });
 
@@ -453,7 +482,7 @@ describe('FormBuilder Phase 6 AI Features', () => {
     fireEvent.click(q2VisibilityCombobox);
 
     // Select the 'What is your name?' option
-    const option = screen.getByText("What is your name?");
+    const option = screen.getByText('What is your name?');
 
     api.put.mockResolvedValueOnce({
       data: {
@@ -472,9 +501,12 @@ describe('FormBuilder Phase 6 AI Features', () => {
 
     await waitFor(() => {
       // Verify API payload contains the selected condition
-      expect(api.put).toHaveBeenCalledWith('/api/forms/123/questions/q2', expect.objectContaining({
-        visibilityRule: { targetQuestionId: 'q1', operator: 'equals', value: '' }
-      }));
+      expect(api.put).toHaveBeenCalledWith(
+        '/api/forms/123/questions/q2',
+        expect.objectContaining({
+          visibilityRule: { targetQuestionId: 'q1', operator: 'equals', value: '' }
+        })
+      );
     });
 
     // Verify Redux was updated with the returned data
@@ -502,8 +534,22 @@ describe('FormBuilder Persistence, Debouncing, and Race Condition Hardening', ()
       forms: {
         currentForm: { _id: '123', title: 'Test Form', description: 'Desc', status: 'draft' },
         questions: [
-          { _id: 'q1', label: 'Question 1', type: 'short_text', order: 0, required: false, options: [] },
-          { _id: 'q2', label: 'Question 2', type: 'single_choice', order: 1, required: false, options: ['Opt 1', 'Opt 2'] }
+          {
+            _id: 'q1',
+            label: 'Question 1',
+            type: 'short_text',
+            order: 0,
+            required: false,
+            options: []
+          },
+          {
+            _id: 'q2',
+            label: 'Question 2',
+            type: 'single_choice',
+            order: 1,
+            required: false,
+            options: ['Opt 1', 'Opt 2']
+          }
         ],
         loading: false
       },
@@ -519,8 +565,22 @@ describe('FormBuilder Persistence, Debouncing, and Race Condition Hardening', ()
             data: {
               form: { _id: '123', title: 'Test Form', description: 'Desc', status: 'draft' },
               questions: [
-                { _id: 'q1', label: 'Question 1', type: 'short_text', order: 0, required: false, options: [] },
-                { _id: 'q2', label: 'Question 2', type: 'single_choice', order: 1, required: false, options: ['Opt 1', 'Opt 2'] }
+                {
+                  _id: 'q1',
+                  label: 'Question 1',
+                  type: 'short_text',
+                  order: 0,
+                  required: false,
+                  options: []
+                },
+                {
+                  _id: 'q2',
+                  label: 'Question 2',
+                  type: 'single_choice',
+                  order: 1,
+                  required: false,
+                  options: ['Opt 1', 'Opt 2']
+                }
               ]
             }
           }
@@ -579,7 +639,10 @@ describe('FormBuilder Persistence, Debouncing, and Race Condition Hardening', ()
   it('persists description edits correctly with debouncing', async () => {
     vi.useFakeTimers();
     api.put.mockResolvedValue({
-      data: { success: true, data: { _id: '123', title: 'Test Form', description: 'Final Description' } }
+      data: {
+        success: true,
+        data: { _id: '123', title: 'Test Form', description: 'Final Description' }
+      }
     });
 
     renderComponent();
@@ -622,8 +685,12 @@ describe('FormBuilder Persistence, Debouncing, and Race Condition Hardening', ()
     // Debounce expires
     await vi.advanceTimersByTimeAsync(350);
 
-    expect(api.put).toHaveBeenCalledWith('/api/forms/123/questions/q1', { label: 'Question 1 Updated' });
-    expect(api.put).toHaveBeenCalledWith('/api/forms/123/questions/q2', { label: 'Question 2 Updated' });
+    expect(api.put).toHaveBeenCalledWith('/api/forms/123/questions/q1', {
+      label: 'Question 1 Updated'
+    });
+    expect(api.put).toHaveBeenCalledWith('/api/forms/123/questions/q2', {
+      label: 'Question 2 Updated'
+    });
 
     vi.useRealTimers();
   });
@@ -734,9 +801,9 @@ describe('FormBuilder Persistence, Debouncing, and Race Condition Hardening', ()
     await new Promise((r) => setTimeout(r, 320));
 
     // Delete question while PUT is still in flight
-    const deleteButtons = screen.getAllByRole('button').filter(
-      (btn) => btn.querySelector('svg') && btn.className.includes('text-red-600')
-    );
+    const deleteButtons = screen
+      .getAllByRole('button')
+      .filter((btn) => btn.querySelector('svg') && btn.className.includes('text-red-600'));
     fireEvent.click(deleteButtons[0]);
 
     await waitFor(() => {
@@ -775,10 +842,13 @@ describe('FormBuilder Persistence, Debouncing, and Race Condition Hardening', ()
 
     // Trigger reorder before 300ms debounce completes
     const dndContext = screen.getByTestId('dnd-context');
-    dndContext.setAttribute('data-ondragend', JSON.stringify({
-      source: { index: 1 },
-      destination: { index: 0 }
-    }));
+    dndContext.setAttribute(
+      'data-ondragend',
+      JSON.stringify({
+        source: { index: 1 },
+        destination: { index: 0 }
+      })
+    );
     fireEvent.click(dndContext);
 
     await waitFor(() => {
@@ -831,9 +901,12 @@ describe('FormBuilder Persistence, Debouncing, and Race Condition Hardening', ()
     await vi.advanceTimersByTimeAsync(500);
 
     // Verify PUT /api/forms/456 was NEVER called with Form 123 title
-    expect(api.put).not.toHaveBeenCalledWith('/api/forms/456', expect.objectContaining({
-      title: 'Title for Form 123'
-    }));
+    expect(api.put).not.toHaveBeenCalledWith(
+      '/api/forms/456',
+      expect.objectContaining({
+        title: 'Title for Form 123'
+      })
+    );
 
     vi.useRealTimers();
   });
@@ -874,9 +947,12 @@ describe('FormBuilder Persistence, Debouncing, and Race Condition Hardening', ()
     fireEvent.click(ratingOption);
 
     await waitFor(() => {
-      expect(api.put).toHaveBeenCalledWith('/api/forms/123/questions/q1', expect.objectContaining({
-        type: 'rating'
-      }));
+      expect(api.put).toHaveBeenCalledWith(
+        '/api/forms/123/questions/q1',
+        expect.objectContaining({
+          type: 'rating'
+        })
+      );
     });
   });
 });
@@ -889,9 +965,23 @@ describe('FormBuilder Persistence Hardening, Blur Flushing, Retry, and Concurren
     store = createMockStore({
       auth: { user: { id: 'user1' } },
       forms: {
-        currentForm: { _id: '123', title: 'Test Form', description: 'Desc', status: 'draft', version: 0 },
+        currentForm: {
+          _id: '123',
+          title: 'Test Form',
+          description: 'Desc',
+          status: 'draft',
+          version: 0
+        },
         questions: [
-          { _id: 'q1', label: 'Question 1', type: 'short_text', order: 0, required: false, options: [], version: 0 },
+          {
+            _id: 'q1',
+            label: 'Question 1',
+            type: 'short_text',
+            order: 0,
+            required: false,
+            options: [],
+            version: 0
+          },
           {
             _id: 'q2',
             label: 'Question 2',
@@ -915,9 +1005,23 @@ describe('FormBuilder Persistence Hardening, Blur Flushing, Retry, and Concurren
           data: {
             success: true,
             data: {
-              form: { _id: '123', title: 'Test Form', description: 'Desc', status: 'draft', version: 0 },
+              form: {
+                _id: '123',
+                title: 'Test Form',
+                description: 'Desc',
+                status: 'draft',
+                version: 0
+              },
               questions: [
-                { _id: 'q1', label: 'Question 1', type: 'short_text', order: 0, required: false, options: [], version: 0 },
+                {
+                  _id: 'q1',
+                  label: 'Question 1',
+                  type: 'short_text',
+                  order: 0,
+                  required: false,
+                  options: [],
+                  version: 0
+                },
                 {
                   _id: 'q2',
                   label: 'Question 2',
@@ -1237,10 +1341,14 @@ describe('FormBuilder Persistence Hardening, Blur Flushing, Retry, and Concurren
       data: {
         success: true,
         data: {
-          form: { _id: '123', title: 'Test Form', description: 'Desc', status: 'draft', version: 5 },
-          questions: [
-            { _id: 'q1', label: 'Question 1', type: 'short_text', order: 0 }
-          ]
+          form: {
+            _id: '123',
+            title: 'Test Form',
+            description: 'Desc',
+            status: 'draft',
+            version: 5
+          },
+          questions: [{ _id: 'q1', label: 'Question 1', type: 'short_text', order: 0 }]
         }
       }
     });
@@ -1252,7 +1360,10 @@ describe('FormBuilder Persistence Hardening, Blur Flushing, Retry, and Concurren
 
     const improveBtns = screen.getAllByTitle(/Improve title with AI/i);
     api.post.mockResolvedValueOnce({
-      data: { success: true, data: { improvedText: 'AI Improved Title', changesSummary: 'Better wording' } }
+      data: {
+        success: true,
+        data: { improvedText: 'AI Improved Title', changesSummary: 'Better wording' }
+      }
     });
 
     fireEvent.click(improveBtns[0]);
@@ -1497,5 +1608,128 @@ describe('FormBuilder Persistence Hardening, Blur Flushing, Retry, and Concurren
         title: 'Preserved Unsaved Edit'
       })
     );
+  });
+
+  describe('Stage 4.3.5 Batch D: Unmount Flushing', () => {
+    it('D1: flushes all pending question updates upon unmount without aborting second question', async () => {
+      const { unmount } = renderComponent();
+      await waitFor(() => {
+        expect(screen.getByDisplayValue('Question 1')).toBeTruthy();
+        expect(screen.getByDisplayValue('Question 2')).toBeTruthy();
+      });
+
+      api.put.mockResolvedValue({ data: { success: true, data: { version: 1 } } });
+
+      const q1Input = screen.getByDisplayValue('Question 1');
+      const q2Input = screen.getByDisplayValue('Question 2');
+
+      // Edit both questions without blurring (leaving debounced updates pending in ref)
+      fireEvent.change(q1Input, { target: { value: 'Edited Question 1' } });
+      fireEvent.change(q2Input, { target: { value: 'Edited Question 2' } });
+
+      // Unmount the component while updates are pending
+      unmount();
+
+      // Verify BOTH questions were flushed to the backend
+      await waitFor(() => {
+        expect(api.put).toHaveBeenCalledWith(
+          '/api/forms/123/questions/q1',
+          expect.objectContaining({ label: 'Edited Question 1' })
+        );
+        expect(api.put).toHaveBeenCalledWith(
+          '/api/forms/123/questions/q2',
+          expect.objectContaining({ label: 'Edited Question 2' })
+        );
+      });
+    });
+
+    it('flushes newer pending question edit when unmounted while earlier edit is in flight', async () => {
+      let resolveFirstCall;
+      const firstCallPromise = new Promise((resolve) => {
+        resolveFirstCall = resolve;
+      });
+
+      api.put.mockImplementation((url) => {
+        if (url === '/api/forms/123/questions/q1') {
+          if (!resolveFirstCall.called) {
+            resolveFirstCall.called = true;
+            return firstCallPromise;
+          }
+          return Promise.resolve({ data: { success: true, data: { _id: 'q1', version: 2 } } });
+        }
+        return Promise.resolve({ data: { success: true } });
+      });
+
+      const { unmount } = renderComponent();
+      await waitFor(() => {
+        expect(screen.getByDisplayValue('Question 1')).toBeTruthy();
+      });
+
+      const q1Input = screen.getByDisplayValue('Question 1');
+
+      // First edit + blur -> triggers in-flight request
+      fireEvent.change(q1Input, { target: { value: 'First Edit' } });
+      fireEvent.blur(q1Input);
+
+      // Second edit while first is in flight
+      fireEvent.change(q1Input, { target: { value: 'Second Edit In Flight' } });
+
+      // Unmount while first is still on the wire and second is queued
+      unmount();
+
+      // Resolve the first in-flight request
+      resolveFirstCall({ data: { success: true, data: { _id: 'q1', version: 1 } } });
+
+      // Verify second edit is flushed to server even after unmount
+      await waitFor(() => {
+        expect(api.put).toHaveBeenCalledWith(
+          '/api/forms/123/questions/q1',
+          expect.objectContaining({ label: 'Second Edit In Flight', version: 1 })
+        );
+      });
+    });
+
+    it('retries OCC 409 form conflict upon unmount flush', async () => {
+      let callCount = 0;
+      api.put.mockImplementation((url) => {
+        if (url === '/api/forms/123') {
+          callCount++;
+          if (callCount === 1) {
+            return Promise.reject({
+              response: {
+                status: 409,
+                data: {
+                  success: false,
+                  data: { _id: '123', title: 'Remote Title', version: 2 }
+                }
+              }
+            });
+          }
+          return Promise.resolve({
+            data: { success: true, data: { _id: '123', title: 'Unmounted Title Edit', version: 3 } }
+          });
+        }
+        return Promise.resolve({ data: { success: true } });
+      });
+
+      const { unmount } = renderComponent();
+      await waitFor(() => {
+        expect(screen.getByDisplayValue('Test Form')).toBeTruthy();
+      });
+
+      const titleInput = screen.getByDisplayValue('Test Form');
+      fireEvent.change(titleInput, { target: { value: 'Unmounted Title Edit' } });
+
+      // Unmount immediately with debounced edit pending
+      unmount();
+
+      // Verify retry occurred with updated version
+      await waitFor(() => {
+        expect(api.put).toHaveBeenCalledWith(
+          '/api/forms/123',
+          expect.objectContaining({ title: 'Unmounted Title Edit', version: 2 })
+        );
+      });
+    });
   });
 });

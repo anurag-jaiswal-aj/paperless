@@ -3,7 +3,7 @@ import { useParams, Link } from 'react-router-dom';
 import { useSelector } from 'react-redux';
 import api from '../utils/api';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
-import { FiDownload, FiZap, FiArrowLeft, FiBarChart2 } from 'react-icons/fi';
+import { FiDownload, FiZap, FiArrowLeft, FiBarChart2, FiAlertCircle } from 'react-icons/fi';
 import Loader from '../components/Loader';
 
 const getQuestionId = (questionRef) => {
@@ -83,9 +83,7 @@ const renderAnswerContent = (answer, response, formId) => {
         <span className="inline-flex items-center gap-1.5 text-sm opacity-80 break-all">
           <FiDownload className="shrink-0" size={16} />
           <span>{fileName}</span>
-          {fileSizeText && (
-            <span className="text-xs opacity-60 font-normal">({fileSizeText})</span>
-          )}
+          {fileSizeText && <span className="text-xs opacity-60 font-normal">({fileSizeText})</span>}
         </span>
       );
     }
@@ -116,6 +114,7 @@ const Responses = () => {
   const [generatingCategories, setGeneratingCategories] = useState(false);
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
+  const [fetchError, setFetchError] = useState(null);
 
   const fetchResponses = async (pageNum) => {
     try {
@@ -130,6 +129,7 @@ const Responses = () => {
 
   const fetchData = useCallback(async () => {
     setLoading(true);
+    setFetchError(null);
     try {
       const [formRes, responsesRes, analyticsRes] = await Promise.all([
         api.get(`/api/forms/${id}`),
@@ -142,7 +142,7 @@ const Responses = () => {
       setTotalPages(responsesRes.data.pagination.pages);
       setAnalytics(analyticsRes.data.data);
     } catch (err) {
-      alert('Failed to load responses');
+      setFetchError(err.response?.data?.message || 'Failed to load responses');
     } finally {
       setLoading(false);
     }
@@ -242,11 +242,7 @@ const Responses = () => {
       }
 
       if (chartData.length === 0) {
-        return (
-          <div className="text-sm opacity-70">
-            No options data available
-          </div>
-        );
+        return <div className="text-sm opacity-70">No options data available</div>;
       }
 
       return (
@@ -268,11 +264,7 @@ const Responses = () => {
     } else if (analyticsItem.data?.type === 'number') {
       const { min, max, average } = analyticsItem.data || {};
       if (average === null || average === undefined) {
-        return (
-          <div className="text-sm opacity-70">
-            No numeric responses recorded
-          </div>
-        );
+        return <div className="text-sm opacity-70">No numeric responses recorded</div>;
       }
 
       return (
@@ -293,9 +285,10 @@ const Responses = () => {
       );
     } else if (analyticsItem.data?.type === 'rating') {
       // Bar chart for ratings
-      const distribution = analyticsItem.data?.distribution && typeof analyticsItem.data.distribution === 'object'
-        ? analyticsItem.data.distribution
-        : {};
+      const distribution =
+        analyticsItem.data?.distribution && typeof analyticsItem.data.distribution === 'object'
+          ? analyticsItem.data.distribution
+          : {};
       const chartData = Object.entries(distribution).map(([rating, count]) => ({
         name: `${rating} ★`,
         value: count
@@ -323,11 +316,7 @@ const Responses = () => {
         </div>
       );
     } else {
-      return (
-        <div className="text-sm opacity-70">
-          {analyticsItem.totalAnswers} text responses
-        </div>
-      );
+      return <div className="text-sm opacity-70">{analyticsItem.totalAnswers} text responses</div>;
     }
   };
 
@@ -345,35 +334,55 @@ const Responses = () => {
         {/* Header */}
         <div className="flex justify-between items-start mb-8">
           <div>
-            <Link to="/dashboard" className="text-sm opacity-70 hover:opacity-100 flex items-center gap-1 mb-2">
+            <Link
+              to="/dashboard"
+              className="text-sm opacity-70 hover:opacity-100 flex items-center gap-1 mb-2"
+            >
               <FiArrowLeft /> Back to Dashboard
             </Link>
             <h1 className="text-3xl font-bold mb-2">{form?.title}</h1>
             <p className="opacity-70">{analytics?.totalResponses || 0} responses</p>
           </div>
           <div className="flex gap-3">
-            <button
-              onClick={() => handleExport('json')}
-              className="btn btn-secondary"
-            >
+            <button onClick={() => handleExport('json')} className="btn btn-secondary">
               <FiDownload /> Export JSON
             </button>
-            <button
-              onClick={() => handleExport('csv')}
-              className="btn btn-secondary"
-            >
+            <button onClick={() => handleExport('csv')} className="btn btn-secondary">
               <FiDownload /> Export CSV
             </button>
           </div>
         </div>
 
-        {responses.length === 0 ? (
+        {fetchError ? (
+          <div className="card p-12 text-center border border-red-200 dark:border-red-900/50 bg-red-50/50 dark:bg-red-950/10">
+            <div className="w-16 h-16 rounded-2xl bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400 flex items-center justify-center mx-auto mb-4">
+              <FiAlertCircle className="w-8 h-8" />
+            </div>
+            <h3 className="text-xl font-bold mb-2 text-red-800 dark:text-red-300">
+              Failed to load responses
+            </h3>
+            <p className="opacity-80 max-w-sm mx-auto mb-6 text-sm text-red-700 dark:text-red-400">
+              {fetchError}
+            </p>
+            <button
+              onClick={() => {
+                setLoading(true);
+                fetchData();
+              }}
+              className="btn btn-primary"
+            >
+              Retry
+            </button>
+          </div>
+        ) : responses.length === 0 ? (
           <div className="text-center py-20 px-4 card flex flex-col items-center justify-center bg-transparent border-dashed">
             <div className="bg-gray-100 dark:bg-surface-elevated p-4 rounded-full mb-4">
               <FiBarChart2 className="w-8 h-8 opacity-50" />
             </div>
             <h3 className="text-xl font-bold mb-2">No responses yet</h3>
-            <p className="opacity-70 max-w-sm mx-auto">Share your form to start collecting responses and analyzing data.</p>
+            <p className="opacity-70 max-w-sm mx-auto">
+              Share your form to start collecting responses and analyzing data.
+            </p>
           </div>
         ) : (
           <>
@@ -388,7 +397,8 @@ const Responses = () => {
                     disabled={generatingSummary}
                     className="btn btn-primary"
                   >
-                    <FiZap className="inline mr-1" /> {generatingSummary ? 'Generating...' : 'Generate Summary'}
+                    <FiZap className="inline mr-1" />{' '}
+                    {generatingSummary ? 'Generating...' : 'Generate Summary'}
                   </button>
                 </div>
                 {summary ? (
@@ -400,8 +410,13 @@ const Responses = () => {
                         <ul className="list-disc pl-5 space-y-2">
                           {summary.keyInsights.map((insight, idx) => (
                             <li key={idx}>
-                              <span className="font-semibold">{insight.title}:</span> {insight.explanation}
-                              {insight.sentiment && <span className="text-xs opacity-70 ml-2 px-2 py-1 rounded bg-gray-500 bg-opacity-20 uppercase tracking-wider">{insight.sentiment}</span>}
+                              <span className="font-semibold">{insight.title}:</span>{' '}
+                              {insight.explanation}
+                              {insight.sentiment && (
+                                <span className="text-xs opacity-70 ml-2 px-2 py-1 rounded bg-gray-500 bg-opacity-20 uppercase tracking-wider">
+                                  {insight.sentiment}
+                                </span>
+                              )}
                             </li>
                           ))}
                         </ul>
@@ -411,13 +426,17 @@ const Responses = () => {
                       <div className="mt-4 pt-4 border-t border-gray-500 border-opacity-30">
                         <h4 className="text-sm font-bold opacity-70">Caveats</h4>
                         <ul className="list-disc pl-5 text-sm opacity-70">
-                          {summary.caveats.map((c, idx) => <li key={idx}>{c}</li>)}
+                          {summary.caveats.map((c, idx) => (
+                            <li key={idx}>{c}</li>
+                          ))}
                         </ul>
                       </div>
                     )}
                   </div>
                 ) : (
-                  <p className="opacity-50 italic">Click above to generate an AI-powered summary of responses</p>
+                  <p className="opacity-50 italic">
+                    Click above to generate an AI-powered summary of responses
+                  </p>
                 )}
               </div>
 
@@ -430,27 +449,40 @@ const Responses = () => {
                     disabled={generatingThemes}
                     className="btn btn-primary"
                   >
-                    <FiZap className="inline mr-1" /> {generatingThemes ? 'Extracting...' : 'Extract Themes'}
+                    <FiZap className="inline mr-1" />{' '}
+                    {generatingThemes ? 'Extracting...' : 'Extract Themes'}
                   </button>
                 </div>
                 {themes ? (
                   themes.length > 0 ? (
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                       {themes.map((themeItem, idx) => (
-                        <div key={idx} className="p-5 bg-gray-50 dark:bg-surface-hover rounded-xl border border-gray-100 dark:border-border-default">
+                        <div
+                          key={idx}
+                          className="p-5 bg-gray-50 dark:bg-surface-hover rounded-xl border border-gray-100 dark:border-border-default"
+                        >
                           <div className="flex justify-between items-start mb-3">
                             <h3 className="font-bold text-lg">{themeItem.name}</h3>
-                            {themeItem.sentiment && <span className="text-xs font-semibold px-2 py-1 rounded bg-white dark:bg-surface-card shadow-sm uppercase">{themeItem.sentiment}</span>}
+                            {themeItem.sentiment && (
+                              <span className="text-xs font-semibold px-2 py-1 rounded bg-white dark:bg-surface-card shadow-sm uppercase">
+                                {themeItem.sentiment}
+                              </span>
+                            )}
                           </div>
                           <p className="text-sm opacity-90 mb-4">{themeItem.description}</p>
-                          {themeItem.supportingResponses && themeItem.supportingResponses.length > 0 && (
-                            <div className="text-sm opacity-70 border-t border-gray-200 dark:border-border-default pt-3">
-                              <p className="font-semibold mb-2">Examples:</p>
-                              <ul className="list-disc pl-4 space-y-1.5">
-                                {themeItem.supportingResponses.map((r, i) => <li key={i} className="italic">&quot;{r}&quot;</li>)}
-                              </ul>
-                            </div>
-                          )}
+                          {themeItem.supportingResponses &&
+                            themeItem.supportingResponses.length > 0 && (
+                              <div className="text-sm opacity-70 border-t border-gray-200 dark:border-border-default pt-3">
+                                <p className="font-semibold mb-2">Examples:</p>
+                                <ul className="list-disc pl-4 space-y-1.5">
+                                  {themeItem.supportingResponses.map((r, i) => (
+                                    <li key={i} className="italic">
+                                      &quot;{r}&quot;
+                                    </li>
+                                  ))}
+                                </ul>
+                              </div>
+                            )}
                         </div>
                       ))}
                     </div>
@@ -471,7 +503,8 @@ const Responses = () => {
                     disabled={generatingCategories}
                     className="btn btn-primary"
                   >
-                    <FiZap className="inline mr-1" /> {generatingCategories ? 'Categorizing...' : 'Categorize'}
+                    <FiZap className="inline mr-1" />{' '}
+                    {generatingCategories ? 'Categorizing...' : 'Categorize'}
                   </button>
                 </div>
                 {categories ? (
@@ -479,32 +512,47 @@ const Responses = () => {
                     {categories.categories && categories.categories.length > 0 && (
                       <div className="space-y-4">
                         {categories.categories.map((cat, idx) => (
-                          <div key={idx} className="p-5 bg-gray-50 dark:bg-surface-hover rounded-xl border border-gray-100 dark:border-border-default">
-                            <h3 className="font-bold text-lg mb-2">{cat.name} <span className="opacity-70 font-normal text-sm ml-2 bg-white dark:bg-surface-card px-2 py-1 rounded-md shadow-sm">{(cat.responseIndexes || []).length} responses</span></h3>
+                          <div
+                            key={idx}
+                            className="p-5 bg-gray-50 dark:bg-surface-hover rounded-xl border border-gray-100 dark:border-border-default"
+                          >
+                            <h3 className="font-bold text-lg mb-2">
+                              {cat.name}{' '}
+                              <span className="opacity-70 font-normal text-sm ml-2 bg-white dark:bg-surface-card px-2 py-1 rounded-md shadow-sm">
+                                {(cat.responseIndexes || []).length} responses
+                              </span>
+                            </h3>
                             <p className="text-sm opacity-90 mb-3">{cat.description}</p>
                             {(cat.responseIndexes || []).length > 0 && (
                               <p className="text-xs opacity-70">
-                                Includes Response IDs: {(cat.responseIndexes || []).map(i => {
-                                  const r = responses[i];
-                                  return r ? `#${responses.length - i}` : `#Unknown`;
-                                }).join(', ')}
+                                Includes Response IDs:{' '}
+                                {(cat.responseIndexes || [])
+                                  .map((i) => {
+                                    const r = responses[i];
+                                    return r ? `#${responses.length - i}` : `#Unknown`;
+                                  })
+                                  .join(', ')}
                               </p>
                             )}
                           </div>
                         ))}
                       </div>
                     )}
-                    {categories.uncategorizedResponseIndexes && categories.uncategorizedResponseIndexes.length > 0 && (
-                      <div className="mt-4 p-5 bg-gray-50 dark:bg-surface-hover rounded-xl border border-gray-100 dark:border-border-default">
-                        <h3 className="font-bold text-lg mb-2 opacity-70">Uncategorized</h3>
-                        <p className="text-xs opacity-70">
-                          Response IDs: {categories.uncategorizedResponseIndexes.map(i => {
-                            const r = responses[i];
-                            return r ? `#${responses.length - i}` : `#Unknown`;
-                          }).join(', ')}
-                        </p>
-                      </div>
-                    )}
+                    {categories.uncategorizedResponseIndexes &&
+                      categories.uncategorizedResponseIndexes.length > 0 && (
+                        <div className="mt-4 p-5 bg-gray-50 dark:bg-surface-hover rounded-xl border border-gray-100 dark:border-border-default">
+                          <h3 className="font-bold text-lg mb-2 opacity-70">Uncategorized</h3>
+                          <p className="text-xs opacity-70">
+                            Response IDs:{' '}
+                            {categories.uncategorizedResponseIndexes
+                              .map((i) => {
+                                const r = responses[i];
+                                return r ? `#${responses.length - i}` : `#Unknown`;
+                              })
+                              .join(', ')}
+                          </p>
+                        </div>
+                      )}
                   </div>
                 ) : (
                   <p className="opacity-50 italic">Categorize text responses automatically.</p>
@@ -515,11 +563,8 @@ const Responses = () => {
             {/* Analytics Charts */}
             <h2 className="text-2xl font-bold mb-6">Analytics</h2>
             <div className="space-y-8">
-              {analytics?.analytics.map((item) => (
-                <div
-                  key={item.questionId}
-                  className={`card p-6`}
-                >
+              {(analytics?.analytics || []).map((item) => (
+                <div key={item.questionId} className={`card p-6`}>
                   <h3 className="text-lg font-bold mb-4">{item.label}</h3>
                   <p className="text-sm opacity-70 mb-4">{item.totalAnswers} answers</p>
                   {renderChart(item)}
@@ -531,10 +576,7 @@ const Responses = () => {
             <h2 className="text-2xl font-bold mt-12 mb-6">Individual Responses</h2>
             <div className="space-y-4">
               {responses.map((response, index) => (
-                <div
-                  key={response._id}
-                  className={`card p-6`}
-                >
+                <div key={response._id} className={`card p-6`}>
                   <div className="flex justify-between items-center mb-4">
                     <h3 className="font-bold">Response #{responses.length - index}</h3>
                     <span className="text-sm opacity-70">
@@ -542,8 +584,8 @@ const Responses = () => {
                     </span>
                   </div>
                   <div className="space-y-3">
-                    {response.answers.map((answer) => (
-                      <div key={answer._id}>
+                    {response.answers.map((answer, ansIndex) => (
+                      <div key={answer._id || getQuestionId(answer.questionId) || ansIndex}>
                         <p className="font-medium text-sm opacity-70 mb-1">
                           {answer.questionId?.label || 'Question'}
                         </p>
