@@ -11,9 +11,20 @@ import authRoutes, { passwordLimiter } from '../routes/authRoutes';
 import User from '../models/user';
 import EmailService from '../services/EmailService';
 import { optionalAuth } from '../middleware/authMiddleware';
-import { resolveCookieSameSite, getBaseCookieOptions } from './authController';
+import {
+  resolveCookieSameSite,
+  getBaseCookieOptions,
+  getLoginCoordinator,
+  getLoginWorkerPool,
+  getLoginProtectionService,
+  setLoginProtectionComponents,
+  resetLoginProtectionComponents
+} from './authController';
+import LoginPair from '../models/LoginPair.js';
+import LoginAccount from '../models/LoginAccount.js';
 import { sanitizeRequestUrl } from '../server.js';
 import { notFound } from '../middleware/errorHandler.js';
+import { logger } from '../utils/logger.js';
 
 // Mock EmailService
 vi.mock('../services/EmailService', () => {
@@ -28,6 +39,7 @@ vi.mock('../services/EmailService', () => {
 
 let mongoServer;
 const app = express();
+app.set('trust proxy', ['loopback', 'linklocal', 'uniquelocal']);
 app.use(express.json());
 app.use(cookieParser());
 app.use('/api/auth', authRoutes);
@@ -41,6 +53,9 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  await resetLoginProtectionComponents();
+  delete process.env.PROGRESSIVE_LOGIN_PROTECTION_ENABLED;
+  delete process.env.LOGIN_PROTECTION_HMAC_SECRET;
   await mongoose.disconnect();
   await mongoServer.stop();
   vi.clearAllMocks();
@@ -60,9 +75,7 @@ describe('Auth Controller', () => {
 
   describe('POST /api/auth/register', () => {
     it('registers a user successfully and sets secure HttpOnly cookies with Path=/', async () => {
-      const res = await request(app)
-        .post('/api/auth/register')
-        .send(testUser);
+      const res = await request(app).post('/api/auth/register').send(testUser);
 
       expect(res.status).toBe(201);
       expect(res.body.success).toBe(true);
@@ -73,8 +86,8 @@ describe('Auth Controller', () => {
       const cookies = res.headers['set-cookie'];
       expect(cookies).toBeDefined();
 
-      const tokenCookie = cookies.find(c => c.startsWith('token='));
-      const refreshCookie = cookies.find(c => c.startsWith('refreshToken='));
+      const tokenCookie = cookies.find((c) => c.startsWith('token='));
+      const refreshCookie = cookies.find((c) => c.startsWith('refreshToken='));
 
       expect(tokenCookie).toBeDefined();
       expect(tokenCookie).toContain('HttpOnly');
@@ -147,7 +160,7 @@ describe('Auth Controller', () => {
 
       const cookies = res.headers['set-cookie'];
       expect(cookies).toBeDefined();
-      const tokenCookie = cookies.find(c => c.startsWith('token='));
+      const tokenCookie = cookies.find((c) => c.startsWith('token='));
       expect(tokenCookie).toContain('HttpOnly');
       expect(tokenCookie).toContain('Path=/');
     });
@@ -208,7 +221,7 @@ describe('Auth Controller', () => {
       expect(res.body.success).toBe(true);
       expect(res.body.data.user.email).toBe('legacy_user@example.com');
       const cookies = res.headers['set-cookie'];
-      expect(cookies.find(c => c.startsWith('token='))).toBeDefined();
+      expect(cookies.find((c) => c.startsWith('token='))).toBeDefined();
     });
   });
 
@@ -222,9 +235,7 @@ describe('Auth Controller', () => {
       const loginRes = await request(app).post('/api/auth/register').send(testUser);
       const cookies = loginRes.headers['set-cookie'];
 
-      const res = await request(app)
-        .get('/api/auth/me')
-        .set('Cookie', cookies);
+      const res = await request(app).get('/api/auth/me').set('Cookie', cookies);
 
       expect(res.status).toBe(200);
       expect(res.body.data.email).toBe(testUser.email);
@@ -244,9 +255,7 @@ describe('Auth Controller', () => {
       dbUser.lastLogoutAt = new Date();
       await dbUser.save({ validateBeforeSave: false });
 
-      const res = await request(app)
-        .get('/api/auth/me')
-        .set('Cookie', cookies);
+      const res = await request(app).get('/api/auth/me').set('Cookie', cookies);
 
       expect(res.status).toBe(200);
       expect(res.body.success).toBe(true);
@@ -281,16 +290,12 @@ describe('Auth Controller', () => {
       const cookies = loginRes.headers['set-cookie'];
 
       // Attempt state-changing logout via GET
-      const getLogoutRes = await request(app)
-        .get('/api/auth/logout')
-        .set('Cookie', cookies);
+      const getLogoutRes = await request(app).get('/api/auth/logout').set('Cookie', cookies);
 
       expect(getLogoutRes.status).toBe(404);
 
       // Verify session was NOT invalidated: authenticated requests to /api/auth/me still succeed
-      const meRes = await request(app)
-        .get('/api/auth/me')
-        .set('Cookie', cookies);
+      const meRes = await request(app).get('/api/auth/me').set('Cookie', cookies);
       expect(meRes.status).toBe(200);
       expect(meRes.body.data.email).toBe('get_logout_audit@example.com');
 
@@ -303,8 +308,8 @@ describe('Auth Controller', () => {
       expect(res.status).toBe(200);
 
       const cookies = res.headers['set-cookie'];
-      const tokenCookie = cookies.find(c => c.startsWith('token=none'));
-      const refreshCookie = cookies.find(c => c.startsWith('refreshToken=none'));
+      const tokenCookie = cookies.find((c) => c.startsWith('token=none'));
+      const refreshCookie = cookies.find((c) => c.startsWith('refreshToken=none'));
 
       expect(tokenCookie).toBeDefined();
       expect(tokenCookie).toContain('Path=/');
@@ -320,28 +325,24 @@ describe('Auth Controller', () => {
     it('refreshes token using valid refresh cookie', async () => {
       const loginRes = await request(app).post('/api/auth/register').send(testUser);
       const cookies = loginRes.headers['set-cookie'];
-      const refreshTokenCookie = cookies.find(c => c.startsWith('refreshToken='));
+      const refreshTokenCookie = cookies.find((c) => c.startsWith('refreshToken='));
 
-      const res = await request(app)
-        .post('/api/auth/refresh')
-        .set('Cookie', [refreshTokenCookie]);
+      const res = await request(app).post('/api/auth/refresh').set('Cookie', [refreshTokenCookie]);
 
       expect(res.status).toBe(200);
       const newCookies = res.headers['set-cookie'];
-      expect(newCookies.some(c => c.startsWith('token='))).toBe(true);
+      expect(newCookies.some((c) => c.startsWith('token='))).toBe(true);
       expect(res.body.data?.token).toBeUndefined(); // Token not in body
     });
 
     it('rejects normal access token passed as refresh token', async () => {
       const loginRes = await request(app).post('/api/auth/register').send(testUser);
       const cookies = loginRes.headers['set-cookie'];
-      const tokenCookie = cookies.find(c => c.startsWith('token='));
+      const tokenCookie = cookies.find((c) => c.startsWith('token='));
       // Intentionally pass the normal access token named as 'refreshToken' to see if secret validates
       const fakeRefreshCookie = tokenCookie.replace('token=', 'refreshToken=');
 
-      const res = await request(app)
-        .post('/api/auth/refresh')
-        .set('Cookie', [fakeRefreshCookie]);
+      const res = await request(app).post('/api/auth/refresh').set('Cookie', [fakeRefreshCookie]);
 
       expect(res.status).toBe(401);
       expect(res.body.message).toContain('Invalid or expired refresh token');
@@ -355,7 +356,7 @@ describe('Auth Controller', () => {
     it('handles two refresh requests using the same token concurrently with atomic rotation', async () => {
       const loginRes = await request(app).post('/api/auth/register').send(testUser);
       const cookies = loginRes.headers['set-cookie'];
-      const refreshTokenCookie = cookies.find(c => c.startsWith('refreshToken='));
+      const refreshTokenCookie = cookies.find((c) => c.startsWith('refreshToken='));
 
       // Send two concurrent refresh calls with identical refresh token cookie
       const [res1, res2] = await Promise.all([
@@ -381,7 +382,7 @@ describe('Auth Controller', () => {
     it('rejects reuse of an already-rotated token', async () => {
       const loginRes = await request(app).post('/api/auth/register').send(testUser);
       const cookies = loginRes.headers['set-cookie'];
-      const originalRefreshCookie = cookies.find(c => c.startsWith('refreshToken='));
+      const originalRefreshCookie = cookies.find((c) => c.startsWith('refreshToken='));
 
       // First refresh succeeds
       const refreshRes = await request(app)
@@ -400,12 +401,10 @@ describe('Auth Controller', () => {
     it('rejects refresh when logout occurs first', async () => {
       const loginRes = await request(app).post('/api/auth/register').send(testUser);
       const cookies = loginRes.headers['set-cookie'];
-      const refreshCookie = cookies.find(c => c.startsWith('refreshToken='));
+      const refreshCookie = cookies.find((c) => c.startsWith('refreshToken='));
 
       // Logout with the refresh cookie
-      const logoutRes = await request(app)
-        .post('/api/auth/logout')
-        .set('Cookie', [refreshCookie]);
+      const logoutRes = await request(app).post('/api/auth/logout').set('Cookie', [refreshCookie]);
       expect(logoutRes.status).toBe(200);
 
       // Attempt refresh with the logged-out cookie
@@ -421,8 +420,8 @@ describe('Auth Controller', () => {
       const user2 = { name: 'User Two', email: 'user2@example.com', password: 'password123' };
       const user2Res = await request(app).post('/api/auth/register').send(user2);
 
-      const cookie1 = user1Res.headers['set-cookie'].find(c => c.startsWith('refreshToken='));
-      const cookie2 = user2Res.headers['set-cookie'].find(c => c.startsWith('refreshToken='));
+      const cookie1 = user1Res.headers['set-cookie'].find((c) => c.startsWith('refreshToken='));
+      const cookie2 = user2Res.headers['set-cookie'].find((c) => c.startsWith('refreshToken='));
 
       const refresh1 = await request(app).post('/api/auth/refresh').set('Cookie', [cookie1]);
       const refresh2 = await request(app).post('/api/auth/refresh').set('Cookie', [cookie2]);
@@ -455,28 +454,26 @@ describe('Auth Controller', () => {
         .set('Cookie', ['refreshToken=invalid.token.here']);
       expect(res.status).toBe(401);
       const setCookies = res.headers['set-cookie'] || [];
-      expect(setCookies.some(c => c.startsWith('token=') && !c.includes('token=none'))).toBe(false);
+      expect(setCookies.some((c) => c.startsWith('token=') && !c.includes('token=none'))).toBe(
+        false
+      );
     });
 
     it('revokes session family and successor tokens when logout races with post-rotation refresh', async () => {
       const loginRes = await request(app).post('/api/auth/register').send(testUser);
       const initialCookies = loginRes.headers['set-cookie'];
-      const tokenACookie = initialCookies.find(c => c.startsWith('refreshToken='));
+      const tokenACookie = initialCookies.find((c) => c.startsWith('refreshToken='));
 
       // Step 1: Refresh rotates tokenA -> tokenB in DB
-      const refreshRes = await request(app)
-        .post('/api/auth/refresh')
-        .set('Cookie', [tokenACookie]);
+      const refreshRes = await request(app).post('/api/auth/refresh').set('Cookie', [tokenACookie]);
       expect(refreshRes.status).toBe(200);
 
       const refreshedCookies = refreshRes.headers['set-cookie'];
-      const tokenBCookie = refreshedCookies.find(c => c.startsWith('refreshToken='));
-      const tokenBAccessCookie = refreshedCookies.find(c => c.startsWith('token='));
+      const tokenBCookie = refreshedCookies.find((c) => c.startsWith('refreshToken='));
+      const tokenBAccessCookie = refreshedCookies.find((c) => c.startsWith('token='));
 
       // Step 2: Logout occurs using tokenA (simulating logout starting before tokenB reached client)
-      const logoutRes = await request(app)
-        .post('/api/auth/logout')
-        .set('Cookie', [tokenACookie]);
+      const logoutRes = await request(app).post('/api/auth/logout').set('Cookie', [tokenACookie]);
       expect(logoutRes.status).toBe(200);
 
       // Verify DB: Entire session family was revoked; tokenB was purged
@@ -501,21 +498,17 @@ describe('Auth Controller', () => {
       // 1. Scenario with newly rotated refresh cookie
       const regRes = await request(app).post('/api/auth/register').send(testUser);
       const initialCookies = regRes.headers['set-cookie'];
-      const tokenACookie = initialCookies.find(c => c.startsWith('refreshToken='));
+      const tokenACookie = initialCookies.find((c) => c.startsWith('refreshToken='));
 
-      const refreshRes = await request(app)
-        .post('/api/auth/refresh')
-        .set('Cookie', [tokenACookie]);
+      const refreshRes = await request(app).post('/api/auth/refresh').set('Cookie', [tokenACookie]);
       expect(refreshRes.status).toBe(200);
 
       const refreshedCookies = refreshRes.headers['set-cookie'];
-      const tokenBCookie = refreshedCookies.find(c => c.startsWith('refreshToken='));
-      const tokenBAccessCookie = refreshedCookies.find(c => c.startsWith('token='));
+      const tokenBCookie = refreshedCookies.find((c) => c.startsWith('refreshToken='));
+      const tokenBAccessCookie = refreshedCookies.find((c) => c.startsWith('token='));
 
       // Logout occurs using tokenB (browser received and sent the newly rotated cookie)
-      const logoutRes = await request(app)
-        .post('/api/auth/logout')
-        .set('Cookie', [tokenBCookie]);
+      const logoutRes = await request(app).post('/api/auth/logout').set('Cookie', [tokenBCookie]);
       expect(logoutRes.status).toBe(200);
 
       // Verify DB: session family was revoked
@@ -527,15 +520,22 @@ describe('Auth Controller', () => {
       expect(meRes.status).toBe(401);
       expect(meRes.body.message).toContain('session has been revoked');
 
-      const refreshAgain = await request(app).post('/api/auth/refresh').set('Cookie', [tokenBCookie]);
+      const refreshAgain = await request(app)
+        .post('/api/auth/refresh')
+        .set('Cookie', [tokenBCookie]);
       expect(refreshAgain.status).toBe(401);
       expect(refreshAgain.body.message).toContain('Invalid or revoked refresh token');
 
       // 2. Scenario where logout uses a Bearer token during post-rotation
-      const loginRes = await request(app).post('/api/auth/login').send({ email: testUser.email, password: testUser.password });
+      const loginRes = await request(app)
+        .post('/api/auth/login')
+        .send({ email: testUser.email, password: testUser.password });
       const loginCookies = loginRes.headers['set-cookie'];
-      const tokenCCookie = loginCookies.find(c => c.startsWith('refreshToken='));
-      const tokenCAccessRaw = loginCookies.find(c => c.startsWith('token=')).split(';')[0].split('=')[1];
+      const tokenCCookie = loginCookies.find((c) => c.startsWith('refreshToken='));
+      const tokenCAccessRaw = loginCookies
+        .find((c) => c.startsWith('token='))
+        .split(';')[0]
+        .split('=')[1];
 
       // Refresh rotates tokenC -> tokenD
       const refreshDRes = await request(app)
@@ -544,8 +544,8 @@ describe('Auth Controller', () => {
       expect(refreshDRes.status).toBe(200);
 
       const tokenDCookies = refreshDRes.headers['set-cookie'];
-      const tokenDCookie = tokenDCookies.find(c => c.startsWith('refreshToken='));
-      const tokenDAccessCookie = tokenDCookies.find(c => c.startsWith('token='));
+      const tokenDCookie = tokenDCookies.find((c) => c.startsWith('refreshToken='));
+      const tokenDAccessCookie = tokenDCookies.find((c) => c.startsWith('token='));
 
       // Logout using the Bearer token (pre-rotation tokenC access token containing the sessionId)
       const bearerLogout = await request(app)
@@ -562,7 +562,9 @@ describe('Auth Controller', () => {
       expect(meDRes.status).toBe(401);
       expect(meDRes.body.message).toContain('session has been revoked');
 
-      const refreshDAgain = await request(app).post('/api/auth/refresh').set('Cookie', [tokenDCookie]);
+      const refreshDAgain = await request(app)
+        .post('/api/auth/refresh')
+        .set('Cookie', [tokenDCookie]);
       expect(refreshDAgain.status).toBe(401);
       expect(refreshDAgain.body.message).toContain('Invalid or revoked refresh token');
     });
@@ -570,8 +572,8 @@ describe('Auth Controller', () => {
     it('rejects access tokens once their session is revoked upon logout', async () => {
       const loginRes = await request(app).post('/api/auth/register').send(testUser);
       const cookies = loginRes.headers['set-cookie'];
-      const accessCookie = cookies.find(c => c.startsWith('token='));
-      const refreshCookie = cookies.find(c => c.startsWith('refreshToken='));
+      const accessCookie = cookies.find((c) => c.startsWith('token='));
+      const refreshCookie = cookies.find((c) => c.startsWith('refreshToken='));
 
       // Access succeeds initially
       const meBefore = await request(app).get('/api/auth/me').set('Cookie', [accessCookie]);
@@ -588,7 +590,9 @@ describe('Auth Controller', () => {
 
     it('revokes legacy access tokens upon logout via lastLogoutAt', async () => {
       const loginRes = await request(app).post('/api/auth/register').send(testUser);
-      const refreshCookie = loginRes.headers['set-cookie'].find(c => c.startsWith('refreshToken='));
+      const refreshCookie = loginRes.headers['set-cookie'].find((c) =>
+        c.startsWith('refreshToken=')
+      );
       const user = await User.findOne({ email: testUser.email });
 
       // Create a legacy access token without sessionId (issued 5 seconds ago)
@@ -617,7 +621,9 @@ describe('Auth Controller', () => {
 
     it('revokes legacy refresh token upon logout and prevents post-logout refresh', async () => {
       const user = await User.create(testUser);
-      const legacyRefreshToken = jwt.sign({ id: user._id }, process.env.JWT_REFRESH_SECRET, { expiresIn: '7d' });
+      const legacyRefreshToken = jwt.sign({ id: user._id }, process.env.JWT_REFRESH_SECRET, {
+        expiresIn: '7d'
+      });
       const legacyTokenHash = crypto.createHash('sha256').update(legacyRefreshToken).digest('hex');
       user.refreshTokens = [legacyTokenHash];
       await user.save();
@@ -642,7 +648,9 @@ describe('Auth Controller', () => {
 
     it('prevents in-flight refresh resurrection when a legacy refresh token is rotated before logout', async () => {
       const user = await User.create(testUser);
-      const legacyRefreshToken = jwt.sign({ id: user._id }, process.env.JWT_REFRESH_SECRET, { expiresIn: '7d' });
+      const legacyRefreshToken = jwt.sign({ id: user._id }, process.env.JWT_REFRESH_SECRET, {
+        expiresIn: '7d'
+      });
       const legacyTokenHash = crypto.createHash('sha256').update(legacyRefreshToken).digest('hex');
       user.refreshTokens = [legacyTokenHash];
       await user.save();
@@ -654,8 +662,8 @@ describe('Auth Controller', () => {
       expect(refreshRes.status).toBe(200);
 
       const refreshedCookies = refreshRes.headers['set-cookie'];
-      const tokenBCookie = refreshedCookies.find(c => c.startsWith('refreshToken='));
-      const tokenBAccessCookie = refreshedCookies.find(c => c.startsWith('token='));
+      const tokenBCookie = refreshedCookies.find((c) => c.startsWith('refreshToken='));
+      const tokenBAccessCookie = refreshedCookies.find((c) => c.startsWith('token='));
 
       // Logout occurs with the original legacy token
       const logoutRes = await request(app)
@@ -682,7 +690,9 @@ describe('Auth Controller', () => {
 
     it('rejects tokens with malformed sessionId', async () => {
       const user = await User.create(testUser);
-      const malformedToken = jwt.sign({ id: user._id, sessionId: '   ' }, process.env.JWT_SECRET, { expiresIn: '15m' });
+      const malformedToken = jwt.sign({ id: user._id, sessionId: '   ' }, process.env.JWT_SECRET, {
+        expiresIn: '15m'
+      });
 
       const res = await request(app)
         .get('/api/auth/me')
@@ -699,19 +709,25 @@ describe('Auth Controller', () => {
         email: testUser.email,
         password: testUser.password
       });
-      const cookie1Token = login1.headers['set-cookie'].find(c => c.startsWith('token='));
-      const cookie1Refresh = login1.headers['set-cookie'].find(c => c.startsWith('refreshToken='));
+      const cookie1Token = login1.headers['set-cookie'].find((c) => c.startsWith('token='));
+      const cookie1Refresh = login1.headers['set-cookie'].find((c) =>
+        c.startsWith('refreshToken=')
+      );
 
       // Login 2 (Device 2)
       const login2 = await request(app).post('/api/auth/login').send({
         email: testUser.email,
         password: testUser.password
       });
-      const cookie2Token = login2.headers['set-cookie'].find(c => c.startsWith('token='));
+      const cookie2Token = login2.headers['set-cookie'].find((c) => c.startsWith('token='));
 
       // Both devices access successfully
-      expect((await request(app).get('/api/auth/me').set('Cookie', [cookie1Token])).status).toBe(200);
-      expect((await request(app).get('/api/auth/me').set('Cookie', [cookie2Token])).status).toBe(200);
+      expect((await request(app).get('/api/auth/me').set('Cookie', [cookie1Token])).status).toBe(
+        200
+      );
+      expect((await request(app).get('/api/auth/me').set('Cookie', [cookie2Token])).status).toBe(
+        200
+      );
 
       // Device 1 logs out
       await request(app).post('/api/auth/logout').set('Cookie', [cookie1Refresh]);
@@ -729,7 +745,7 @@ describe('Auth Controller', () => {
 
     it('safely fails with 500 without granting access when database lookup fails during session check', async () => {
       const loginRes = await request(app).post('/api/auth/register').send(testUser);
-      const accessCookie = loginRes.headers['set-cookie'].find(c => c.startsWith('token='));
+      const accessCookie = loginRes.headers['set-cookie'].find((c) => c.startsWith('token='));
 
       const findSpy = vi.spyOn(User, 'findById').mockReturnValueOnce({
         select: vi.fn().mockRejectedValueOnce(new Error('Simulated DB lookup error'))
@@ -747,14 +763,26 @@ describe('Auth Controller', () => {
       const nowSec = Math.floor(Date.now() / 1000);
 
       // Session 1 legacy tokens (issued at T-200)
-      const legacyRefresh1 = jwt.sign({ id: user._id, iat: nowSec - 200 }, process.env.JWT_REFRESH_SECRET, { expiresIn: '7d' });
+      const legacyRefresh1 = jwt.sign(
+        { id: user._id, iat: nowSec - 200 },
+        process.env.JWT_REFRESH_SECRET,
+        { expiresIn: '7d' }
+      );
       const legacyHash1 = crypto.createHash('sha256').update(legacyRefresh1).digest('hex');
-      const legacyAccess1 = jwt.sign({ id: user._id, iat: nowSec - 200 }, process.env.JWT_SECRET, { expiresIn: '15m' });
+      const legacyAccess1 = jwt.sign({ id: user._id, iat: nowSec - 200 }, process.env.JWT_SECRET, {
+        expiresIn: '15m'
+      });
 
       // Session 2 legacy tokens (issued independently at T-100)
-      const legacyRefresh2 = jwt.sign({ id: user._id, iat: nowSec - 100 }, process.env.JWT_REFRESH_SECRET, { expiresIn: '7d' });
+      const legacyRefresh2 = jwt.sign(
+        { id: user._id, iat: nowSec - 100 },
+        process.env.JWT_REFRESH_SECRET,
+        { expiresIn: '7d' }
+      );
       const legacyHash2 = crypto.createHash('sha256').update(legacyRefresh2).digest('hex');
-      const legacyAccess2 = jwt.sign({ id: user._id, iat: nowSec - 100 }, process.env.JWT_SECRET, { expiresIn: '15m' });
+      const legacyAccess2 = jwt.sign({ id: user._id, iat: nowSec - 100 }, process.env.JWT_SECRET, {
+        expiresIn: '15m'
+      });
 
       user.refreshTokens = [legacyHash1, legacyHash2];
       await user.save();
@@ -799,7 +827,9 @@ describe('Auth Controller', () => {
 
     it('supports multiple consecutive rotations of an upgraded legacy refresh token and full revocation on logout', async () => {
       const user = await User.create(testUser);
-      const legacyRefresh0 = jwt.sign({ id: user._id }, process.env.JWT_REFRESH_SECRET, { expiresIn: '7d' });
+      const legacyRefresh0 = jwt.sign({ id: user._id }, process.env.JWT_REFRESH_SECRET, {
+        expiresIn: '7d'
+      });
       const legacyHash0 = crypto.createHash('sha256').update(legacyRefresh0).digest('hex');
       user.refreshTokens = [legacyHash0];
       await user.save();
@@ -810,40 +840,38 @@ describe('Auth Controller', () => {
         .set('Cookie', [`refreshToken=${legacyRefresh0}`]);
       expect(rot1Res.status).toBe(200);
       const rot1Cookies = rot1Res.headers['set-cookie'];
-      const refresh1 = rot1Cookies.find(c => c.startsWith('refreshToken='));
-      const access1 = rot1Cookies.find(c => c.startsWith('token='));
+      const refresh1 = rot1Cookies.find((c) => c.startsWith('refreshToken='));
+      const access1 = rot1Cookies.find((c) => c.startsWith('token='));
       expect((await request(app).get('/api/auth/me').set('Cookie', [access1])).status).toBe(200);
 
       // Rotation 2: preserves legacy-<hash0> session family
-      const rot2Res = await request(app)
-        .post('/api/auth/refresh')
-        .set('Cookie', [refresh1]);
+      const rot2Res = await request(app).post('/api/auth/refresh').set('Cookie', [refresh1]);
       expect(rot2Res.status).toBe(200);
       const rot2Cookies = rot2Res.headers['set-cookie'];
-      const refresh2 = rot2Cookies.find(c => c.startsWith('refreshToken='));
-      const access2 = rot2Cookies.find(c => c.startsWith('token='));
+      const refresh2 = rot2Cookies.find((c) => c.startsWith('refreshToken='));
+      const access2 = rot2Cookies.find((c) => c.startsWith('token='));
       expect((await request(app).get('/api/auth/me').set('Cookie', [access2])).status).toBe(200);
 
       // Rotation 3: preserves legacy-<hash0> session family
-      const rot3Res = await request(app)
-        .post('/api/auth/refresh')
-        .set('Cookie', [refresh2]);
+      const rot3Res = await request(app).post('/api/auth/refresh').set('Cookie', [refresh2]);
       expect(rot3Res.status).toBe(200);
       const rot3Cookies = rot3Res.headers['set-cookie'];
-      const refresh3 = rot3Cookies.find(c => c.startsWith('refreshToken='));
-      const access3 = rot3Cookies.find(c => c.startsWith('token='));
+      const refresh3 = rot3Cookies.find((c) => c.startsWith('refreshToken='));
+      const access3 = rot3Cookies.find((c) => c.startsWith('token='));
 
       // Replay of consumed refresh1 or refresh2 is rejected
-      expect((await request(app).post('/api/auth/refresh').set('Cookie', [refresh1])).status).toBe(401);
-      expect((await request(app).post('/api/auth/refresh').set('Cookie', [refresh2])).status).toBe(401);
+      expect((await request(app).post('/api/auth/refresh').set('Cookie', [refresh1])).status).toBe(
+        401
+      );
+      expect((await request(app).post('/api/auth/refresh').set('Cookie', [refresh2])).status).toBe(
+        401
+      );
 
       // Access succeeds with current token
       expect((await request(app).get('/api/auth/me').set('Cookie', [access3])).status).toBe(200);
 
       // Logout with current token revokes entire legacy family
-      const logoutRes = await request(app)
-        .post('/api/auth/logout')
-        .set('Cookie', [refresh3]);
+      const logoutRes = await request(app).post('/api/auth/logout').set('Cookie', [refresh3]);
       expect(logoutRes.status).toBe(200);
 
       // Verify DB: 0 refresh tokens and 0 rotated tokens remain
@@ -855,7 +883,9 @@ describe('Auth Controller', () => {
       expect((await request(app).get('/api/auth/me').set('Cookie', [access1])).status).toBe(401);
       expect((await request(app).get('/api/auth/me').set('Cookie', [access2])).status).toBe(401);
       expect((await request(app).get('/api/auth/me').set('Cookie', [access3])).status).toBe(401);
-      expect((await request(app).post('/api/auth/refresh').set('Cookie', [refresh3])).status).toBe(401);
+      expect((await request(app).post('/api/auth/refresh').set('Cookie', [refresh3])).status).toBe(
+        401
+      );
     });
 
     it('verifies legacy access token scenarios across protect and optionalAuth', async () => {
@@ -867,11 +897,21 @@ describe('Auth Controller', () => {
       });
 
       const nowSec = Math.floor(Date.now() / 1000);
-      const legacyRefresh = jwt.sign({ id: user._id, iat: nowSec - 200 }, process.env.JWT_REFRESH_SECRET, { expiresIn: '7d' });
+      const legacyRefresh = jwt.sign(
+        { id: user._id, iat: nowSec - 200 },
+        process.env.JWT_REFRESH_SECRET,
+        { expiresIn: '7d' }
+      );
       const legacyHash = crypto.createHash('sha256').update(legacyRefresh).digest('hex');
-      const legacyAccess = jwt.sign({ id: user._id, iat: nowSec - 200 }, process.env.JWT_SECRET, { expiresIn: '15m' });
+      const legacyAccess = jwt.sign({ id: user._id, iat: nowSec - 200 }, process.env.JWT_SECRET, {
+        expiresIn: '15m'
+      });
 
-      const otherRefresh = jwt.sign({ id: otherUser._id, iat: nowSec - 100 }, process.env.JWT_REFRESH_SECRET, { expiresIn: '7d' });
+      const otherRefresh = jwt.sign(
+        { id: otherUser._id, iat: nowSec - 100 },
+        process.env.JWT_REFRESH_SECRET,
+        { expiresIn: '7d' }
+      );
       const otherHash = crypto.createHash('sha256').update(otherRefresh).digest('hex');
       otherUser.refreshTokens = [otherHash];
       await otherUser.save();
@@ -880,16 +920,23 @@ describe('Auth Controller', () => {
       await user.save();
 
       // Case 1: Valid legacy access token with active refresh cookie
-      const res1 = await request(app).get('/api/auth/me').set('Cookie', [`token=${legacyAccess}`, `refreshToken=${legacyRefresh}`]);
+      const res1 = await request(app)
+        .get('/api/auth/me')
+        .set('Cookie', [`token=${legacyAccess}`, `refreshToken=${legacyRefresh}`]);
       expect(res1.status).toBe(200);
 
-      const reqOpt1 = { cookies: { token: legacyAccess, refreshToken: legacyRefresh }, headers: {} };
+      const reqOpt1 = {
+        cookies: { token: legacyAccess, refreshToken: legacyRefresh },
+        headers: {}
+      };
       await optionalAuth(reqOpt1, {}, () => {});
       expect(reqOpt1.user).toBeDefined();
       expect(reqOpt1.user._id.toString()).toBe(user._id.toString());
 
       // Case 3: Valid legacy access token with missing refresh cookie before logout
-      const res3 = await request(app).get('/api/auth/me').set('Cookie', [`token=${legacyAccess}`]);
+      const res3 = await request(app)
+        .get('/api/auth/me')
+        .set('Cookie', [`token=${legacyAccess}`]);
       expect(res3.status).toBe(200);
 
       const reqOpt3 = { cookies: { token: legacyAccess }, headers: {} };
@@ -897,7 +944,9 @@ describe('Auth Controller', () => {
       expect(reqOpt3.user).toBeDefined();
 
       // Case 4: Valid legacy access token with refresh cookie of another user
-      const res4 = await request(app).get('/api/auth/me').set('Cookie', [`token=${legacyAccess}`, `refreshToken=${otherRefresh}`]);
+      const res4 = await request(app)
+        .get('/api/auth/me')
+        .set('Cookie', [`token=${legacyAccess}`, `refreshToken=${otherRefresh}`]);
       expect(res4.status).toBe(401);
       expect(res4.body.message).toContain('session has been revoked');
 
@@ -906,16 +955,23 @@ describe('Auth Controller', () => {
       expect(reqOpt4.user).toBeNull();
 
       // Case 6: Malformed, expired, or invalid refresh cookies
-      const res6 = await request(app).get('/api/auth/me').set('Cookie', [`token=${legacyAccess}`, 'refreshToken=invalid_garbage_token']);
+      const res6 = await request(app)
+        .get('/api/auth/me')
+        .set('Cookie', [`token=${legacyAccess}`, 'refreshToken=invalid_garbage_token']);
       expect(res6.status).toBe(401);
       expect(res6.body.message).toContain('session has been revoked');
 
-      const reqOpt6 = { cookies: { token: legacyAccess, refreshToken: 'invalid_garbage_token' }, headers: {} };
+      const reqOpt6 = {
+        cookies: { token: legacyAccess, refreshToken: 'invalid_garbage_token' },
+        headers: {}
+      };
       await optionalAuth(reqOpt6, {}, () => {});
       expect(reqOpt6.user).toBeNull();
 
       // Case 7: Legacy access token via supported Bearer-token flow
-      const res7Before = await request(app).get('/api/auth/me').set('Authorization', `Bearer ${legacyAccess}`);
+      const res7Before = await request(app)
+        .get('/api/auth/me')
+        .set('Authorization', `Bearer ${legacyAccess}`);
       expect(res7Before.status).toBe(200);
 
       const reqOpt7Before = { cookies: {}, headers: { authorization: `Bearer ${legacyAccess}` } };
@@ -923,19 +979,28 @@ describe('Auth Controller', () => {
       expect(reqOpt7Before.user).toBeDefined();
 
       // Logout session
-      await request(app).post('/api/auth/logout').set('Cookie', [`refreshToken=${legacyRefresh}`]);
+      await request(app)
+        .post('/api/auth/logout')
+        .set('Cookie', [`refreshToken=${legacyRefresh}`]);
 
       // Case 2: Valid legacy access token with revoked refresh cookie
-      const res2 = await request(app).get('/api/auth/me').set('Cookie', [`token=${legacyAccess}`, `refreshToken=${legacyRefresh}`]);
+      const res2 = await request(app)
+        .get('/api/auth/me')
+        .set('Cookie', [`token=${legacyAccess}`, `refreshToken=${legacyRefresh}`]);
       expect(res2.status).toBe(401);
       expect(res2.body.message).toContain('session has been revoked');
 
-      const reqOpt2 = { cookies: { token: legacyAccess, refreshToken: legacyRefresh }, headers: {} };
+      const reqOpt2 = {
+        cookies: { token: legacyAccess, refreshToken: legacyRefresh },
+        headers: {}
+      };
       await optionalAuth(reqOpt2, {}, () => {});
       expect(reqOpt2.user).toBeNull();
 
       // Case 5: Valid legacy access token after logout when refresh cookie is absent
-      const res5 = await request(app).get('/api/auth/me').set('Cookie', [`token=${legacyAccess}`]);
+      const res5 = await request(app)
+        .get('/api/auth/me')
+        .set('Cookie', [`token=${legacyAccess}`]);
       expect(res5.status).toBe(401);
       expect(res5.body.message).toContain('session has been revoked');
 
@@ -944,7 +1009,9 @@ describe('Auth Controller', () => {
       expect(reqOpt5.user).toBeNull();
 
       // Case 7 after logout (Bearer header)
-      const res7After = await request(app).get('/api/auth/me').set('Authorization', `Bearer ${legacyAccess}`);
+      const res7After = await request(app)
+        .get('/api/auth/me')
+        .set('Authorization', `Bearer ${legacyAccess}`);
       expect(res7After.status).toBe(401);
       expect(res7After.body.message).toContain('session has been revoked');
 
@@ -959,21 +1026,29 @@ describe('Auth Controller', () => {
       const nowSec = Math.floor(Date.now() / 1000);
 
       // Token issued 10 seconds before logout
-      const tokenBefore = jwt.sign({ id: user._id, iat: nowSec - 10 }, process.env.JWT_SECRET, { expiresIn: '15m' });
+      const tokenBefore = jwt.sign({ id: user._id, iat: nowSec - 10 }, process.env.JWT_SECRET, {
+        expiresIn: '15m'
+      });
       // Token issued in the same second as logout
-      const tokenSameSec = jwt.sign({ id: user._id, iat: nowSec }, process.env.JWT_SECRET, { expiresIn: '15m' });
+      const tokenSameSec = jwt.sign({ id: user._id, iat: nowSec }, process.env.JWT_SECRET, {
+        expiresIn: '15m'
+      });
 
       // Simulate logout occurring at nowSec with milliseconds
       user.lastLogoutAt = new Date(nowSec * 1000 + 500);
       await user.save();
 
       // Token issued before the logout second is strictly rejected
-      const resBefore = await request(app).get('/api/auth/me').set('Authorization', `Bearer ${tokenBefore}`);
+      const resBefore = await request(app)
+        .get('/api/auth/me')
+        .set('Authorization', `Bearer ${tokenBefore}`);
       expect(resBefore.status).toBe(401);
       expect(resBefore.body.message).toContain('session has been revoked');
 
       // Token issued in the same second as logout is also revoked (<= boundary)
-      const resSameSec = await request(app).get('/api/auth/me').set('Authorization', `Bearer ${tokenSameSec}`);
+      const resSameSec = await request(app)
+        .get('/api/auth/me')
+        .set('Authorization', `Bearer ${tokenSameSec}`);
       expect(resSameSec.status).toBe(401);
       expect(resSameSec.body.message).toContain('session has been revoked');
 
@@ -982,14 +1057,22 @@ describe('Auth Controller', () => {
       expect(reqOptSameSec.user).toBeNull();
 
       // Token issued after logout (e.g. nowSec + 1) succeeds
-      const tokenAfter = jwt.sign({ id: user._id, iat: nowSec + 1 }, process.env.JWT_SECRET, { expiresIn: '15m' });
-      const resAfter = await request(app).get('/api/auth/me').set('Authorization', `Bearer ${tokenAfter}`);
+      const tokenAfter = jwt.sign({ id: user._id, iat: nowSec + 1 }, process.env.JWT_SECRET, {
+        expiresIn: '15m'
+      });
+      const resAfter = await request(app)
+        .get('/api/auth/me')
+        .set('Authorization', `Bearer ${tokenAfter}`);
       expect(resAfter.status).toBe(200);
 
       // Immediate subsequent modern login in the same second succeeds without being affected by lastLogoutAt
-      const modernLogin = await request(app).post('/api/auth/login').send({ email: testUser.email, password: testUser.password });
+      const modernLogin = await request(app)
+        .post('/api/auth/login')
+        .send({ email: testUser.email, password: testUser.password });
       expect(modernLogin.status).toBe(200);
-      const modernAccessCookie = modernLogin.headers['set-cookie'].find(c => c.startsWith('token='));
+      const modernAccessCookie = modernLogin.headers['set-cookie'].find((c) =>
+        c.startsWith('token=')
+      );
       const resModern = await request(app).get('/api/auth/me').set('Cookie', [modernAccessCookie]);
       expect(resModern.status).toBe(200);
     });
@@ -997,77 +1080,141 @@ describe('Auth Controller', () => {
     it('exhaustively verifies Bearer-token logout flows, error resilience, and session isolation', async () => {
       // 1. Setup User with two active sessions (Session 1 and Session 2)
       await request(app).post('/api/auth/register').send(testUser);
-      const login1 = await request(app).post('/api/auth/login').send({ email: testUser.email, password: testUser.password });
-      const s1Access = login1.headers['set-cookie'].find(c => c.startsWith('token=')).split(';')[0].split('=')[1];
-      const s1Refresh = login1.headers['set-cookie'].find(c => c.startsWith('refreshToken=')).split(';')[0].split('=')[1];
+      const login1 = await request(app)
+        .post('/api/auth/login')
+        .send({ email: testUser.email, password: testUser.password });
+      const s1Access = login1.headers['set-cookie']
+        .find((c) => c.startsWith('token='))
+        .split(';')[0]
+        .split('=')[1];
+      const s1Refresh = login1.headers['set-cookie']
+        .find((c) => c.startsWith('refreshToken='))
+        .split(';')[0]
+        .split('=')[1];
 
-      const login2 = await request(app).post('/api/auth/login').send({ email: testUser.email, password: testUser.password });
-      const s2Access = login2.headers['set-cookie'].find(c => c.startsWith('token=')).split(';')[0].split('=')[1];
-      const s2Refresh = login2.headers['set-cookie'].find(c => c.startsWith('refreshToken=')).split(';')[0].split('=')[1];
+      const login2 = await request(app)
+        .post('/api/auth/login')
+        .send({ email: testUser.email, password: testUser.password });
+      const s2Access = login2.headers['set-cookie']
+        .find((c) => c.startsWith('token='))
+        .split(';')[0]
+        .split('=')[1];
+      const s2Refresh = login2.headers['set-cookie']
+        .find((c) => c.startsWith('refreshToken='))
+        .split(';')[0]
+        .split('=')[1];
 
       // Setup Another User (User 2)
       const user2Data = { name: 'User 2', email: 'user2@example.com', password: 'password123' };
       const regUser2 = await request(app).post('/api/auth/register').send(user2Data);
-      const u2Access = regUser2.headers['set-cookie'].find(c => c.startsWith('token=')).split(';')[0].split('=')[1];
+      const u2Access = regUser2.headers['set-cookie']
+        .find((c) => c.startsWith('token='))
+        .split(';')[0]
+        .split('=')[1];
 
       // Both User 1 sessions and User 2 session succeed
-      expect((await request(app).get('/api/auth/me').set('Authorization', `Bearer ${s1Access}`)).status).toBe(200);
-      expect((await request(app).get('/api/auth/me').set('Authorization', `Bearer ${s2Access}`)).status).toBe(200);
-      expect((await request(app).get('/api/auth/me').set('Authorization', `Bearer ${u2Access}`)).status).toBe(200);
+      expect(
+        (await request(app).get('/api/auth/me').set('Authorization', `Bearer ${s1Access}`)).status
+      ).toBe(200);
+      expect(
+        (await request(app).get('/api/auth/me').set('Authorization', `Bearer ${s2Access}`)).status
+      ).toBe(200);
+      expect(
+        (await request(app).get('/api/auth/me').set('Authorization', `Bearer ${u2Access}`)).status
+      ).toBe(200);
 
       // 2. Logout with malformed Bearer header returns 200 gracefully and does not invalidate active sessions
-      const malformedRes = await request(app).post('/api/auth/logout').set('Authorization', 'Bearer not-a-valid-jwt');
+      const malformedRes = await request(app)
+        .post('/api/auth/logout')
+        .set('Authorization', 'Bearer not-a-valid-jwt');
       expect(malformedRes.status).toBe(200);
-      expect((await request(app).get('/api/auth/me').set('Authorization', `Bearer ${s1Access}`)).status).toBe(200);
+      expect(
+        (await request(app).get('/api/auth/me').set('Authorization', `Bearer ${s1Access}`)).status
+      ).toBe(200);
 
       // 3. Logout with an expired token does not affect active sessions
-      const expiredToken = jwt.sign({ id: '650000000000000000000001', exp: Math.floor(Date.now() / 1000) - 60 }, process.env.JWT_SECRET);
-      expect((await request(app).post('/api/auth/logout').set('Authorization', `Bearer ${expiredToken}`)).status).toBe(200);
-      expect((await request(app).get('/api/auth/me').set('Authorization', `Bearer ${s1Access}`)).status).toBe(200);
+      const expiredToken = jwt.sign(
+        { id: '650000000000000000000001', exp: Math.floor(Date.now() / 1000) - 60 },
+        process.env.JWT_SECRET
+      );
+      expect(
+        (await request(app).post('/api/auth/logout').set('Authorization', `Bearer ${expiredToken}`))
+          .status
+      ).toBe(200);
+      expect(
+        (await request(app).get('/api/auth/me').set('Authorization', `Bearer ${s1Access}`)).status
+      ).toBe(200);
 
       // Logout with User 2's token revokes User 2, not User 1
-      expect((await request(app).post('/api/auth/logout').set('Authorization', `Bearer ${u2Access}`)).status).toBe(200);
-      expect((await request(app).get('/api/auth/me').set('Authorization', `Bearer ${u2Access}`)).status).toBe(401);
-      expect((await request(app).get('/api/auth/me').set('Authorization', `Bearer ${s1Access}`)).status).toBe(200);
+      expect(
+        (await request(app).post('/api/auth/logout').set('Authorization', `Bearer ${u2Access}`))
+          .status
+      ).toBe(200);
+      expect(
+        (await request(app).get('/api/auth/me').set('Authorization', `Bearer ${u2Access}`)).status
+      ).toBe(401);
+      expect(
+        (await request(app).get('/api/auth/me').set('Authorization', `Bearer ${s1Access}`)).status
+      ).toBe(200);
 
       // 4. Logout Session 1 via Bearer access token
-      const logoutS1 = await request(app).post('/api/auth/logout').set('Authorization', `Bearer ${s1Access}`);
+      const logoutS1 = await request(app)
+        .post('/api/auth/logout')
+        .set('Authorization', `Bearer ${s1Access}`);
       expect(logoutS1.status).toBe(200);
 
       // Session 1 access token is revoked
-      const s1AccessAfter = await request(app).get('/api/auth/me').set('Authorization', `Bearer ${s1Access}`);
+      const s1AccessAfter = await request(app)
+        .get('/api/auth/me')
+        .set('Authorization', `Bearer ${s1Access}`);
       expect(s1AccessAfter.status).toBe(401);
       expect(s1AccessAfter.body.message).toContain('session has been revoked');
 
       // Session 1 refresh token is revoked
-      const s1RefreshAfter = await request(app).post('/api/auth/refresh').set('Cookie', [`refreshToken=${s1Refresh}`]);
+      const s1RefreshAfter = await request(app)
+        .post('/api/auth/refresh')
+        .set('Cookie', [`refreshToken=${s1Refresh}`]);
       expect(s1RefreshAfter.status).toBe(401);
       expect(s1RefreshAfter.body.message).toContain('Invalid or revoked refresh token');
 
       // Session 2 remains active and authorized
-      const s2AccessAfter = await request(app).get('/api/auth/me').set('Authorization', `Bearer ${s2Access}`);
+      const s2AccessAfter = await request(app)
+        .get('/api/auth/me')
+        .set('Authorization', `Bearer ${s2Access}`);
       expect(s2AccessAfter.status).toBe(200);
       expect(s2AccessAfter.body.data.email).toBe(testUser.email);
 
-      const s2RefreshAfter = await request(app).post('/api/auth/refresh').set('Cookie', [`refreshToken=${s2Refresh}`]);
+      const s2RefreshAfter = await request(app)
+        .post('/api/auth/refresh')
+        .set('Cookie', [`refreshToken=${s2Refresh}`]);
       expect(s2RefreshAfter.status).toBe(200);
 
       // 5. Legacy access token logout via Bearer does not pull unrelated refresh tokens
       const nowSec = Math.floor(Date.now() / 1000);
       const dbUser = await User.findOne({ email: testUser.email });
-      const legacyRefresh = jwt.sign({ id: dbUser._id, iat: nowSec - 10 }, process.env.JWT_REFRESH_SECRET, { expiresIn: '7d' });
+      const legacyRefresh = jwt.sign(
+        { id: dbUser._id, iat: nowSec - 10 },
+        process.env.JWT_REFRESH_SECRET,
+        { expiresIn: '7d' }
+      );
       const legacyHash = crypto.createHash('sha256').update(legacyRefresh).digest('hex');
-      const legacyAccess = jwt.sign({ id: dbUser._id, iat: nowSec - 10 }, process.env.JWT_SECRET, { expiresIn: '15m' });
+      const legacyAccess = jwt.sign({ id: dbUser._id, iat: nowSec - 10 }, process.env.JWT_SECRET, {
+        expiresIn: '15m'
+      });
 
       dbUser.refreshTokens.push(legacyHash);
       await dbUser.save();
 
       // Logout with legacy access token
-      const legacyLogoutRes = await request(app).post('/api/auth/logout').set('Authorization', `Bearer ${legacyAccess}`);
+      const legacyLogoutRes = await request(app)
+        .post('/api/auth/logout')
+        .set('Authorization', `Bearer ${legacyAccess}`);
       expect(legacyLogoutRes.status).toBe(200);
 
       // Legacy access token is revoked via lastLogoutAt
-      const legacyAccessAfter = await request(app).get('/api/auth/me').set('Authorization', `Bearer ${legacyAccess}`);
+      const legacyAccessAfter = await request(app)
+        .get('/api/auth/me')
+        .set('Authorization', `Bearer ${legacyAccess}`);
       expect(legacyAccessAfter.status).toBe(401);
 
       // But legacy refresh token was NOT accidentally deleted from DB because access token hash is not a refresh token hash
@@ -1173,9 +1320,13 @@ describe('Auth Controller', () => {
 
       dbUser = await User.findById(user._id);
       // Expired session family was revoked
-      expect(dbUser.refreshTokens.some(entry => entry.startsWith(`${expiredSessionId}:`))).toBe(false);
+      expect(dbUser.refreshTokens.some((entry) => entry.startsWith(`${expiredSessionId}:`))).toBe(
+        false
+      );
       // Valid session family is PRESERVED!
-      expect(dbUser.refreshTokens.some(entry => entry.startsWith(`${validSessionId}:`))).toBe(true);
+      expect(dbUser.refreshTokens.some((entry) => entry.startsWith(`${validSessionId}:`))).toBe(
+        true
+      );
       expect(dbUser.lastLogoutAt).toBeDefined();
 
       // Valid session remains authorized
@@ -1200,13 +1351,19 @@ describe('Auth Controller', () => {
       expect(finalAccessRes.status).toBe(401);
 
       // F. Valid unexpired refresh token: also cleanly logs out
-      const user2 = await User.create({ name: 'User 2', email: 'u2@test.com', password: 'password123' });
+      const user2 = await User.create({
+        name: 'User 2',
+        email: 'u2@test.com',
+        password: 'password123'
+      });
       const u2Refresh = jwt.sign(
         { id: user2._id, sessionId: 'sess-u2', jti: crypto.randomUUID() },
         process.env.JWT_REFRESH_SECRET,
         { expiresIn: '7d' }
       );
-      user2.refreshTokens = [`sess-u2:${crypto.createHash('sha256').update(u2Refresh).digest('hex')}`];
+      user2.refreshTokens = [
+        `sess-u2:${crypto.createHash('sha256').update(u2Refresh).digest('hex')}`
+      ];
       await user2.save();
 
       const refreshLogoutRes = await request(app)
@@ -1234,9 +1391,7 @@ describe('Auth Controller', () => {
       const successorCookies = refreshRes1.headers['set-cookie'];
 
       // Immediate replay of Token 1 (within 2-second grace window)
-      const replayRes = await request(app)
-        .post('/api/auth/refresh')
-        .set('Cookie', initialCookies);
+      const replayRes = await request(app).post('/api/auth/refresh').set('Cookie', initialCookies);
       expect(replayRes.status).toBe(401);
       expect(replayRes.body.message).toContain('Invalid or revoked refresh token');
 
@@ -1273,9 +1428,7 @@ describe('Auth Controller', () => {
       );
 
       // Replay stale initial token (Token 1)
-      const replayRes = await request(app)
-        .post('/api/auth/refresh')
-        .set('Cookie', initialCookies);
+      const replayRes = await request(app).post('/api/auth/refresh').set('Cookie', initialCookies);
       expect(replayRes.status).toBe(401);
       expect(replayRes.body.message).toContain('Invalid or revoked refresh token');
 
@@ -1312,9 +1465,7 @@ describe('Auth Controller', () => {
       const cookiesB = loginB.headers['set-cookie'];
 
       // Rotate Device A (A1 -> A2)
-      const rotateA = await request(app)
-        .post('/api/auth/refresh')
-        .set('Cookie', cookiesA);
+      const rotateA = await request(app).post('/api/auth/refresh').set('Cookie', cookiesA);
       expect(rotateA.status).toBe(200);
 
       // Age rotated tokens beyond 10-second grace window
@@ -1324,21 +1475,15 @@ describe('Auth Controller', () => {
       );
 
       // Replay Device A stale token (A1)
-      const replayA = await request(app)
-        .post('/api/auth/refresh')
-        .set('Cookie', cookiesA);
+      const replayA = await request(app).post('/api/auth/refresh').set('Cookie', cookiesA);
       expect(replayA.status).toBe(401);
 
       // Device B session remains completely valid
-      const refreshB = await request(app)
-        .post('/api/auth/refresh')
-        .set('Cookie', cookiesB);
+      const refreshB = await request(app).post('/api/auth/refresh').set('Cookie', cookiesB);
       expect(refreshB.status).toBe(200);
 
       // Device B access token works for protected routes
-      const meB = await request(app)
-        .get('/api/auth/me')
-        .set('Cookie', cookiesB);
+      const meB = await request(app).get('/api/auth/me').set('Cookie', cookiesB);
       expect(meB.status).toBe(200);
       expect(meB.body.data.email).toBe('multisession@example.com');
     });
@@ -1369,10 +1514,10 @@ describe('Auth Controller', () => {
     });
 
     it('returns generic message and clears token if email delivery fails', async () => {
-      const emailSpy = vi.spyOn(EmailService.prototype, 'sendEmail').mockRejectedValueOnce(
-        new Error('Delivery service timeout')
-      );
-      const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const emailSpy = vi
+        .spyOn(EmailService.prototype, 'sendEmail')
+        .mockRejectedValueOnce(new Error('Delivery service timeout'));
+      const loggerErrorSpy = vi.spyOn(logger, 'error');
 
       const res = await request(app)
         .post('/api/auth/forgotpassword')
@@ -1385,23 +1530,28 @@ describe('Auth Controller', () => {
       expect(user.resetPasswordToken).toBeUndefined();
       expect(user.resetPasswordExpire).toBeUndefined();
 
-      expect(consoleErrorSpy).toHaveBeenCalledWith(
+      expect(loggerErrorSpy).toHaveBeenCalledWith(
         'Email delivery failed during password reset:',
-        'Delivery service timeout'
+        expect.objectContaining({
+          event: 'auth.password_reset_email_failed',
+          error: 'Delivery service timeout'
+        })
       );
 
       emailSpy.mockRestore();
-      consoleErrorSpy.mockRestore();
+      loggerErrorSpy.mockRestore();
     });
 
     it('returns generic message and handles cleanup database errors gracefully on delivery failure', async () => {
-      const emailSpy = vi.spyOn(EmailService.prototype, 'sendEmail').mockRejectedValueOnce(
-        new Error('Delivery failure to target@example.com with key re_1234567890123456')
-      );
-      const updateOneSpy = vi.spyOn(User, 'updateOne').mockRejectedValueOnce(
-        new Error('Database write failure')
-      );
-      const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const emailSpy = vi
+        .spyOn(EmailService.prototype, 'sendEmail')
+        .mockRejectedValueOnce(
+          new Error('Delivery failure to target@example.com with key re_1234567890123456')
+        );
+      const updateOneSpy = vi
+        .spyOn(User, 'updateOne')
+        .mockRejectedValueOnce(new Error('Database write failure'));
+      const loggerErrorSpy = vi.spyOn(logger, 'error');
 
       const res = await request(app)
         .post('/api/auth/forgotpassword')
@@ -1410,9 +1560,12 @@ describe('Auth Controller', () => {
       expect(res.status).toBe(200);
       expect(res.body.message).toContain('password reset link has been sent');
 
-      const loggedErrors = consoleErrorSpy.mock.calls.map(c => c.join(' ')).join('\n');
+      const loggedErrors = loggerErrorSpy.mock.calls
+        .map((c) => `${c[0]} ${JSON.stringify(c[1] || '')}`)
+        .join('\n');
       expect(loggedErrors).toContain('Email delivery failed during password reset:');
-      expect(loggedErrors).toContain('Failed to cleanup reset token after email failure: Database write failure');
+      expect(loggedErrors).toContain('Failed to cleanup reset token after email failure:');
+      expect(loggedErrors).toContain('Database write failure');
       // Confirm sensitive data was sanitized
       expect(loggedErrors).not.toContain('target@example.com');
       expect(loggedErrors).not.toContain('re_1234567890123456');
@@ -1421,12 +1574,12 @@ describe('Auth Controller', () => {
 
       emailSpy.mockRestore();
       updateOneSpy.mockRestore();
-      consoleErrorSpy.mockRestore();
+      loggerErrorSpy.mockRestore();
     });
 
     it('does not clobber a newer concurrent reset token if an earlier email delivery fails', async () => {
       let r1Started;
-      const r1StartedPromise = new Promise(resolve => {
+      const r1StartedPromise = new Promise((resolve) => {
         r1Started = resolve;
       });
 
@@ -1448,9 +1601,7 @@ describe('Auth Controller', () => {
 
       // Launch Request 1 execution in background
       const r1Execution = (async () => {
-        return request(app)
-          .post('/api/auth/forgotpassword')
-          .send({ email: testUser.email });
+        return request(app).post('/api/auth/forgotpassword').send({ email: testUser.email });
       })();
 
       // Deterministically wait until Request 1 has saved its token and entered email sending
@@ -1526,9 +1677,7 @@ describe('Auth Controller', () => {
       });
       const preResetCookies = regRes.headers['set-cookie'];
 
-      const meBefore = await request(app)
-        .get('/api/auth/me')
-        .set('Cookie', preResetCookies);
+      const meBefore = await request(app).get('/api/auth/me').set('Cookie', preResetCookies);
       expect(meBefore.status).toBe(200);
 
       const user = await User.findOne({ email: 'revoke-reset@example.com' });
@@ -1540,16 +1689,12 @@ describe('Auth Controller', () => {
         .send({ password: 'brandnewpassword123' });
       expect(resetRes.status).toBe(200);
 
-      const meAfter = await request(app)
-        .get('/api/auth/me')
-        .set('Cookie', preResetCookies);
+      const meAfter = await request(app).get('/api/auth/me').set('Cookie', preResetCookies);
       expect(meAfter.status).toBe(401);
       expect(meAfter.body.message).toContain('session has been revoked');
 
       const postResetCookies = resetRes.headers['set-cookie'];
-      const meNew = await request(app)
-        .get('/api/auth/me')
-        .set('Cookie', postResetCookies);
+      const meNew = await request(app).get('/api/auth/me').set('Cookie', postResetCookies);
       expect(meNew.status).toBe(200);
     });
 
@@ -1702,7 +1847,9 @@ describe('Auth Controller', () => {
       expect(sanitizeRequestUrl(url1)).toBe('/api/auth/resetpassword?token=[REDACTED]');
 
       const url2 = '/api/auth/resetpassword?foo=bar&token=secrettoken123&baz=1';
-      expect(sanitizeRequestUrl(url2)).toBe('/api/auth/resetpassword?foo=bar&token=[REDACTED]&baz=1');
+      expect(sanitizeRequestUrl(url2)).toBe(
+        '/api/auth/resetpassword?foo=bar&token=[REDACTED]&baz=1'
+      );
 
       const url3 = '/api/auth/resetpassword?resetToken=secrettoken123';
       expect(sanitizeRequestUrl(url3)).toBe('/api/auth/resetpassword?resetToken=[REDACTED]');
@@ -1715,7 +1862,9 @@ describe('Auth Controller', () => {
       let nextError = null;
       const req = { originalUrl: '/api/auth/resetpassword/super-secret-token-value-xyz' };
       const res = { status: vi.fn() };
-      const next = (err) => { nextError = err; };
+      const next = (err) => {
+        nextError = err;
+      };
 
       notFound(req, res, next);
 
@@ -1727,7 +1876,9 @@ describe('Auth Controller', () => {
 
       let hyphenError = null;
       const reqHyphen = { originalUrl: '/api/auth/reset-password/another-secret-token' };
-      notFound(reqHyphen, res, (err) => { hyphenError = err; });
+      notFound(reqHyphen, res, (err) => {
+        hyphenError = err;
+      });
       expect(hyphenError.message).not.toContain('another-secret-token');
       expect(hyphenError.message).toContain('/reset-password/[REDACTED]');
     });
@@ -1796,6 +1947,37 @@ describe('Auth Controller', () => {
       }
     });
 
+    it('enforces secure: true in staging environment for HTTPS security', () => {
+      const origEnv = process.env.NODE_ENV;
+      const origSameSite = process.env.COOKIE_SAMESITE;
+      try {
+        process.env.NODE_ENV = 'staging';
+        process.env.COOKIE_SAMESITE = 'lax';
+        const options = getBaseCookieOptions();
+        expect(options.secure).toBe(true);
+        expect(options.sameSite).toBe('lax');
+        expect(options.httpOnly).toBe(true);
+      } finally {
+        process.env.NODE_ENV = origEnv;
+        process.env.COOKIE_SAMESITE = origSameSite;
+      }
+    });
+
+    it('permits secure: false in development environment for local HTTP testing', () => {
+      const origEnv = process.env.NODE_ENV;
+      const origSameSite = process.env.COOKIE_SAMESITE;
+      try {
+        process.env.NODE_ENV = 'development';
+        process.env.COOKIE_SAMESITE = 'lax';
+        const options = getBaseCookieOptions();
+        expect(options.secure).toBe(false);
+        expect(options.sameSite).toBe('lax');
+      } finally {
+        process.env.NODE_ENV = origEnv;
+        process.env.COOKIE_SAMESITE = origSameSite;
+      }
+    });
+
     it('sets matching SameSite=Lax attributes on login and logout cookies', async () => {
       await request(app).post('/api/auth/register').send(testUser);
 
@@ -1805,14 +1987,668 @@ describe('Auth Controller', () => {
 
       const loginCookies = loginRes.headers['set-cookie'];
       expect(loginCookies).toBeDefined();
-      expect(loginCookies.some(c => c.includes('SameSite=Lax'))).toBe(true);
+      expect(loginCookies.some((c) => c.includes('SameSite=Lax'))).toBe(true);
 
       const logoutRes = await request(app).post('/api/auth/logout');
       const logoutCookies = logoutRes.headers['set-cookie'];
       expect(logoutCookies).toBeDefined();
-      expect(logoutCookies.some(c => c.includes('SameSite=Lax'))).toBe(true);
-      expect(logoutCookies.some(c => c.includes('Path=/'))).toBe(true);
-      expect(logoutCookies.some(c => c.includes('HttpOnly'))).toBe(true);
+      expect(logoutCookies.some((c) => c.includes('SameSite=Lax'))).toBe(true);
+      expect(logoutCookies.some((c) => c.includes('Path=/'))).toBe(true);
+      expect(logoutCookies.some((c) => c.includes('HttpOnly'))).toBe(true);
+    });
+
+    it('Stage 4.3.5 Batch A: scopes refreshToken cookie to Path=/api/auth on login and logout', async () => {
+      await request(app).post('/api/auth/register').send({
+        name: 'Cookie Path User',
+        email: 'cookiepath@example.com',
+        password: 'password123'
+      });
+
+      const loginRes = await request(app)
+        .post('/api/auth/login')
+        .send({ email: 'cookiepath@example.com', password: 'password123' });
+
+      const loginCookies = loginRes.headers['set-cookie'];
+      expect(loginCookies).toBeDefined();
+      const loginRefreshCookie = loginCookies.find((c) => c.startsWith('refreshToken='));
+      const loginAccessCookie = loginCookies.find((c) => c.startsWith('token='));
+
+      expect(loginRefreshCookie).toBeDefined();
+      expect(loginRefreshCookie).toContain('Path=/api/auth');
+      expect(loginAccessCookie).toBeDefined();
+      expect(loginAccessCookie).toContain('Path=/');
+
+      const logoutRes = await request(app).post('/api/auth/logout');
+      const logoutCookies = logoutRes.headers['set-cookie'];
+      expect(logoutCookies).toBeDefined();
+      const logoutRefreshCookie = logoutCookies.find((c) => c.startsWith('refreshToken='));
+      const logoutAccessCookie = logoutCookies.find((c) => c.startsWith('token='));
+
+      expect(logoutRefreshCookie).toBeDefined();
+      expect(logoutRefreshCookie).toContain('Path=/api/auth');
+      expect(logoutAccessCookie).toBeDefined();
+      expect(logoutAccessCookie).toContain('Path=/');
+    });
+  });
+
+  // =========================================================================
+  // Stage 3.3: Progressive Login Protection and Authentication Integration
+  // =========================================================================
+  describe('Stage 3.3: Progressive Login Protection and Authentication Integration', () => {
+    const TEST_HMAC_SECRET = 'paperless-test-hmac-secret-at-least-32-bytes-long';
+    const protectedUser = {
+      name: 'Protected User',
+      email: 'protected@example.com',
+      password: 'password123'
+    };
+
+    beforeEach(async () => {
+      process.env.PROGRESSIVE_LOGIN_PROTECTION_ENABLED = 'true';
+      process.env.LOGIN_PROTECTION_HMAC_SECRET = TEST_HMAC_SECRET;
+      await request(app).post('/api/auth/register').send(protectedUser);
+    });
+
+    // 1. Feature Flag Validation
+    describe('Feature Flag Gating', () => {
+      it('bypasses login protection when PROGRESSIVE_LOGIN_PROTECTION_ENABLED is false or unset', async () => {
+        delete process.env.PROGRESSIVE_LOGIN_PROTECTION_ENABLED;
+
+        const res = await request(app)
+          .post('/api/auth/login')
+          .send({ email: protectedUser.email, password: protectedUser.password });
+
+        expect(res.status).toBe(200);
+        expect(res.body.success).toBe(true);
+
+        // Zero documents created in login_pairs collection
+        const pairsCount = await LoginPair.countDocuments();
+        expect(pairsCount).toBe(0);
+
+        // Coordinator was never instantiated/utilized
+        const coordinator = getLoginCoordinator();
+        expect(coordinator.totalAdmitted).toBe(0);
+      });
+    });
+
+    // 2. Successful Login with Protection Enabled
+    describe('Successful Authentication under Protection', () => {
+      it('authenticates successfully, returns 200 with HttpOnly cookies, and resets prior failure state via OCC', async () => {
+        // Simulate 2 prior failed login attempts from client IP 192.168.1.10
+        const clientIp = '192.168.1.10';
+        const protectionService = getLoginProtectionService();
+        await protectionService.recordPairFailureAtomic({
+          email: protectedUser.email,
+          ip: clientIp
+        });
+        await protectionService.recordPairFailureAtomic({
+          email: protectedUser.email,
+          ip: clientIp
+        });
+
+        const docBefore = await LoginPair.findOne({
+          key: protectionService.derivePairKey(clientIp, protectedUser.email)
+        });
+        expect(docBefore).not.toBeNull();
+        expect(docBefore.failedAttempts).toBe(2);
+        expect(docBefore.revision).toBe(2);
+
+        const res = await request(app)
+          .post('/api/auth/login')
+          .set('X-Forwarded-For', clientIp)
+          .send({ email: protectedUser.email, password: protectedUser.password });
+
+        expect(res.status).toBe(200);
+        expect(res.body.success).toBe(true);
+        expect(res.body.data.user.email).toBe(protectedUser.email);
+        expect(res.body.data.token).toBeUndefined(); // Token not in body
+
+        const cookies = res.headers['set-cookie'];
+        expect(cookies).toBeDefined();
+        expect(cookies.some((c) => c.startsWith('token='))).toBe(true);
+        expect(cookies.some((c) => c.startsWith('refreshToken='))).toBe(true);
+
+        // Pair document was deleted by resetPairOnSuccess
+        const docAfter = await LoginPair.findOne({
+          key: protectionService.derivePairKey(clientIp, protectedUser.email)
+        });
+        expect(docAfter).toBeNull();
+
+        // Coordinator conservation holds and all requests are settled
+        const coordinator = getLoginCoordinator();
+        expect(coordinator.inFlightRequests).toBe(0);
+        expect(coordinator.totalSettledSuccess).toBeGreaterThanOrEqual(1);
+      });
+
+      it('preserves newer failure state if concurrent failure raced before OCC reset', async () => {
+        const clientIp = '192.168.1.11';
+        const protectionService = getLoginProtectionService();
+
+        // Spy on resetPairOnSuccess to simulate a racing failure incrementing revision before OCC delete runs
+        const origReset = protectionService.resetPairOnSuccess.bind(protectionService);
+        vi.spyOn(protectionService, 'resetPairOnSuccess').mockImplementation(
+          async (identifier, admittedRev) => {
+            // Concurrent failure races and advances revision
+            await protectionService.recordPairFailureAtomic(identifier);
+            return origReset(identifier, admittedRev);
+          }
+        );
+
+        const res = await request(app)
+          .post('/api/auth/login')
+          .set('X-Forwarded-For', clientIp)
+          .send({ email: protectedUser.email, password: protectedUser.password });
+
+        // User login still succeeds
+        expect(res.status).toBe(200);
+        expect(res.body.success).toBe(true);
+
+        // But pair document is preserved because revision did not match
+        const docPreserved = await LoginPair.findOne({
+          key: protectionService.derivePairKey(clientIp, protectedUser.email)
+        });
+        expect(docPreserved).not.toBeNull();
+      });
+    });
+
+    // 3. Failed Authentication and Failure Counter Progression
+    describe('Invalid Credentials and Atomic Failure Recording', () => {
+      it('rejects incorrect password with 401 and atomically records failure progression', async () => {
+        const clientIp = '192.168.1.20';
+        const protectionService = getLoginProtectionService();
+        const pairKey = protectionService.derivePairKey(clientIp, protectedUser.email);
+
+        for (let attempt = 1; attempt <= 4; attempt++) {
+          const res = await request(app)
+            .post('/api/auth/login')
+            .set('X-Forwarded-For', clientIp)
+            .send({ email: protectedUser.email, password: 'wrongpassword' });
+
+          expect(res.status).toBe(401);
+          expect(res.body.success).toBe(false);
+          expect(res.body.message).toBe('Invalid credentials');
+
+          const pairDoc = await LoginPair.findOne({ key: pairKey });
+          expect(pairDoc).not.toBeNull();
+          expect(pairDoc.failedAttempts).toBe(attempt);
+          expect(pairDoc.revision).toBe(attempt);
+          expect(pairDoc.lockedUntil).toBeNull();
+        }
+
+        // Coordinator conservation holds and all requests are settled
+        const coordinator = getLoginCoordinator();
+        expect(coordinator.inFlightRequests).toBe(0);
+        expect(coordinator.totalSettledFailure).toBe(4);
+      });
+
+      it('executes bcrypt compare for non-existent user and records failure without leaking account non-existence', async () => {
+        const clientIp = '192.168.1.21';
+        const protectionService = getLoginProtectionService();
+        const workerPool = getLoginWorkerPool();
+        const compareSpy = vi.spyOn(workerPool, 'executeCompare');
+
+        const nonExistentEmail = 'ghost@example.com';
+        const res = await request(app)
+          .post('/api/auth/login')
+          .set('X-Forwarded-For', clientIp)
+          .send({ email: nonExistentEmail, password: 'anyPassword123' });
+
+        expect(res.status).toBe(401);
+        expect(res.body.success).toBe(false);
+        expect(res.body.message).toBe('Invalid credentials');
+
+        // executeCompare was invoked (constant-time timing attack mitigation)
+        expect(compareSpy).toHaveBeenCalled();
+
+        // Failure recorded for non-existent user pair
+        const pairKey = protectionService.derivePairKey(clientIp, nonExistentEmail);
+        const pairDoc = await LoginPair.findOne({ key: pairKey });
+        expect(pairDoc).not.toBeNull();
+        expect(pairDoc.failedAttempts).toBe(1);
+      });
+    });
+
+    // 4. Lockout Escalation and Pre-Check Rejection Before Bcrypt
+    describe('Progressive Lockouts and Pre-Check Rejection', () => {
+      it('locks out on 5th consecutive failure (Tier 2, 15m) and rejects 6th attempt at pre-check without invoking bcrypt', async () => {
+        const clientIp = '192.168.1.30';
+        const protectionService = getLoginProtectionService();
+        const workerPool = getLoginWorkerPool();
+
+        // Failures 1 through 4 (Tier 1: 401, no lockout)
+        for (let i = 1; i <= 4; i++) {
+          const res = await request(app)
+            .post('/api/auth/login')
+            .set('X-Forwarded-For', clientIp)
+            .send({ email: protectedUser.email, password: 'wrong' });
+          expect(res.status).toBe(401);
+        }
+
+        // Failure 5: Triggers Tier 2 lockout (HTTP 429, Retry-After ~900s)
+        const res5 = await request(app)
+          .post('/api/auth/login')
+          .set('X-Forwarded-For', clientIp)
+          .send({ email: protectedUser.email, password: 'wrong' });
+
+        expect(res5.status).toBe(429);
+        expect(res5.body.success).toBe(false);
+        expect(res5.body.message).toBe('Too many failed login attempts. Please try again later.');
+        expect(res5.headers['retry-after']).toBeDefined();
+        const retryAfter5 = parseInt(res5.headers['retry-after'], 10);
+        expect(retryAfter5).toBeGreaterThanOrEqual(890);
+        expect(retryAfter5).toBeLessThanOrEqual(900);
+
+        const pairKey = protectionService.derivePairKey(clientIp, protectedUser.email);
+        const pairDoc5 = await LoginPair.findOne({ key: pairKey });
+        expect(pairDoc5).not.toBeNull();
+        expect(pairDoc5.failedAttempts).toBe(5);
+        expect(pairDoc5.lockedUntil).not.toBeNull();
+
+        // Attempt 6 (during active lockout): Pre-check intercepts before bcrypt compute
+        const compareSpy = vi.spyOn(workerPool, 'executeCompare');
+
+        const res6 = await request(app)
+          .post('/api/auth/login')
+          .set('X-Forwarded-For', clientIp)
+          .send({ email: protectedUser.email, password: protectedUser.password }); // Even with correct password!
+
+        expect(res6.status).toBe(429);
+        expect(res6.body.success).toBe(false);
+        expect(res6.body.message).toBe('Too many failed login attempts. Please try again later.');
+        expect(res6.headers['retry-after']).toBeDefined();
+
+        // Crucial invariant: Bcrypt compare was NEVER invoked
+        expect(compareSpy).not.toHaveBeenCalled();
+
+        // Coordinator settled the task cleanly
+        const coordinator = getLoginCoordinator();
+        expect(coordinator.inFlightRequests).toBe(0);
+      });
+
+      it('escalates through tiers (Tier 3: 60m at 10 failures, Tier 4: 24h at 15 failures)', async () => {
+        const clientIp = '192.168.1.31';
+        const protectionService = getLoginProtectionService();
+        const pairKey = protectionService.derivePairKey(clientIp, protectedUser.email);
+
+        // Pre-seed 9 failures with lockout just expired
+        const t0 = new Date();
+        await LoginPair.create({
+          key: pairKey,
+          failedAttempts: 9,
+          lockedUntil: new Date(t0.getTime() - 5000), // expired 5 seconds ago
+          lastAttemptAt: new Date(t0.getTime() - 5000),
+          revision: 9,
+          expiresAt: new Date(t0.getTime() + 48 * 60 * 60 * 1000)
+        });
+
+        // Failure 10: Escalate to Tier 3 (60 minutes lockout)
+        const res10 = await request(app)
+          .post('/api/auth/login')
+          .set('X-Forwarded-For', clientIp)
+          .send({ email: protectedUser.email, password: 'wrong' });
+
+        expect(res10.status).toBe(429);
+        const retryAfter10 = parseInt(res10.headers['retry-after'], 10);
+        expect(retryAfter10).toBeGreaterThanOrEqual(3590);
+        expect(retryAfter10).toBeLessThanOrEqual(3600);
+
+        // Pre-seed 14 failures with lockout just expired
+        await LoginPair.updateOne(
+          { key: pairKey },
+          {
+            $set: {
+              failedAttempts: 14,
+              lockedUntil: new Date(t0.getTime() - 5000),
+              lastAttemptAt: new Date(t0.getTime() - 5000),
+              revision: 14
+            }
+          }
+        );
+
+        // Failure 15: Escalate to Tier 4 (24 hours lockout)
+        const res15 = await request(app)
+          .post('/api/auth/login')
+          .set('X-Forwarded-For', clientIp)
+          .send({ email: protectedUser.email, password: 'wrong' });
+
+        expect(res15.status).toBe(429);
+        const retryAfter15 = parseInt(res15.headers['retry-after'], 10);
+        expect(retryAfter15).toBeGreaterThanOrEqual(86390);
+        expect(retryAfter15).toBeLessThanOrEqual(86400);
+      });
+
+      it('resets failure counter to 1 when attempt arrives strictly more than 15 minutes after lockout expiry', async () => {
+        const clientIp = '192.168.1.32';
+        const protectionService = getLoginProtectionService();
+        const pairKey = protectionService.derivePairKey(clientIp, protectedUser.email);
+
+        const tNow = new Date();
+        // Lockout expired 16 minutes ago (> 15m inactivity cooldown)
+        const expiredLockout = new Date(tNow.getTime() - 16 * 60 * 1000);
+
+        await LoginPair.create({
+          key: pairKey,
+          failedAttempts: 5,
+          lockedUntil: expiredLockout,
+          lastAttemptAt: expiredLockout,
+          revision: 5,
+          expiresAt: new Date(tNow.getTime() + 48 * 60 * 60 * 1000)
+        });
+
+        const res = await request(app)
+          .post('/api/auth/login')
+          .set('X-Forwarded-For', clientIp)
+          .send({ email: protectedUser.email, password: 'wrong' });
+
+        expect(res.status).toBe(401);
+        const doc = await LoginPair.findOne({ key: pairKey });
+        expect(doc.failedAttempts).toBe(1);
+        expect(doc.lockedUntil).toBeNull();
+        expect(doc.revision).toBe(6);
+      });
+    });
+
+    // 5. Bounded Resource Accounting and Concurrency Limits
+    describe('Bounded Resource Accounting and Capacity Limits', () => {
+      it('rejects with HTTP 503 and Retry-After: 5 when coordinator capacity is saturated', async () => {
+        // Create small coordinator: maxActive: 1, maxQueue: 1 (maxComputePipeline = 2)
+        const { UnifiedComputePipelineCoordinator } =
+          await import('../utils/UnifiedComputePipelineCoordinator.js');
+        const tinyCoordinator = new UnifiedComputePipelineCoordinator({
+          maxActive: 1,
+          maxQueue: 1,
+          maxPerIp: 10
+        });
+
+        // Occupy both slots directly on coordinator
+        const token1 = tinyCoordinator.tryAcquireAdmission('10.0.0.1');
+        const token2 = tinyCoordinator.tryAcquireAdmission('10.0.0.2');
+        tinyCoordinator.handoffPendingToActive(token1);
+        tinyCoordinator.handoffPendingToQueued(token2);
+
+        setLoginProtectionComponents({ coordinator: tinyCoordinator });
+
+        const res = await request(app)
+          .post('/api/auth/login')
+          .set('X-Forwarded-For', '10.0.0.3')
+          .send({ email: protectedUser.email, password: protectedUser.password });
+
+        expect(res.status).toBe(503);
+        expect(res.headers['retry-after']).toBe('5');
+        expect(res.body.success).toBe(false);
+        expect(res.body.message).toContain('temporarily unavailable');
+
+        // Clean up mock tokens
+        token1.settleSuccess('TEST_CLEANUP');
+        token2.settleQueueDisconnect('TEST_CLEANUP');
+      });
+
+      it('enforces per-IP compute concurrency limit (max 1 compute task per IP)', async () => {
+        const clientIp = '192.168.1.40';
+        const coordinator = getLoginCoordinator();
+
+        // Occupy the IP slot for clientIp
+        const token1 = coordinator.tryAcquireAdmission(clientIp);
+        expect(token1).not.toBeNull();
+
+        // Second request from same IP is denied
+        const resDenied = await request(app)
+          .post('/api/auth/login')
+          .set('X-Forwarded-For', clientIp)
+          .send({ email: protectedUser.email, password: protectedUser.password });
+
+        expect(resDenied.status).toBe(503);
+        expect(resDenied.headers['retry-after']).toBe('5');
+
+        // Concurrent request from DIFFERENT IP succeeds without head-of-line blocking
+        const resOtherIp = await request(app)
+          .post('/api/auth/login')
+          .set('X-Forwarded-For', '192.168.1.41')
+          .send({ email: protectedUser.email, password: protectedUser.password });
+
+        expect(resOtherIp.status).toBe(200);
+
+        // Release first token
+        token1.settleSuccess('TEST_CLEANUP');
+      });
+    });
+
+    // 6. Fail-Closed Error Handling
+    describe('Fail-Closed Database Error Policy', () => {
+      it('fails closed with HTTP 503 and Retry-After: 5 if database lookup throws during pre-check', async () => {
+        const protectionService = getLoginProtectionService();
+        vi.spyOn(protectionService, 'checkPairLockout').mockRejectedValueOnce(
+          new Error('Simulated MongoDB connection dropped')
+        );
+
+        const res = await request(app)
+          .post('/api/auth/login')
+          .set('X-Forwarded-For', '192.168.1.50')
+          .send({ email: protectedUser.email, password: protectedUser.password });
+
+        expect(res.status).toBe(503);
+        expect(res.headers['retry-after']).toBe('5');
+        expect(res.body.success).toBe(false);
+        expect(res.body.message).toBe(
+          'Authentication service temporarily unavailable, please retry shortly'
+        );
+
+        // Coordinator state did not leak
+        const coordinator = getLoginCoordinator();
+        expect(coordinator.inFlightRequests).toBe(0);
+      });
+
+      it('fails closed with HTTP 503 and Retry-After: 5 if database fails during failure recording', async () => {
+        const protectionService = getLoginProtectionService();
+        vi.spyOn(protectionService, 'recordPairFailureAtomic').mockRejectedValueOnce(
+          new Error('Simulated MongoDB write timeout')
+        );
+
+        const res = await request(app)
+          .post('/api/auth/login')
+          .set('X-Forwarded-For', '192.168.1.51')
+          .send({ email: protectedUser.email, password: 'wrong' });
+
+        expect(res.status).toBe(503);
+        expect(res.headers['retry-after']).toBe('5');
+        expect(res.body.success).toBe(false);
+
+        // Coordinator state did not leak
+        const coordinator = getLoginCoordinator();
+        expect(coordinator.inFlightRequests).toBe(0);
+      });
+    });
+
+    // 7. Cross-IP Spray Telemetry and Advisory Delay
+    describe('Cross-IP Spray Telemetry and Non-Authoritative Advisory Delay', () => {
+      it('records cross-IP spray telemetry without triggering account-wide lockouts', async () => {
+        const protectionService = getLoginProtectionService();
+        const sprayEmail = protectedUser.email;
+
+        // 5 distinct IPs fail authentication for the same email
+        for (let i = 1; i <= 5; i++) {
+          const res = await request(app)
+            .post('/api/auth/login')
+            .set('X-Forwarded-For', `10.0.0.${i}`)
+            .send({ email: sprayEmail, password: 'wrong' });
+          expect(res.status).toBe(401);
+        }
+
+        // Verify account telemetry recorded 5 distinct IPs
+        const acctKey = protectionService.deriveAccountKey(sprayEmail);
+        const acctDoc = await LoginAccount.findOne({ key: acctKey });
+        expect(acctDoc).not.toBeNull();
+        expect(acctDoc.recentFailures.length).toBe(5);
+        expect(acctDoc.failedAttempts).toBe(5);
+
+        // Legitimate login from IP 10.0.0.99 with correct password SUCCEEDS
+        // Proves cross-IP spray NEVER locks out the account globally
+        const resLegit = await request(app)
+          .post('/api/auth/login')
+          .set('X-Forwarded-For', '10.0.0.99')
+          .send({ email: sprayEmail, password: protectedUser.password });
+
+        expect(resLegit.status).toBe(200);
+        expect(resLegit.body.success).toBe(true);
+      });
+    });
+
+    // 8. Scope Isolation
+    describe('Scope Isolation', () => {
+      it('leaves register, refresh, logout, and me endpoints unaffected by login lockout', async () => {
+        const lockedIp = '192.168.1.70';
+        const protectionService = getLoginProtectionService();
+
+        // Lock out lockedIp on /login
+        const pairKey = protectionService.derivePairKey(lockedIp, protectedUser.email);
+        await LoginPair.create({
+          key: pairKey,
+          failedAttempts: 5,
+          lockedUntil: new Date(Date.now() + 15 * 60 * 1000),
+          lastAttemptAt: new Date(),
+          revision: 5,
+          expiresAt: new Date(Date.now() + 48 * 60 * 60 * 1000)
+        });
+
+        // /login is locked out
+        const resLogin = await request(app)
+          .post('/api/auth/login')
+          .set('X-Forwarded-For', lockedIp)
+          .send({ email: protectedUser.email, password: protectedUser.password });
+        expect(resLogin.status).toBe(429);
+
+        // /register is unaffected
+        const resRegister = await request(app)
+          .post('/api/auth/register')
+          .set('X-Forwarded-For', lockedIp)
+          .send({ name: 'Another User', email: 'another@example.com', password: 'password123' });
+        expect(resRegister.status).toBe(201);
+
+        // /refresh is unaffected
+        const resRefresh = await request(app)
+          .post('/api/auth/refresh')
+          .set('X-Forwarded-For', lockedIp);
+        expect(resRefresh.status).toBe(401); // 401 because no cookie, NOT 429!
+
+        // /logout is unaffected
+        const resLogout = await request(app)
+          .post('/api/auth/logout')
+          .set('X-Forwarded-For', lockedIp);
+        expect(resLogout.status).toBe(200);
+      });
+    });
+
+    // 9. Client Disconnect and Cancellation Handling
+    describe('Client Disconnect and Cancellation Handling', () => {
+      it('marks task as clientDisconnected when TCP connection closes and discards queued task cleanly', async () => {
+        const clientIp = '192.168.1.80';
+        const coordinator = getLoginCoordinator();
+
+        // Intercept admission token to simulate client disconnect
+        let capturedToken = null;
+        const origAcquire = coordinator.tryAcquireAdmission.bind(coordinator);
+        vi.spyOn(coordinator, 'tryAcquireAdmission').mockImplementation((ip) => {
+          capturedToken = origAcquire(ip);
+          return capturedToken;
+        });
+
+        const workerPool = getLoginWorkerPool();
+        const executeSpy = vi
+          .spyOn(workerPool, 'executeCompare')
+          .mockImplementationOnce(async (tok) => {
+            tok.markClientDisconnected();
+            return { isMatch: false };
+          });
+
+        const mockReq = {
+          body: { email: protectedUser.email, password: 'wrong' },
+          ip: clientIp,
+          on: vi.fn()
+        };
+        const mockRes = {
+          set: vi.fn(),
+          status: vi.fn().mockReturnThis(),
+          json: vi.fn().mockReturnThis(),
+          headersSent: false,
+          writableEnded: false
+        };
+        const next = vi.fn();
+
+        const { login } = await import('./authController.js');
+        await login(mockReq, mockRes, next);
+
+        expect(executeSpy).toHaveBeenCalled();
+        expect(capturedToken.clientDisconnected).toBe(true);
+        expect(capturedToken.isSettled).toBe(true);
+        expect(mockRes.json).not.toHaveBeenCalled();
+
+        // Coordinator conservation holds and inFlight is 0
+        expect(coordinator.inFlightRequests).toBe(0);
+      });
+    });
+
+    // 10. Zero Leakage of Secrets, Hashes, and Internal Data
+    describe('Zero Leakage of Secrets, Hashes, or PII', () => {
+      it('never exposes HMAC secret, password hashes, OCC revisions, or internal pair keys in responses', async () => {
+        const clientIp = '192.168.1.90';
+
+        // 1. Success response check
+        const successRes = await request(app)
+          .post('/api/auth/login')
+          .set('X-Forwarded-For', clientIp)
+          .send({ email: protectedUser.email, password: protectedUser.password });
+
+        expect(successRes.status).toBe(200);
+        const successBody = JSON.stringify(successRes.body);
+        expect(successBody).not.toContain(TEST_HMAC_SECRET);
+        expect(successBody).not.toContain('password');
+        expect(successBody).not.toContain('revision');
+        expect(successBody).not.toContain('lockedUntil');
+        expect(successBody).not.toContain('pairKey');
+
+        // 2. Failure response check
+        const failRes = await request(app)
+          .post('/api/auth/login')
+          .set('X-Forwarded-For', clientIp)
+          .send({ email: protectedUser.email, password: 'wrongpassword' });
+
+        expect(failRes.status).toBe(401);
+        const failBody = JSON.stringify(failRes.body);
+        expect(failBody).not.toContain(TEST_HMAC_SECRET);
+        expect(failBody).not.toContain('failedAttempts');
+        expect(failBody).not.toContain('revision');
+        expect(failBody).toBe(JSON.stringify({ success: false, message: 'Invalid credentials' }));
+
+        // 3. Lockout 429 response check
+        const clientIpLockout = '192.168.1.91';
+        const protectionService = getLoginProtectionService();
+        const pairKey = protectionService.derivePairKey(clientIpLockout, protectedUser.email);
+        await LoginPair.create({
+          key: pairKey,
+          failedAttempts: 5,
+          lockedUntil: new Date(Date.now() + 15 * 60 * 1000),
+          lastAttemptAt: new Date(),
+          revision: 5,
+          expiresAt: new Date(Date.now() + 48 * 60 * 60 * 1000)
+        });
+
+        const lockoutRes = await request(app)
+          .post('/api/auth/login')
+          .set('X-Forwarded-For', clientIpLockout)
+          .send({ email: protectedUser.email, password: 'wrongpassword' });
+
+        expect(lockoutRes.status).toBe(429);
+        const lockoutBody = JSON.stringify(lockoutRes.body);
+        expect(lockoutBody).not.toContain(TEST_HMAC_SECRET);
+        expect(lockoutBody).not.toContain('revision');
+        expect(lockoutBody).not.toContain('failedAttempts');
+        expect(lockoutBody).not.toContain(pairKey);
+        expect(lockoutBody).toBe(
+          JSON.stringify({
+            success: false,
+            message: 'Too many failed login attempts. Please try again later.'
+          })
+        );
+      });
     });
   });
 });

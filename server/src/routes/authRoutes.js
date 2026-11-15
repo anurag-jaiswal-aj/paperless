@@ -32,6 +32,7 @@ router.use(authLimiter);
 
 // Public routes
 router.post('/register', register);
+// Progressive login protection is strictly encapsulated inside login controller (scoped exclusively to POST /login)
 router.post('/login', login);
 router.post('/refresh', refreshToken);
 router.post('/logout', logout);

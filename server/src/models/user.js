@@ -65,4 +65,7 @@ userSchema.methods.getResetPasswordToken = function () {
   return resetToken;
 };
 
+// Compound sparse index for password reset token lookups
+userSchema.index({ resetPasswordToken: 1, resetPasswordExpire: 1 }, { sparse: true });
+
 export default mongoose.model('User', userSchema);
