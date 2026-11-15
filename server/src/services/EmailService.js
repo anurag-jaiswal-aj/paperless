@@ -1,4 +1,5 @@
 import { Resend } from 'resend';
+import { logger } from '../utils/logger.js';
 
 /**
  * EmailService
@@ -47,7 +48,10 @@ class EmailService {
     if (typeof content !== 'string') return '';
     return content
       .replace(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g, '[REDACTED_EMAIL]')
-      .replace(/(https?:\/\/[^\s"'<>]+)?\/resetpassword\/[a-zA-Z0-9_%-]+/gi, '[REDACTED_RESET_LINK]')
+      .replace(
+        /(https?:\/\/[^\s"'<>]+)?\/resetpassword\/[a-zA-Z0-9_%-]+/gi,
+        '[REDACTED_RESET_LINK]'
+      )
       .replace(/\b[0-9a-fA-F]{40}\b/g, '[REDACTED_TOKEN]')
       .replace(/re_[a-zA-Z0-9_]{16,}/g, '[REDACTED_API_KEY]')
       .replace(/bearer\s+[a-zA-Z0-9._~+/-]+/gi, 'Bearer [REDACTED_TOKEN]');
@@ -66,14 +70,17 @@ class EmailService {
   async sendEmail(options) {
     if (!this.resend) {
       if (process.env.NODE_ENV === 'production') {
-        console.error('Email sending failed: Resend API key is not configured in production');
+        logger.error('Email sending failed: Resend API key is not configured in production', {
+          event: 'email.resend_unconfigured'
+        });
         throw new Error('Email service not configured');
       }
-      console.log('--- Development Email Log ---');
-      console.log(`To: ${options.to}`);
-      console.log(`Subject: ${options.subject}`);
-      console.log(`Body: ${this._formatBodyForLogging(options)}`);
-      console.log('-----------------------------');
+      logger.info('Development mock email generated', {
+        event: 'email.dev_mock_sent',
+        to: options.to,
+        subject: options.subject,
+        body: this._formatBodyForLogging(options)
+      });
       return { id: 'dev-email-id' };
     }
 
@@ -87,8 +94,13 @@ class EmailService {
       });
       return data;
     } catch (error) {
-      const safeErrorMsg = this._sanitizeForLogging(error && error.message ? error.message : 'Unknown error');
-      console.error('Email sending failed:', safeErrorMsg);
+      const safeErrorMsg = this._sanitizeForLogging(
+        error && error.message ? error.message : 'Unknown error'
+      );
+      logger.error(`Email sending failed: ${safeErrorMsg}`, error, {
+        event: 'email.delivery_failed',
+        sanitizedMessage: safeErrorMsg
+      });
       throw error;
     }
   }
@@ -120,7 +132,7 @@ class EmailService {
    */
   async sendResponseNotification(to, form) {
     // Will be fully integrated in Phase 3
-    console.log(`Sending response notification to ${to} for form ${form._id}`);
+    logger.debug('notification.stub', { to, formId: form._id });
   }
 }
 

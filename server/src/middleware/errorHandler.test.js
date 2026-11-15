@@ -2,6 +2,8 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import request from 'supertest';
 import express from 'express';
 import { errorHandler, notFound } from './errorHandler.js';
+import { requestCorrelation } from './requestCorrelation.js';
+import { logger } from '../utils/logger.js';
 
 describe('Error Handler and Not Found Middleware', () => {
   const originalEnv = process.env.NODE_ENV;
@@ -70,6 +72,39 @@ describe('Error Handler and Not Found Middleware', () => {
       expect(res.status).toBe(404);
       expect(res.body.success).toBe(false);
       expect(res.body.message).toBe('Resource was not found');
+    });
+
+    it('never reflects query parameters in 404 client error response messages', async () => {
+      app.use(notFound);
+      app.use(errorHandler);
+
+      const res = await request(app).get(
+        '/api/unmapped-endpoint?apiKey=secret-key-123&password=supersecret&token=jwt123&custom=val'
+      );
+
+      expect(res.status).toBe(404);
+      expect(res.body.success).toBe(false);
+      expect(res.body.message).toBe('Not Found - /api/unmapped-endpoint');
+      expect(res.body.message).not.toContain('apiKey');
+      expect(res.body.message).not.toContain('secret-key-123');
+      expect(res.body.message).not.toContain('password');
+      expect(res.body.message).not.toContain('supersecret');
+      expect(res.body.message).not.toContain('jwt123');
+      expect(res.body.message).not.toContain('custom');
+    });
+
+    it('redacts sensitive password reset tokens in 404 paths while omitting queries', async () => {
+      app.use(notFound);
+      app.use(errorHandler);
+
+      const res = await request(app).get(
+        '/api/auth/resetpassword/raw-secret-token-xyz?apiKey=leak123'
+      );
+
+      expect(res.status).toBe(404);
+      expect(res.body.message).toBe('Not Found - /api/auth/resetpassword/[REDACTED]');
+      expect(res.body.message).not.toContain('raw-secret-token-xyz');
+      expect(res.body.message).not.toContain('leak123');
     });
   });
 
@@ -214,6 +249,98 @@ describe('Error Handler and Not Found Middleware', () => {
       expect(res.body.success).toBe(false);
       expect(res.body.message).toBe('Specific dev error message');
       expect(res.body.stack).toBeDefined();
+    });
+
+    it('correlates error response and error log with server-generated requestId', async () => {
+      const loggerErrorSpy = vi.spyOn(logger, 'error');
+      app.use(requestCorrelation);
+      app.get('/correlated-crash', () => {
+        throw new Error('Boom in service');
+      });
+      app.use(errorHandler);
+
+      const res = await request(app).get('/correlated-crash');
+      expect(res.status).toBe(500);
+      expect(res.body.success).toBe(false);
+      expect(res.body.requestId).toBeDefined();
+      expect(res.headers['x-request-id']).toBe(res.body.requestId);
+
+      expect(loggerErrorSpy).toHaveBeenCalled();
+      const [loggedErr, loggedContext] = loggerErrorSpy.mock.calls[0];
+      expect(loggedErr.message).toBe('Boom in service');
+      expect(loggedContext.requestId).toBe(res.body.requestId);
+      expect(loggedContext.statusCode).toBe(500);
+    });
+
+    it('correlates client 4xx validation errors with requestId and logs at warn level', async () => {
+      const loggerWarnSpy = vi.spyOn(logger, 'warn');
+      app.use(requestCorrelation);
+      app.get('/correlated-validation', (req, res, next) => {
+        const error = new Error('Field invalid');
+        error.name = 'ValidationError';
+        error.errors = { field: { message: 'Required field missing' } };
+        next(error);
+      });
+      app.use(errorHandler);
+
+      const res = await request(app).get('/correlated-validation');
+      expect(res.status).toBe(400);
+      expect(res.body.success).toBe(false);
+      expect(res.body.requestId).toBeDefined();
+      expect(res.headers['x-request-id']).toBe(res.body.requestId);
+      expect(res.body.errors).toEqual(['Required field missing']);
+
+      expect(loggerWarnSpy).toHaveBeenCalled();
+      const [loggedMsg, loggedContext] = loggerWarnSpy.mock.calls[0];
+      expect(loggedMsg).toBe('Field invalid');
+      expect(loggedContext.requestId).toBe(res.body.requestId);
+      expect(loggedContext.statusCode).toBe(400);
+    });
+
+    it('correlates 404 not-found errors with server-generated requestId', async () => {
+      app.use(requestCorrelation);
+      app.use(notFound);
+      app.use(errorHandler);
+
+      const res = await request(app).get('/api/missing-route');
+      expect(res.status).toBe(404);
+      expect(res.body.success).toBe(false);
+      expect(res.body.requestId).toBeDefined();
+      expect(res.headers['x-request-id']).toBe(res.body.requestId);
+    });
+
+    it('correlates authorization errors (JWT) with server-generated requestId', async () => {
+      app.use(requestCorrelation);
+      app.get('/auth-error', (req, res, next) => {
+        const err = new Error('invalid token');
+        err.name = 'JsonWebTokenError';
+        next(err);
+      });
+      app.use(errorHandler);
+
+      const res = await request(app).get('/auth-error');
+      expect(res.status).toBe(401);
+      expect(res.body.success).toBe(false);
+      expect(res.body.message).toBe('Invalid token');
+      expect(res.body.requestId).toBeDefined();
+      expect(res.headers['x-request-id']).toBe(res.body.requestId);
+    });
+
+    it('ensures server-generated requestId cannot be overridden by client-supplied header', async () => {
+      app.use(requestCorrelation);
+      app.get('/crash-spoof', () => {
+        throw new Error('Explosion');
+      });
+      app.use(errorHandler);
+
+      const clientSuppliedId = 'client-spoofed-uuid-99999';
+      const res = await request(app).get('/crash-spoof').set('x-request-id', clientSuppliedId);
+
+      expect(res.status).toBe(500);
+      expect(res.body.requestId).toBeDefined();
+      expect(res.body.requestId).not.toBe(clientSuppliedId);
+      expect(res.headers['x-request-id']).not.toBe(clientSuppliedId);
+      expect(res.headers['x-request-id']).toBe(res.body.requestId);
     });
   });
 });

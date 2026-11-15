@@ -2,11 +2,12 @@ import AIService from '../services/AIService.js';
 import Form from '../models/form.js';
 import Question from '../models/question.js';
 import Response from '../models/response.js';
+import { isValidObjectId } from '../middleware/validateObjectId.js';
 
 // Helper to apply Paperless domain rules to generated questions
 const sanitizeQuestions = (questions, existingLabels = []) => {
   const sanitized = [];
-  const normalizedExisting = new Set(existingLabels.map(l => l.toLowerCase().trim()));
+  const normalizedExisting = new Set(existingLabels.map((l) => l.toLowerCase().trim()));
   const seenLabels = new Set();
 
   for (const q of questions) {
@@ -25,7 +26,7 @@ const sanitizeQuestions = (questions, existingLabels = []) => {
     let options = [];
     if (['single_choice', 'multiple_choice', 'checkbox', 'dropdown'].includes(q.type)) {
       if (q.options && Array.isArray(q.options)) {
-        options = [...new Set(q.options.map(o => o.trim()).filter(o => o.length > 0))];
+        options = [...new Set(q.options.map((o) => o.trim()).filter((o) => o.length > 0))];
       }
       if (options.length < 2) continue; // Invalid choice question
     }
@@ -65,18 +66,30 @@ export const generateQuestionsHandler = async (req, res, next) => {
 
     let formContext = null;
     let existingLabels = [];
-    if (formId) {
-      const form = await Form.findById(formId);
-      if (form && form.ownerId.toString() === req.user.id) {
-        const questions = await Question.find({ formId }).sort({ order: 1 });
-        existingLabels = questions.map(q => q.label);
-        formContext = {
-          title: form.title,
-          description: form.description,
-          existingQuestionLabels: existingLabels,
-          existingQuestionTypes: questions.map(q => q.type)
-        };
+    if (formId !== undefined && formId !== null) {
+      if (!isValidObjectId(formId)) {
+        return res.status(400).json({ success: false, message: 'Invalid resource ID' });
       }
+      const form = await Form.findById(formId);
+      if (!form) {
+        return res.status(404).json({ success: false, message: 'Form not found' });
+      }
+      if (form.ownerId.toString() !== req.user.id) {
+        return res
+          .status(403)
+          .json({ success: false, message: 'Not authorized to access this form' });
+      }
+      if (['deleting', 'delete_failed'].includes(form.status)) {
+        return res.status(409).json({ success: false, message: 'Form is currently being deleted' });
+      }
+      const questions = await Question.find({ formId }).sort({ order: 1 });
+      existingLabels = questions.map((q) => q.label);
+      formContext = {
+        title: form.title,
+        description: form.description,
+        existingQuestionLabels: existingLabels,
+        existingQuestionTypes: questions.map((q) => q.type)
+      };
     }
 
     const aiQuestions = await AIService.generateQuestions({
@@ -152,12 +165,16 @@ export const consultantHandler = async (req, res, next) => {
       return res.status(403).json({ success: false, message: 'Not authorized to view this form' });
     }
 
+    if (['deleting', 'delete_failed'].includes(form.status)) {
+      return res.status(409).json({ success: false, message: 'Form is currently being deleted' });
+    }
+
     const questions = await Question.find({ formId: form._id }).sort({ order: 1 });
 
     const formPayload = {
       title: form.title,
       description: form.description,
-      questions: questions.map(q => ({
+      questions: questions.map((q) => ({
         id: q._id,
         type: q.type,
         label: q.label,
@@ -170,11 +187,11 @@ export const consultantHandler = async (req, res, next) => {
     const consultantResult = await AIService.consultForm(formPayload);
 
     // Verify recommendations to ensure questionReferences actually exist
-    const validRecommendations = consultantResult.recommendations.map(rec => {
+    const validRecommendations = consultantResult.recommendations.map((rec) => {
       let ref = rec.questionReference;
       if (ref) {
         // Find if this ref matches an ID or a Label in the current form
-        const matched = questions.find(q => q._id.toString() === ref || q.label.includes(ref));
+        const matched = questions.find((q) => q._id.toString() === ref || q.label.includes(ref));
         if (matched) {
           ref = matched._id.toString();
         } else {
@@ -212,6 +229,10 @@ export const summaryHandler = async (req, res, next) => {
     // Check ownership
     if (form.ownerId.toString() !== req.user.id) {
       return res.status(403).json({ success: false, message: 'Not authorized to view this form' });
+    }
+
+    if (['deleting', 'delete_failed'].includes(form.status)) {
+      return res.status(409).json({ success: false, message: 'Form is currently being deleted' });
     }
 
     const summary = await AIService.summarizeResponses({
@@ -262,15 +283,24 @@ export const buildSafeResponseDataset = async (form, options = {}) => {
   const questions = await Question.find({ formId: form._id }).lean();
 
   // Filter questions that are semantic
-  const semanticTypes = new Set(['short_text', 'long_text', 'single_choice', 'multiple_choice', 'checkbox', 'dropdown', 'rating', 'date']);
-  const semanticQuestions = questions.filter(q => semanticTypes.has(q.type));
-  const qMap = new Map(semanticQuestions.map(q => [q._id.toString(), q.label]));
+  const semanticTypes = new Set([
+    'short_text',
+    'long_text',
+    'single_choice',
+    'multiple_choice',
+    'checkbox',
+    'dropdown',
+    'rating',
+    'date'
+  ]);
+  const semanticQuestions = questions.filter((q) => semanticTypes.has(q.type));
+  const qMap = new Map(semanticQuestions.map((q) => [q._id.toString(), q.label]));
 
   // Build transformed array
   const dataset = [];
   responses.forEach((r, index) => {
     const safeAnswers = [];
-    r.answers.forEach(ans => {
+    r.answers.forEach((ans) => {
       const qIdStr = ans.questionId.toString();
       if (qMap.has(qIdStr) && ans.value) {
         let val = ans.value;
@@ -278,7 +308,7 @@ export const buildSafeResponseDataset = async (form, options = {}) => {
           val = val.slice(0, 500); // truncate long text
         }
         if (Array.isArray(val)) {
-          val = val.map(v => typeof v === 'string' ? v.slice(0, 500) : v);
+          val = val.map((v) => (typeof v === 'string' ? v.slice(0, 500) : v));
         }
         safeAnswers.push({
           question: qMap.get(qIdStr),
@@ -307,15 +337,30 @@ export const responseSummaryHandler = async (req, res, next) => {
   try {
     const form = await Form.findById(req.params.formId);
     if (!form) return res.status(404).json({ success: false, message: 'Form not found' });
-    if (form.ownerId.toString() !== req.user.id) return res.status(403).json({ success: false, message: 'Not authorized to view this form' });
+    if (form.ownerId.toString() !== req.user.id)
+      return res.status(403).json({ success: false, message: 'Not authorized to view this form' });
+    if (['deleting', 'delete_failed'].includes(form.status)) {
+      return res.status(409).json({ success: false, message: 'Form is currently being deleted' });
+    }
 
     const filterOptions = { ...(req.query || {}), ...(req.body || {}) };
     const { dataset, total } = await buildSafeResponseDataset(form, filterOptions);
     if (!dataset) {
-      return res.status(200).json({ success: true, data: { overview: 'Not enough valid responses to generate insights.', keyInsights: [], caveats: [] } });
+      return res.status(200).json({
+        success: true,
+        data: {
+          overview: 'Not enough valid responses to generate insights.',
+          keyInsights: [],
+          caveats: []
+        }
+      });
     }
 
-    const summary = await AIService.summarizeResponses({ formTitle: form.title, totalResponsesAnalyzed: total, dataset });
+    const summary = await AIService.summarizeResponses({
+      formTitle: form.title,
+      totalResponsesAnalyzed: total,
+      dataset
+    });
     res.status(200).json({ success: true, data: summary });
   } catch (error) {
     next(error);
@@ -331,7 +376,11 @@ export const responseThemesHandler = async (req, res, next) => {
   try {
     const form = await Form.findById(req.params.formId);
     if (!form) return res.status(404).json({ success: false, message: 'Form not found' });
-    if (form.ownerId.toString() !== req.user.id) return res.status(403).json({ success: false, message: 'Not authorized to view this form' });
+    if (form.ownerId.toString() !== req.user.id)
+      return res.status(403).json({ success: false, message: 'Not authorized to view this form' });
+    if (['deleting', 'delete_failed'].includes(form.status)) {
+      return res.status(409).json({ success: false, message: 'Form is currently being deleted' });
+    }
 
     const filterOptions = { ...(req.query || {}), ...(req.body || {}) };
     const { dataset } = await buildSafeResponseDataset(form, filterOptions);
@@ -355,30 +404,41 @@ export const responseCategorizeHandler = async (req, res, next) => {
   try {
     const form = await Form.findById(req.params.formId);
     if (!form) return res.status(404).json({ success: false, message: 'Form not found' });
-    if (form.ownerId.toString() !== req.user.id) return res.status(403).json({ success: false, message: 'Not authorized to view this form' });
+    if (form.ownerId.toString() !== req.user.id)
+      return res.status(403).json({ success: false, message: 'Not authorized to view this form' });
+    if (['deleting', 'delete_failed'].includes(form.status)) {
+      return res.status(409).json({ success: false, message: 'Form is currently being deleted' });
+    }
 
     const filterOptions = { ...(req.query || {}), ...(req.body || {}) };
     const { dataset } = await buildSafeResponseDataset(form, filterOptions);
     if (!dataset) {
-      return res.status(200).json({ success: true, data: { categories: [], uncategorizedResponseIndexes: [] } });
+      return res
+        .status(200)
+        .json({ success: true, data: { categories: [], uncategorizedResponseIndexes: [] } });
     }
 
     let { allowedCategories } = req.body;
     if (allowedCategories) {
-      allowedCategories = allowedCategories.slice(0, 15).map(c => c.slice(0, 50));
+      allowedCategories = allowedCategories.slice(0, 15).map((c) => c.slice(0, 50));
     }
 
     const catResult = await AIService.categorizeResponses({ dataset, allowedCategories });
 
     // Filter invalid indexes
-    const validIndexes = new Set(dataset.map(d => d.index));
-    const safeCategories = catResult.categories.map(c => ({
+    const validIndexes = new Set(dataset.map((d) => d.index));
+    const safeCategories = catResult.categories.map((c) => ({
       ...c,
-      responseIndexes: c.responseIndexes.filter(idx => validIndexes.has(idx))
+      responseIndexes: c.responseIndexes.filter((idx) => validIndexes.has(idx))
     }));
-    const safeUncategorized = catResult.uncategorizedResponseIndexes.filter(idx => validIndexes.has(idx));
+    const safeUncategorized = catResult.uncategorizedResponseIndexes.filter((idx) =>
+      validIndexes.has(idx)
+    );
 
-    res.status(200).json({ success: true, data: { categories: safeCategories, uncategorizedResponseIndexes: safeUncategorized } });
+    res.status(200).json({
+      success: true,
+      data: { categories: safeCategories, uncategorizedResponseIndexes: safeUncategorized }
+    });
   } catch (error) {
     next(error);
   }

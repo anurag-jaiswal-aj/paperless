@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { isValidEmail, sanitizeInput } from './helpers.js';
+import { isValidEmail, sanitizeInput, sanitizeRequestUrl } from './helpers.js';
 
 describe('helpers', () => {
   describe('isValidEmail', () => {
@@ -23,6 +23,15 @@ describe('helpers', () => {
     it('returns non-strings unchanged', () => {
       expect(sanitizeInput(123)).toBe(123);
       expect(sanitizeInput(null)).toBe(null);
+    });
+  });
+
+  describe('sanitizeRequestUrl', () => {
+    it('delegates to redactionPolicy and redacts sensitive reset paths and query keys', () => {
+      expect(sanitizeRequestUrl('/api/auth/resetpassword/token123?apiKey=key1')).toBe(
+        '/api/auth/resetpassword/[REDACTED]?apiKey=[REDACTED]'
+      );
+      expect(sanitizeRequestUrl('/api/forms?page=1&limit=10')).toBe('/api/forms?page=1&limit=10');
     });
   });
 });

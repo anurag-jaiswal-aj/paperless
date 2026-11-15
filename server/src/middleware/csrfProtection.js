@@ -1,4 +1,5 @@
 import { URL } from 'url';
+import securityAuditService from '../services/SecurityAuditService.js';
 
 /**
  * Parses and returns the canonical set of trusted origins from environment configuration.
@@ -6,9 +7,7 @@ import { URL } from 'url';
  */
 export const getTrustedOrigins = () => {
   const origins = new Set();
-  const raw = [process.env.TRUSTED_ORIGINS, process.env.FRONTEND_URL]
-    .filter(Boolean)
-    .join(',');
+  const raw = [process.env.TRUSTED_ORIGINS, process.env.FRONTEND_URL].filter(Boolean).join(',');
 
   if (raw) {
     raw.split(',').forEach((item) => {
@@ -80,13 +79,11 @@ export const csrfProtection = (req, res, next) => {
   }
 
   const originHeader = req.headers.origin;
-  const hasAuthCookies = Boolean(
-    req.cookies && (req.cookies.token || req.cookies.refreshToken)
-  );
+  const hasAuthCookies = Boolean(req.cookies && (req.cookies.token || req.cookies.refreshToken));
   const hasBearerAuth = Boolean(
     req.headers.authorization &&
-      typeof req.headers.authorization === 'string' &&
-      req.headers.authorization.startsWith('Bearer ')
+    typeof req.headers.authorization === 'string' &&
+    req.headers.authorization.startsWith('Bearer ')
   );
 
   // 3. If an Origin header is explicitly supplied, validate it strictly
@@ -95,6 +92,11 @@ export const csrfProtection = (req, res, next) => {
       return next();
     }
     // Origin is untrusted, 'null', or malformed: reject request
+    securityAuditService.recordCsrfRejection({
+      req,
+      origin: originHeader,
+      reason: 'untrusted_origin'
+    });
     return res.status(403).json({
       success: false,
       message: 'Forbidden: invalid or untrusted request origin'
@@ -105,6 +107,11 @@ export const csrfProtection = (req, res, next) => {
   // 4a. If ambient auth cookies are present, reject.
   // Authenticated browser sessions MUST supply a valid Origin header on mutations.
   if (hasAuthCookies) {
+    securityAuditService.recordCsrfRejection({
+      req,
+      origin: undefined,
+      reason: 'missing_origin_with_cookies'
+    });
     return res.status(403).json({
       success: false,
       message: 'Forbidden: invalid or untrusted request origin'
@@ -120,6 +127,11 @@ export const csrfProtection = (req, res, next) => {
       return next();
     }
     // Otherwise, refresh or cookie-based logout without an Origin header is rejected
+    securityAuditService.recordCsrfRejection({
+      req,
+      origin: undefined,
+      reason: 'missing_origin_on_session_mutation'
+    });
     return res.status(403).json({
       success: false,
       message: 'Forbidden: invalid or untrusted request origin'
@@ -134,7 +146,8 @@ export const csrfProtection = (req, res, next) => {
 
   // 4d. Unauthenticated public auth endpoints (login, register, forgot/reset password)
   // Non-browser tools (e.g. curl/Postman) without cookies can register or log in.
-  const isPublicAuthRoute = /\/auth\/(?:login|register|forgotpassword|resetpassword(?:\/[^/]+)?)$/.test(path);
+  const isPublicAuthRoute =
+    /\/auth\/(?:login|register|forgotpassword|resetpassword(?:\/[^/]+)?)$/.test(path);
   if (isPublicAuthRoute && !hasAuthCookies) {
     return next();
   }
@@ -143,4 +156,3 @@ export const csrfProtection = (req, res, next) => {
   // Will be rejected by auth middleware or rejected here for safety.
   return next();
 };
-

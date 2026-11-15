@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import EmailService from './EmailService.js';
+import { logger } from '../utils/logger.js';
 
 describe('EmailService', () => {
   const originalEnv = process.env;
@@ -51,7 +52,8 @@ describe('EmailService', () => {
 
     it('redacts complete reset URLs from log content in defense-in-depth sanitization', () => {
       const emailService = new EmailService();
-      const rawBody = 'Click here: http://localhost:5173/resetpassword/abcdef0123456789abcdef0123456789abcdef01 to proceed';
+      const rawBody =
+        'Click here: http://localhost:5173/resetpassword/abcdef0123456789abcdef0123456789abcdef01 to proceed';
       const sanitized = emailService._sanitizeForLogging(rawBody);
 
       expect(sanitized).not.toContain('abcdef0123456789abcdef0123456789abcdef01');
@@ -60,7 +62,8 @@ describe('EmailService', () => {
 
     it('redacts HTML links containing reset tokens in defense-in-depth sanitization', () => {
       const emailService = new EmailService();
-      const rawHtml = '<a href="https://example.com/resetpassword/0123456789abcdef0123456789abcdef01234567">Reset</a>';
+      const rawHtml =
+        '<a href="https://example.com/resetpassword/0123456789abcdef0123456789abcdef01234567">Reset</a>';
       const sanitized = emailService._sanitizeForLogging(rawHtml);
 
       expect(sanitized).not.toContain('0123456789abcdef0123456789abcdef01234567');
@@ -78,7 +81,8 @@ describe('EmailService', () => {
 
     it('redacts email addresses, API keys, and authorization headers in defense-in-depth sanitization', () => {
       const emailService = new EmailService();
-      const rawText = 'Error for user target@example.com with key re_1234567890123456 and Bearer secrettoken123';
+      const rawText =
+        'Error for user target@example.com with key re_1234567890123456 and Bearer secrettoken123';
       const sanitized = emailService._sanitizeForLogging(rawText);
 
       expect(sanitized).not.toContain('target@example.com');
@@ -115,7 +119,7 @@ describe('EmailService', () => {
       process.env.NODE_ENV = 'development';
       const emailService = new EmailService();
 
-      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      const logSpy = vi.spyOn(logger, 'info');
 
       const rawToken = '11223344556677889900aabbccddeeff00112233';
       const resetUrl = `http://localhost:5173/resetpassword/${rawToken}`;
@@ -133,19 +137,25 @@ describe('EmailService', () => {
 
       // Ensure that neither the raw token nor the complete URL was logged anywhere
       for (const callArgs of logSpy.mock.calls) {
-        const loggedString = callArgs.join(' ');
+        const loggedString = callArgs
+          .map((a) => (typeof a === 'object' ? JSON.stringify(a) : String(a)))
+          .join(' ');
         expect(loggedString).not.toContain(rawToken);
         expect(loggedString).not.toContain(resetUrl);
       }
-      const allLogs = logSpy.mock.calls.map(c => c.join(' ')).join('\n');
-      expect(allLogs).toContain('[Omitted: Sensitive password reset content is never written to logs]');
+      const allLogs = logSpy.mock.calls
+        .map((c) => c.map((a) => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' '))
+        .join('\n');
+      expect(allLogs).toContain(
+        '[Omitted: Sensitive password reset content is never written to logs]'
+      );
     });
 
     it('correctly logs non-sensitive recipient, subject, and body in development', async () => {
       process.env.NODE_ENV = 'development';
       const emailService = new EmailService();
 
-      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      const logSpy = vi.spyOn(logger, 'info');
 
       await emailService.sendEmail({
         to: 'recipient@example.com',
@@ -153,9 +163,11 @@ describe('EmailService', () => {
         text: 'Notification body text'
       });
 
-      const loggedOutput = logSpy.mock.calls.map(c => c.join(' ')).join('\n');
-      expect(loggedOutput).toContain('To: recipient@example.com');
-      expect(loggedOutput).toContain('Subject: Notification Subject');
+      const loggedOutput = logSpy.mock.calls
+        .map((c) => c.map((a) => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' '))
+        .join('\n');
+      expect(loggedOutput).toContain('recipient@example.com');
+      expect(loggedOutput).toContain('Notification Subject');
       expect(loggedOutput).toContain('Notification body text');
     });
   });
@@ -165,8 +177,8 @@ describe('EmailService', () => {
       process.env.NODE_ENV = 'production';
       const emailService = new EmailService();
 
-      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      const errorSpy = vi.spyOn(logger, 'error');
+      const logSpy = vi.spyOn(logger, 'info');
 
       await expect(
         emailService.sendEmail({
@@ -177,9 +189,10 @@ describe('EmailService', () => {
       ).rejects.toThrow('Email service not configured');
 
       expect(errorSpy).toHaveBeenCalledWith(
-        expect.stringContaining('Resend API key is not configured in production')
+        expect.stringContaining('Resend API key is not configured in production'),
+        expect.any(Object)
       );
-      // Confirm console.log mock output was never triggered
+      // Confirm logger.info mock output was never triggered
       expect(logSpy).not.toHaveBeenCalled();
     });
 
@@ -191,13 +204,15 @@ describe('EmailService', () => {
       // Mock provider send to reject with sensitive information in error message
       emailService.resend = {
         emails: {
-          send: vi.fn().mockRejectedValue(
-            new Error('Failed sending to target@example.com using key re_secretkey123456789')
-          )
+          send: vi
+            .fn()
+            .mockRejectedValue(
+              new Error('Failed sending to target@example.com using key re_secretkey123456789')
+            )
         }
       };
 
-      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const errorSpy = vi.spyOn(logger, 'error');
 
       await expect(
         emailService.sendEmail({
@@ -208,7 +223,9 @@ describe('EmailService', () => {
       ).rejects.toThrow();
 
       expect(errorSpy).toHaveBeenCalled();
-      const loggedError = errorSpy.mock.calls.map(c => c.join(' ')).join('\n');
+      const loggedError = errorSpy.mock.calls
+        .map((c) => c.map((a) => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' '))
+        .join('\n');
       expect(loggedError).not.toContain('target@example.com');
       expect(loggedError).not.toContain('re_secretkey123456789');
       expect(loggedError).toContain('[REDACTED_EMAIL]');
@@ -222,15 +239,21 @@ describe('EmailService', () => {
       process.env.FRONTEND_URL = 'https://app.paperless.test';
       const emailService = new EmailService();
 
-      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      const logSpy = vi.spyOn(logger, 'info');
       const rawToken = '44556677889900112233aabbccddeeff44556677';
 
       await emailService.sendPasswordResetEmail('member@example.com', rawToken);
 
-      const loggedOutput = logSpy.mock.calls.map(c => c.join(' ')).join('\n');
+      const loggedOutput = logSpy.mock.calls
+        .map((c) => c.map((a) => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' '))
+        .join('\n');
       expect(loggedOutput).not.toContain(rawToken);
-      expect(loggedOutput).not.toContain('https://app.paperless.test/resetpassword/44556677889900112233aabbccddeeff44556677');
-      expect(loggedOutput).toContain('[Omitted: Sensitive password reset content is never written to logs]');
+      expect(loggedOutput).not.toContain(
+        'https://app.paperless.test/resetpassword/44556677889900112233aabbccddeeff44556677'
+      );
+      expect(loggedOutput).toContain(
+        '[Omitted: Sensitive password reset content is never written to logs]'
+      );
     });
   });
 });

@@ -5,17 +5,22 @@ import cookieParser from 'cookie-parser';
 import mongoose from 'mongoose';
 import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
-import { MongoMemoryServer } from 'mongodb-memory-server';
 import User from '../models/user.js';
 import Form from '../models/form.js';
 import Question from '../models/question.js';
 import Response from '../models/response.js';
+import SubmissionReservation from '../models/submissionReservation.js';
+import { startReplSet, stopReplSet } from '../testUtils/replSetHelper.js';
 import authRoutes from '../routes/authRoutes.js';
 import formRoutes from '../routes/formRoutes.js';
 import responseRoutes from '../routes/responseRoutes.js';
 import { csrfProtection, isTrustedOrigin } from './csrfProtection.js';
 import { createGracefulShutdown } from '../server.js';
 import { errorHandler } from './errorHandler.js';
+import {
+  getDiagnosticCounters,
+  resetDiagnosticCounters
+} from '../services/SecurityAuditService.js';
 
 let mongoServer;
 let testApp;
@@ -32,8 +37,7 @@ beforeAll(async () => {
   process.env.FRONTEND_URL = TRUSTED_ORIGIN;
   process.env.NODE_ENV = 'production';
 
-  mongoServer = await MongoMemoryServer.create();
-  await mongoose.connect(mongoServer.getUri());
+  mongoServer = await startReplSet();
 
   // Build full integration app mirroring server.js pipeline
   testApp = express();
@@ -64,8 +68,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await mongoose.disconnect();
-  await mongoServer.stop();
+  await stopReplSet(mongoServer);
 });
 
 beforeEach(async () => {
@@ -73,6 +76,7 @@ beforeEach(async () => {
   await Form.deleteMany({});
   await Question.deleteMany({});
   await Response.deleteMany({});
+  await SubmissionReservation.deleteMany({});
 
   validUser = await User.create({
     name: 'CSRF Test User',
@@ -81,17 +85,13 @@ beforeEach(async () => {
   });
 
   const sessionId = 'session_test_12345';
-  authToken = jwt.sign(
-    { id: validUser._id, sessionId },
-    process.env.JWT_SECRET,
-    { expiresIn: '15m' }
-  );
+  authToken = jwt.sign({ id: validUser._id, sessionId }, process.env.JWT_SECRET, {
+    expiresIn: '15m'
+  });
 
-  refreshTokenVal = jwt.sign(
-    { id: validUser._id, sessionId },
-    process.env.JWT_REFRESH_SECRET,
-    { expiresIn: '7d' }
-  );
+  refreshTokenVal = jwt.sign({ id: validUser._id, sessionId }, process.env.JWT_REFRESH_SECRET, {
+    expiresIn: '7d'
+  });
 
   // Register session with correct SHA-256 hash in user model
   const tokenHash = crypto.createHash('sha256').update(refreshTokenVal).digest('hex');
@@ -119,9 +119,7 @@ describe('CSRF Protection and Origin Validation', () => {
 
   describe('Safe HTTP Methods (GET, HEAD, OPTIONS)', () => {
     it('allows GET requests regardless of Origin header', async () => {
-      const res = await request(testApp)
-        .get('/health')
-        .set('Origin', UNTRUSTED_ORIGIN);
+      const res = await request(testApp).get('/health').set('Origin', UNTRUSTED_ORIGIN);
 
       expect(res.status).toBe(200);
       expect(res.body.status).toBe('live');
@@ -134,9 +132,7 @@ describe('CSRF Protection and Origin Validation', () => {
     });
 
     it('allows GET requests to /api/health regardless of Origin header', async () => {
-      const res = await request(testApp)
-        .get('/api/health')
-        .set('Origin', UNTRUSTED_ORIGIN);
+      const res = await request(testApp).get('/api/health').set('Origin', UNTRUSTED_ORIGIN);
 
       expect(res.status).toBe(200);
       expect(res.body.status).toBe('live');
@@ -170,6 +166,19 @@ describe('CSRF Protection and Origin Validation', () => {
       // Verify no form was created in database
       const formsCount = await Form.countDocuments();
       expect(formsCount).toBe(0);
+    });
+
+    it('increments security_csrf_rejection_total diagnostic counter on rejection', async () => {
+      resetDiagnosticCounters();
+      const initialCount = getDiagnosticCounters().security_csrf_rejection_total;
+
+      await request(testApp)
+        .post('/api/forms')
+        .set('Origin', UNTRUSTED_ORIGIN)
+        .set('Cookie', [`token=${authToken}`])
+        .send({ title: 'Untrusted Form' });
+
+      expect(getDiagnosticCounters().security_csrf_rejection_total).toBe(initialCount + 1);
     });
 
     it('rejects authenticated POST when Origin is explicitly null', async () => {
@@ -332,9 +341,7 @@ describe('CSRF Protection and Origin Validation', () => {
       const res = await request(testApp)
         .post(`/api/responses/${publishedForm._id}`)
         .send({
-          answers: [
-            { questionId: question._id.toString(), value: 'Great platform!' }
-          ]
+          answers: [{ questionId: question._id.toString(), value: 'Great platform!' }]
         });
 
       expect(res.status).toBe(201);
@@ -349,9 +356,7 @@ describe('CSRF Protection and Origin Validation', () => {
         .post(`/api/responses/${publishedForm._id}`)
         .set('Origin', 'https://embedded-partner.com')
         .send({
-          answers: [
-            { questionId: question._id.toString(), value: 'Embedded response' }
-          ]
+          answers: [{ questionId: question._id.toString(), value: 'Embedded response' }]
         });
 
       expect(res.status).toBe(201);
@@ -376,9 +381,7 @@ describe('CSRF Protection and Origin Validation', () => {
       const res = await request(testApp)
         .post(`/api/responses/${publishedForm._id}/?ref=newsletter&utm_source=email`)
         .send({
-          answers: [
-            { questionId: question._id.toString(), value: 'Response with query string' }
-          ]
+          answers: [{ questionId: question._id.toString(), value: 'Response with query string' }]
         });
 
       expect(res.status).toBe(201);

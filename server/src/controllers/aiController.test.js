@@ -7,6 +7,11 @@ import Response from '../models/response.js';
 import { buildSafeResponseDataset } from './aiController.js';
 import { errorHandler } from '../middleware/errorHandler.js';
 
+const FORM_1_ID = '507f1f77bcf86cd799439011';
+const FORM_2_ID = '507f1f77bcf86cd799439012';
+const DELETING_FORM_ID = '507f1f77bcf86cd799439013';
+const MISSING_FORM_ID = '507f1f77bcf86cd799439099';
+
 // Mock auth middleware to easily simulate logged in user
 vi.mock('../middleware/authMiddleware.js', () => ({
   protect: (req, res, next) => {
@@ -31,8 +36,25 @@ vi.mock('../services/AIService.js', () => {
 vi.mock('../models/form.js', () => ({
   default: {
     findById: vi.fn().mockImplementation((id) => {
-      if (id === 'form1') return { _id: 'form1', ownerId: { toString: () => 'user1' }, title: 'Test Form' };
-      if (id === 'form2') return { _id: 'form2', ownerId: { toString: () => 'otherUser' }, title: 'Other Form' };
+      if (id === '507f1f77bcf86cd799439011')
+        return {
+          _id: '507f1f77bcf86cd799439011',
+          ownerId: { toString: () => 'user1' },
+          title: 'Test Form'
+        };
+      if (id === '507f1f77bcf86cd799439012')
+        return {
+          _id: '507f1f77bcf86cd799439012',
+          ownerId: { toString: () => 'otherUser' },
+          title: 'Other Form'
+        };
+      if (id === '507f1f77bcf86cd799439013')
+        return {
+          _id: '507f1f77bcf86cd799439013',
+          ownerId: { toString: () => 'user1' },
+          title: 'Deleting Form',
+          status: 'deleting'
+        };
       return null;
     })
   }
@@ -42,10 +64,22 @@ vi.mock('../models/question.js', () => ({
   default: {
     find: vi.fn().mockReturnValue({
       sort: vi.fn().mockResolvedValue([
-        { _id: 'q1', formId: 'form1', type: 'short_text', label: 'Name', required: true }
+        {
+          _id: 'q1',
+          formId: '507f1f77bcf86cd799439011',
+          type: 'short_text',
+          label: 'Name',
+          required: true
+        }
       ]),
       lean: vi.fn().mockResolvedValue([
-        { _id: 'q1', formId: 'form1', type: 'short_text', label: 'Name', required: true }
+        {
+          _id: 'q1',
+          formId: '507f1f77bcf86cd799439011',
+          type: 'short_text',
+          label: 'Name',
+          required: true
+        }
       ])
     })
   }
@@ -57,7 +91,12 @@ vi.mock('../models/response.js', () => ({
       sort: vi.fn().mockReturnValue({
         limit: vi.fn().mockReturnValue({
           lean: vi.fn().mockResolvedValue([
-            { _id: 'res1', formId: 'form1', answers: [{ questionId: 'q1', value: 'John' }], createdAt: new Date() }
+            {
+              _id: 'res1',
+              formId: '507f1f77bcf86cd799439011',
+              answers: [{ questionId: 'q1', value: 'John' }],
+              createdAt: new Date()
+            }
           ])
         })
       })
@@ -88,9 +127,7 @@ describe('AI Controller (Phase 6)', () => {
 
   describe('generateQuestionsHandler', () => {
     it('validates topic presence', async () => {
-      const res = await request(app)
-        .post('/api/ai/questions/generate')
-        .send({});
+      const res = await request(app).post('/api/ai/questions/generate').send({});
       expect(res.status).toBe(400);
       expect(res.body.message).toContain('Topic is required');
     });
@@ -120,14 +157,35 @@ describe('AI Controller (Phase 6)', () => {
         { type: 'short_text', label: 'Text Q', required: false }
       ]);
 
-      const res = await request(app)
-        .post('/api/ai/questions/generate')
-        .send({ topic: 'Testing' });
+      const res = await request(app).post('/api/ai/questions/generate').send({ topic: 'Testing' });
 
       expect(res.status).toBe(200);
       // The single_choice should be removed because it has < 2 options
       expect(res.body.data.length).toBe(1);
       expect(res.body.data[0].type).toBe('short_text');
+    });
+
+    it('validates formId in body and rejects malformed, missing, or unauthorized forms', async () => {
+      // Malformed formId
+      const resBad = await request(app)
+        .post('/api/ai/questions/generate')
+        .send({ topic: 'Testing', formId: 'invalid-form-id' });
+      expect(resBad.status).toBe(400);
+      expect(resBad.body.message).toBe('Invalid resource ID');
+
+      // Missing formId
+      const resMissing = await request(app)
+        .post('/api/ai/questions/generate')
+        .send({ topic: 'Testing', formId: MISSING_FORM_ID });
+      expect(resMissing.status).toBe(404);
+      expect(resMissing.body.message).toBe('Form not found');
+
+      // Unauthorized formId
+      const resUnauth = await request(app)
+        .post('/api/ai/questions/generate')
+        .send({ topic: 'Testing', formId: FORM_2_ID });
+      expect(resUnauth.status).toBe(403);
+      expect(resUnauth.body.message).toBe('Not authorized to access this form');
     });
   });
 
@@ -136,7 +194,9 @@ describe('AI Controller (Phase 6)', () => {
       let res = await request(app).post('/api/ai/writing/improve').send({});
       expect(res.status).toBe(400);
 
-      res = await request(app).post('/api/ai/writing/improve').send({ text: 'Hello', contentType: 'invalid' });
+      res = await request(app)
+        .post('/api/ai/writing/improve')
+        .send({ text: 'Hello', contentType: 'invalid' });
       expect(res.status).toBe(400);
     });
 
@@ -153,13 +213,19 @@ describe('AI Controller (Phase 6)', () => {
   });
 
   describe('consultantHandler', () => {
+    it('rejects malformed formId route parameter with 400', async () => {
+      const res = await request(app).post('/api/ai/consultant/invalid-form-id');
+      expect(res.status).toBe(400);
+      expect(res.body.message).toBe('Invalid resource ID');
+    });
+
     it('returns 404 for missing form', async () => {
-      const res = await request(app).post('/api/ai/consultant/missing-form');
+      const res = await request(app).post(`/api/ai/consultant/${MISSING_FORM_ID}`);
       expect(res.status).toBe(404);
     });
 
     it('returns 403 for unauthorized form', async () => {
-      const res = await request(app).post('/api/ai/consultant/form2');
+      const res = await request(app).post(`/api/ai/consultant/${FORM_2_ID}`);
       expect(res.status).toBe(403);
     });
 
@@ -171,7 +237,7 @@ describe('AI Controller (Phase 6)', () => {
         ]
       });
 
-      const res = await request(app).post('/api/ai/consultant/form1');
+      const res = await request(app).post(`/api/ai/consultant/${FORM_1_ID}`);
       expect(res.status).toBe(200);
       expect(res.body.data.overallAssessment).toBe('Good');
       expect(res.body.data.recommendations.length).toBe(1);
@@ -181,7 +247,7 @@ describe('AI Controller (Phase 6)', () => {
   describe('Phase 7: Response Intelligence', () => {
     describe('buildSafeResponseDataset', () => {
       it('safely ignores invalid date filters and clamps minimum maxResponses', async () => {
-        const form = { _id: 'form1', title: 'Survey' };
+        const form = { _id: FORM_1_ID, title: 'Survey' };
         const result = await buildSafeResponseDataset(form, {
           startDate: 'not-a-date',
           endDate: 'also-invalid',
@@ -189,15 +255,16 @@ describe('AI Controller (Phase 6)', () => {
         });
 
         expect(result.total).toBe(1);
-        expect(Response.find).toHaveBeenCalledWith({ formId: 'form1' });
+        expect(Response.find).toHaveBeenCalledWith({ formId: FORM_1_ID });
 
-        const mockSort = Response.find.mock.results[Response.find.mock.results.length - 1].value.sort;
+        const mockSort =
+          Response.find.mock.results[Response.find.mock.results.length - 1].value.sort;
         const mockLimit = mockSort.mock.results[mockSort.mock.results.length - 1].value.limit;
         expect(mockLimit).toHaveBeenCalledWith(1);
       });
 
       it('correctly applies valid date filters and clamps upper bound maxResponses', async () => {
-        const form = { _id: 'form1', title: 'Survey' };
+        const form = { _id: FORM_1_ID, title: 'Survey' };
         const result = await buildSafeResponseDataset(form, {
           startDate: '2026-01-01',
           endDate: '2026-01-31',
@@ -206,11 +273,12 @@ describe('AI Controller (Phase 6)', () => {
 
         expect(result.total).toBe(1);
         const lastCall = Response.find.mock.calls[Response.find.mock.calls.length - 1][0];
-        expect(lastCall.formId).toBe('form1');
+        expect(lastCall.formId).toBe(FORM_1_ID);
         expect(lastCall.createdAt.$gte).toEqual(new Date('2026-01-01'));
         expect(lastCall.createdAt.$lte).toEqual(new Date('2026-01-31'));
 
-        const mockSort = Response.find.mock.results[Response.find.mock.results.length - 1].value.sort;
+        const mockSort =
+          Response.find.mock.results[Response.find.mock.results.length - 1].value.sort;
         const mockLimit = mockSort.mock.results[mockSort.mock.results.length - 1].value.limit;
         expect(mockLimit).toHaveBeenCalledWith(500);
       });
@@ -218,14 +286,14 @@ describe('AI Controller (Phase 6)', () => {
 
     describe('responseSummaryHandler', () => {
       it('returns 403 for unauthorized form', async () => {
-        const res = await request(app).post('/api/ai/responses/summary/form2');
+        const res = await request(app).post(`/api/ai/responses/summary/${FORM_2_ID}`);
         expect(res.status).toBe(403);
       });
 
       it('delegates to AIService and returns summary', async () => {
         AIService.summarizeResponses.mockResolvedValue({ overview: 'Test Overview' });
 
-        const res = await request(app).post('/api/ai/responses/summary/form1');
+        const res = await request(app).post(`/api/ai/responses/summary/${FORM_1_ID}`);
         expect(res.status).toBe(200);
         expect(res.body.data.overview).toBe('Test Overview');
       });
@@ -233,14 +301,14 @@ describe('AI Controller (Phase 6)', () => {
 
     describe('responseThemesHandler', () => {
       it('returns 403 for unauthorized form', async () => {
-        const res = await request(app).post('/api/ai/responses/themes/form2');
+        const res = await request(app).post(`/api/ai/responses/themes/${FORM_2_ID}`);
         expect(res.status).toBe(403);
       });
 
       it('delegates to AIService and returns themes', async () => {
         AIService.extractThemes.mockResolvedValue({ themes: [{ name: 'Test Theme' }] });
 
-        const res = await request(app).post('/api/ai/responses/themes/form1');
+        const res = await request(app).post(`/api/ai/responses/themes/${FORM_1_ID}`);
         expect(res.status).toBe(200);
         expect(res.body.data.themes[0].name).toBe('Test Theme');
       });
@@ -248,7 +316,7 @@ describe('AI Controller (Phase 6)', () => {
 
     describe('responseCategorizeHandler', () => {
       it('returns 403 for unauthorized form', async () => {
-        const res = await request(app).post('/api/ai/responses/categorize/form2');
+        const res = await request(app).post(`/api/ai/responses/categorize/${FORM_2_ID}`);
         expect(res.status).toBe(403);
       });
 
@@ -258,7 +326,7 @@ describe('AI Controller (Phase 6)', () => {
           uncategorizedResponseIndexes: []
         });
 
-        const res = await request(app).post('/api/ai/responses/categorize/form1');
+        const res = await request(app).post(`/api/ai/responses/categorize/${FORM_1_ID}`);
         expect(res.status).toBe(200);
         expect(res.body.data.categories[0].name).toBe('Cat 1');
       });
@@ -268,9 +336,7 @@ describe('AI Controller (Phase 6)', () => {
   describe('Error Handling and Rate Limiting', () => {
     it('handles AI_RATE_LIMIT_EXCEEDED gracefully', async () => {
       AIService.generateQuestions.mockRejectedValue(new Error('AI_RATE_LIMIT_EXCEEDED'));
-      const res = await request(app)
-        .post('/api/ai/questions/generate')
-        .send({ topic: 'Testing' });
+      const res = await request(app).post('/api/ai/questions/generate').send({ topic: 'Testing' });
       expect(res.status).toBe(429);
     });
 
@@ -317,6 +383,46 @@ describe('AI Controller (Phase 6)', () => {
           aiLimiter.resetKey('::1');
         }
       }
+    });
+  });
+
+  describe('Stage 4.3.3: Form Deleting State Guards', () => {
+    it('returns 409 when generating questions targeting a deleting form', async () => {
+      const res = await request(app)
+        .post('/api/ai/questions/generate')
+        .send({ topic: 'Employee Feedback', formId: DELETING_FORM_ID });
+      expect(res.status).toBe(409);
+      expect(res.body.message).toBe('Form is currently being deleted');
+    });
+
+    it('returns 409 for consultant endpoint when form is deleting', async () => {
+      const res = await request(app).post(`/api/ai/consultant/${DELETING_FORM_ID}`);
+      expect(res.status).toBe(409);
+      expect(res.body.message).toBe('Form is currently being deleted');
+    });
+
+    it('returns 409 for legacy summary endpoint when form is deleting', async () => {
+      const res = await request(app).post(`/api/ai/summary/${DELETING_FORM_ID}`);
+      expect(res.status).toBe(409);
+      expect(res.body.message).toBe('Form is currently being deleted');
+    });
+
+    it('returns 409 for response summary endpoint when form is deleting', async () => {
+      const res = await request(app).post(`/api/ai/responses/summary/${DELETING_FORM_ID}`);
+      expect(res.status).toBe(409);
+      expect(res.body.message).toBe('Form is currently being deleted');
+    });
+
+    it('returns 409 for response themes endpoint when form is deleting', async () => {
+      const res = await request(app).post(`/api/ai/responses/themes/${DELETING_FORM_ID}`);
+      expect(res.status).toBe(409);
+      expect(res.body.message).toBe('Form is currently being deleted');
+    });
+
+    it('returns 409 for response categorize endpoint when form is deleting', async () => {
+      const res = await request(app).post(`/api/ai/responses/categorize/${DELETING_FORM_ID}`);
+      expect(res.status).toBe(409);
+      expect(res.body.message).toBe('Form is currently being deleted');
     });
   });
 });

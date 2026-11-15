@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import storageService from './StorageService.js';
-import s3Provider, { S3StorageProvider } from './S3StorageProvider.js';
+import s3Provider, { S3StorageProvider, S3_DEFAULT_TIMEOUTS } from './S3StorageProvider.js';
 import { Readable } from 'stream';
 
 describe('StorageService and S3StorageProvider', () => {
@@ -17,7 +17,11 @@ describe('StorageService and S3StorageProvider', () => {
   describe('StorageService Interface Delegation', () => {
     it('delegates uploadFile to s3Provider', async () => {
       const spy = vi.spyOn(s3Provider, 'uploadFile').mockResolvedValueOnce('uploaded-key');
-      const result = await storageService.uploadFile(Buffer.from('data'), 'test/path', 'text/plain');
+      const result = await storageService.uploadFile(
+        Buffer.from('data'),
+        'test/path',
+        'text/plain'
+      );
       expect(spy).toHaveBeenCalledWith(expect.any(Buffer), 'test/path', 'text/plain');
       expect(result).toBe('uploaded-key');
     });
@@ -29,7 +33,9 @@ describe('StorageService and S3StorageProvider', () => {
     });
 
     it('delegates getPresignedUrl to s3Provider', async () => {
-      const spy = vi.spyOn(s3Provider, 'getPresignedUrl').mockResolvedValueOnce('https://s3.example.com/test');
+      const spy = vi
+        .spyOn(s3Provider, 'getPresignedUrl')
+        .mockResolvedValueOnce('https://s3.example.com/test');
       const result = await storageService.getPresignedUrl('test/path');
       expect(spy).toHaveBeenCalledWith('test/path');
       expect(result).toBe('https://s3.example.com/test');
@@ -45,6 +51,21 @@ describe('StorageService and S3StorageProvider', () => {
       const result = await storageService.getFileStream('test/path');
       expect(spy).toHaveBeenCalledWith('test/path');
       expect(result).toBe(mockResult);
+    });
+
+    it('delegates listObjectsByPrefix to s3Provider', async () => {
+      const mockResult = { keys: ['test/file1.pdf'], isTruncated: false, keyCount: 1 };
+      const spy = vi.spyOn(s3Provider, 'listObjectsByPrefix').mockResolvedValueOnce(mockResult);
+      const result = await storageService.listObjectsByPrefix('test/');
+      expect(spy).toHaveBeenCalledWith('test/');
+      expect(result).toBe(mockResult);
+    });
+
+    it('delegates copyFile to s3Provider', async () => {
+      const spy = vi.spyOn(s3Provider, 'copyFile').mockResolvedValueOnce('dest/path.pdf');
+      const result = await storageService.copyFile('source/path.pdf', 'dest/path.pdf');
+      expect(spy).toHaveBeenCalledWith('source/path.pdf', 'dest/path.pdf');
+      expect(result).toBe('dest/path.pdf');
     });
 
     it('delegates checkBucketAccess to s3Provider', async () => {
@@ -124,6 +145,70 @@ describe('StorageService and S3StorageProvider', () => {
         s3Provider.client = originalClient;
       }
     });
+
+    it('sends ListObjectsV2Command and returns object keys and pagination tokens', async () => {
+      const mockSend = vi.fn().mockResolvedValueOnce({
+        Contents: [
+          { Key: 'staging/forms/123/lease1/file1.pdf' },
+          { Key: 'staging/forms/123/lease1/file2.pdf' }
+        ],
+        IsTruncated: true,
+        NextContinuationToken: 'token-abc',
+        KeyCount: 2
+      });
+
+      const mockClient = { send: mockSend };
+      const originalClient = s3Provider.client;
+      s3Provider.client = mockClient;
+
+      try {
+        const result = await s3Provider.listObjectsByPrefix('staging/forms/123/', { maxKeys: 10 });
+        expect(mockSend).toHaveBeenCalledWith(
+          expect.objectContaining({
+            input: expect.objectContaining({
+              Prefix: 'staging/forms/123/',
+              MaxKeys: 10
+            })
+          }),
+          expect.any(Object)
+        );
+        expect(result.keys).toEqual([
+          'staging/forms/123/lease1/file1.pdf',
+          'staging/forms/123/lease1/file2.pdf'
+        ]);
+        expect(result.isTruncated).toBe(true);
+        expect(result.nextContinuationToken).toBe('token-abc');
+      } finally {
+        s3Provider.client = originalClient;
+      }
+    });
+
+    it('sends CopyObjectCommand and returns destinationKey on copyFile', async () => {
+      const mockSend = vi.fn().mockResolvedValueOnce({});
+      const mockClient = { send: mockSend };
+      const originalClient = s3Provider.client;
+      s3Provider.client = mockClient;
+
+      try {
+        const result = await s3Provider.copyFile(
+          'staging/forms/123/lease1/file1.pdf',
+          'forms/123/responses/file1.pdf',
+          { contentType: 'application/pdf' }
+        );
+        expect(mockSend).toHaveBeenCalledWith(
+          expect.objectContaining({
+            input: expect.objectContaining({
+              Key: 'forms/123/responses/file1.pdf',
+              ContentType: 'application/pdf'
+            })
+          }),
+          expect.any(Object)
+        );
+        expect(result).toBe('forms/123/responses/file1.pdf');
+      } finally {
+        s3Provider.client = originalClient;
+      }
+    });
   });
 
   describe('S3StorageProvider - Environment and Mock Mode Guarding', () => {
@@ -138,14 +223,18 @@ describe('StorageService and S3StorageProvider', () => {
       expect(provider.client).toBeNull();
       expect(provider.isMock).toBe(false);
 
-      await expect(provider.uploadFile(Buffer.from('data'), 'test.pdf', 'application/pdf'))
-        .rejects.toThrow(/Missing credentials\/config in production environment/);
-      await expect(provider.getFileStream('test.pdf'))
-        .rejects.toThrow(/Missing credentials\/config in production environment/);
-      await expect(provider.getPresignedUrl('test.pdf'))
-        .rejects.toThrow(/Missing credentials\/config in production environment/);
-      await expect(provider.deleteFile('test.pdf'))
-        .rejects.toThrow(/Missing credentials\/config in production environment/);
+      await expect(
+        provider.uploadFile(Buffer.from('data'), 'test.pdf', 'application/pdf')
+      ).rejects.toThrow(/Missing credentials\/config in production environment/);
+      await expect(provider.getFileStream('test.pdf')).rejects.toThrow(
+        /Missing credentials\/config in production environment/
+      );
+      await expect(provider.getPresignedUrl('test.pdf')).rejects.toThrow(
+        /Missing credentials\/config in production environment/
+      );
+      await expect(provider.deleteFile('test.pdf')).rejects.toThrow(
+        /Missing credentials\/config in production environment/
+      );
     });
 
     it('disallows mock storage and throws in staging when credentials are missing', async () => {
@@ -159,10 +248,12 @@ describe('StorageService and S3StorageProvider', () => {
       expect(provider.client).toBeNull();
       expect(provider.isMock).toBe(false);
 
-      await expect(provider.uploadFile(Buffer.from('data'), 'test.pdf', 'application/pdf'))
-        .rejects.toThrow(/Missing credentials\/config in staging environment/);
-      await expect(provider.getFileStream('test.pdf'))
-        .rejects.toThrow(/Missing credentials\/config in staging environment/);
+      await expect(
+        provider.uploadFile(Buffer.from('data'), 'test.pdf', 'application/pdf')
+      ).rejects.toThrow(/Missing credentials\/config in staging environment/);
+      await expect(provider.getFileStream('test.pdf')).rejects.toThrow(
+        /Missing credentials\/config in staging environment/
+      );
     });
 
     it('permits explicit mock mode in development and test environments when credentials are missing', async () => {
@@ -176,7 +267,11 @@ describe('StorageService and S3StorageProvider', () => {
       expect(provider.client).toBeNull();
       expect(provider.isMock).toBe(true);
 
-      const uploadResult = await provider.uploadFile(Buffer.from('data'), 'test.pdf', 'application/pdf');
+      const uploadResult = await provider.uploadFile(
+        Buffer.from('data'),
+        'test.pdf',
+        'application/pdf'
+      );
       expect(uploadResult).toBe('mock-s3-url/test.pdf');
 
       const fileData = await provider.getFileStream('test.pdf');
@@ -264,7 +359,11 @@ describe('StorageService and S3StorageProvider', () => {
       provider.client = { send: mockSend };
 
       const result = await provider.checkBucketAccess();
-      expect(result).toEqual({ ok: false, status: 'bucket_access_denied', error: 'bucket_access_denied' });
+      expect(result).toEqual({
+        ok: false,
+        status: 'bucket_access_denied',
+        error: 'bucket_access_denied'
+      });
     });
 
     it('returns unreachable on connection refused', async () => {
@@ -306,6 +405,288 @@ describe('StorageService and S3StorageProvider', () => {
 
       const result = await provider.checkBucketAccess();
       expect(result).toEqual({ ok: false, status: 'error', error: 'storage_unavailable' });
+    });
+  });
+
+  describe('S3StorageProvider - deleteFiles batch deletion', () => {
+    it('handles empty, null, or undefined key inputs gracefully without calling S3', async () => {
+      const mockSend = vi.fn();
+      const provider = new S3StorageProvider();
+      provider.isMock = false;
+      provider.client = { send: mockSend };
+
+      const r1 = await provider.deleteFiles([]);
+      expect(r1).toEqual({ success: true, deletedKeys: [], failedKeys: [], totalRequested: 0 });
+
+      const r2 = await provider.deleteFiles(null);
+      expect(r2).toEqual({ success: true, deletedKeys: [], failedKeys: [], totalRequested: 0 });
+
+      const r3 = await provider.deleteFiles(undefined);
+      expect(r3).toEqual({ success: true, deletedKeys: [], failedKeys: [], totalRequested: 0 });
+
+      expect(mockSend).not.toHaveBeenCalled();
+    });
+
+    it('filters out falsy, non-string, or blank keys and deduplicates keys', async () => {
+      const mockSend = vi.fn().mockResolvedValueOnce({
+        Deleted: [{ Key: 'k1' }, { Key: 'k2' }]
+      });
+      const provider = new S3StorageProvider();
+      provider.isMock = false;
+      provider.bucket = 'test-bucket';
+      provider.client = { send: mockSend };
+
+      const result = await provider.deleteFiles([
+        'k1',
+        'k1',
+        '',
+        '   ',
+        null,
+        undefined,
+        123,
+        '  k2  '
+      ]);
+
+      expect(mockSend).toHaveBeenCalledTimes(1);
+      const command = mockSend.mock.calls[0][0];
+      expect(command.input.Delete.Objects).toEqual([{ Key: 'k1' }, { Key: 'k2' }]);
+      expect(result.totalRequested).toBe(2);
+      expect(result.deletedKeys).toEqual(['k1', 'k2']);
+      expect(result.success).toBe(true);
+    });
+
+    it('deletes batch of <= 1000 keys in a single DeleteObjectsCommand', async () => {
+      const mockSend = vi.fn().mockResolvedValueOnce({
+        Deleted: [{ Key: 'k1' }, { Key: 'k2' }]
+      });
+      const provider = new S3StorageProvider();
+      provider.isMock = false;
+      provider.bucket = 'test-bucket';
+      provider.client = { send: mockSend };
+
+      const result = await provider.deleteFiles(['k1', 'k2']);
+      expect(mockSend).toHaveBeenCalledTimes(1);
+      expect(result.success).toBe(true);
+      expect(result.deletedKeys).toEqual(['k1', 'k2']);
+      expect(result.failedKeys).toEqual([]);
+      expect(result.totalRequested).toBe(2);
+    });
+
+    it('splits requests into chunks of 1000 when keys exceed 1000', async () => {
+      const totalKeys = 2050;
+      const allKeys = Array.from({ length: totalKeys }, (_, i) => `key-${i}`);
+
+      const mockSend = vi.fn().mockImplementation((command) => {
+        const keysInChunk = command.input.Delete.Objects.map((o) => ({ Key: o.Key }));
+        return Promise.resolve({ Deleted: keysInChunk });
+      });
+
+      const provider = new S3StorageProvider();
+      provider.isMock = false;
+      provider.bucket = 'test-bucket';
+      provider.client = { send: mockSend };
+
+      const result = await provider.deleteFiles(allKeys);
+
+      // 2050 keys should chunk into 1000 + 1000 + 50 = 3 chunks
+      expect(mockSend).toHaveBeenCalledTimes(3);
+      expect(mockSend.mock.calls[0][0].input.Delete.Objects.length).toBe(1000);
+      expect(mockSend.mock.calls[1][0].input.Delete.Objects.length).toBe(1000);
+      expect(mockSend.mock.calls[2][0].input.Delete.Objects.length).toBe(50);
+      expect(result.totalRequested).toBe(2050);
+      expect(result.deletedKeys.length).toBe(2050);
+      expect(result.failedKeys.length).toBe(0);
+      expect(result.success).toBe(true);
+    });
+
+    it('handles partial failures returned by S3 in response.Errors', async () => {
+      const mockSend = vi.fn().mockResolvedValueOnce({
+        Deleted: [{ Key: 'file-success.pdf' }],
+        Errors: [{ Key: 'file-locked.pdf', Code: 'AccessDenied', Message: 'Access Denied' }]
+      });
+      const provider = new S3StorageProvider();
+      provider.isMock = false;
+      provider.bucket = 'test-bucket';
+      provider.client = { send: mockSend };
+
+      const result = await provider.deleteFiles(['file-success.pdf', 'file-locked.pdf']);
+
+      expect(result.success).toBe(false);
+      expect(result.deletedKeys).toEqual(['file-success.pdf']);
+      expect(result.failedKeys).toEqual([
+        { key: 'file-locked.pdf', error: 'Access Denied', code: 'AccessDenied' }
+      ]);
+      expect(result.totalRequested).toBe(2);
+    });
+
+    it('handles chunk-level network or authorization rejection without crashing', async () => {
+      const mockSend = vi.fn().mockRejectedValueOnce(new Error('S3 connection reset'));
+      const provider = new S3StorageProvider();
+      provider.isMock = false;
+      provider.bucket = 'test-bucket';
+      provider.client = { send: mockSend };
+
+      const result = await provider.deleteFiles(['file1.pdf', 'file2.pdf']);
+
+      expect(result.success).toBe(false);
+      expect(result.deletedKeys).toEqual([]);
+      expect(result.failedKeys).toEqual([
+        { key: 'file1.pdf', error: 'S3 connection reset', code: 'Error' },
+        { key: 'file2.pdf', error: 'S3 connection reset', code: 'Error' }
+      ]);
+      expect(result.totalRequested).toBe(2);
+    });
+
+    it('operates in mock mode when unconfigured in dev/test environment', async () => {
+      const provider = new S3StorageProvider();
+      provider.client = null;
+      provider.isMock = true;
+
+      const result = await provider.deleteFiles(['mock1.pdf', 'mock2.pdf']);
+      expect(result.success).toBe(true);
+      expect(result.deletedKeys).toEqual(['mock1.pdf', 'mock2.pdf']);
+      expect(result.failedKeys).toEqual([]);
+      expect(result.totalRequested).toBe(2);
+    });
+
+    it('rejects in production when credentials are unconfigured', async () => {
+      process.env.NODE_ENV = 'production';
+      delete process.env.S3_REGION;
+      delete process.env.S3_BUCKET;
+      delete process.env.S3_ACCESS_KEY_ID;
+      delete process.env.S3_SECRET_ACCESS_KEY;
+
+      const provider = new S3StorageProvider();
+      await expect(provider.deleteFiles(['file1.pdf'])).rejects.toThrow(
+        /Missing credentials\/config in production environment/
+      );
+    });
+
+    it('delegates deleteFiles from StorageService to s3Provider', async () => {
+      const mockResult = { success: true, deletedKeys: ['k1'], failedKeys: [], totalRequested: 1 };
+      const spy = vi.spyOn(s3Provider, 'deleteFiles').mockResolvedValueOnce(mockResult);
+
+      const res = await storageService.deleteFiles(['k1']);
+      expect(spy).toHaveBeenCalledWith(['k1']);
+      expect(res).toBe(mockResult);
+    });
+  });
+
+  describe('Stage 4.3.5 Batch C: Command Timeouts and Graceful Teardown', () => {
+    it('defines bounded default S3 command timeouts', () => {
+      expect(S3_DEFAULT_TIMEOUTS).toBeDefined();
+      expect(S3_DEFAULT_TIMEOUTS.UPLOAD_TIMEOUT_MS).toBe(30000);
+      expect(S3_DEFAULT_TIMEOUTS.DELETE_TIMEOUT_MS).toBe(15000);
+      expect(S3_DEFAULT_TIMEOUTS.GET_TIMEOUT_MS).toBe(30000);
+    });
+
+    it('delegates destroy from StorageService to s3Provider', async () => {
+      const spy = vi.spyOn(s3Provider, 'destroy').mockResolvedValueOnce();
+      await storageService.destroy();
+      expect(spy).toHaveBeenCalled();
+    });
+
+    it('S3StorageProvider destroy destroys active client and nulls client reference', async () => {
+      const provider = new S3StorageProvider();
+      const mockClient = {
+        destroy: vi.fn().mockResolvedValue()
+      };
+      provider.client = mockClient;
+
+      await provider.destroy();
+
+      expect(mockClient.destroy).toHaveBeenCalledTimes(1);
+      expect(provider.client).toBeNull();
+    });
+
+    it('passes abortSignal to client.send in uploadFile, deleteFile, deleteFiles, and getFileStream', async () => {
+      const provider = new S3StorageProvider();
+      const mockSend = vi.fn().mockImplementation(async (command) => {
+        if (command.constructor.name === 'DeleteObjectsCommand') {
+          return { Deleted: [{ Key: 'test.pdf' }], Errors: [] };
+        }
+        if (command.constructor.name === 'GetObjectCommand') {
+          return { Body: 'mock-body', ContentType: 'application/pdf', ContentLength: 9 };
+        }
+        return {};
+      });
+
+      provider.client = { send: mockSend };
+      provider.isMock = false;
+
+      // 1. uploadFile
+      await provider.uploadFile(Buffer.from('test'), 'upload.pdf', 'application/pdf');
+      expect(mockSend).toHaveBeenLastCalledWith(
+        expect.anything(),
+        expect.objectContaining({ abortSignal: expect.anything() })
+      );
+
+      // 2. deleteFile
+      await provider.deleteFile('delete.pdf');
+      expect(mockSend).toHaveBeenLastCalledWith(
+        expect.anything(),
+        expect.objectContaining({ abortSignal: expect.anything() })
+      );
+
+      // 3. deleteFiles
+      await provider.deleteFiles(['test.pdf']);
+      expect(mockSend).toHaveBeenLastCalledWith(
+        expect.anything(),
+        expect.objectContaining({ abortSignal: expect.anything() })
+      );
+
+      // 4. getFileStream
+      await provider.getFileStream('get.pdf');
+      expect(mockSend).toHaveBeenLastCalledWith(
+        expect.anything(),
+        expect.objectContaining({ abortSignal: expect.anything() })
+      );
+    });
+
+    it('aborts GetObjectCommand and throws TimeoutError when S3 acquisition exceeds timeoutMs', async () => {
+      const provider = new S3StorageProvider();
+      provider.isMock = false;
+
+      const mockSend = vi.fn().mockImplementation((_command, { abortSignal }) => {
+        return new Promise((_resolve, reject) => {
+          if (abortSignal.aborted) {
+            return reject(abortSignal.reason);
+          }
+          abortSignal.addEventListener('abort', () => {
+            reject(abortSignal.reason);
+          });
+        });
+      });
+      provider.client = { send: mockSend };
+
+      await expect(provider.getFileStream('test.pdf', { timeoutMs: 20 })).rejects.toThrow(
+        /timed out after 20ms/
+      );
+
+      expect(mockSend).toHaveBeenCalledTimes(1);
+    });
+
+    it('clears command acquisition timer so body stream remains open past acquisition timeout', async () => {
+      const provider = new S3StorageProvider();
+      provider.isMock = false;
+
+      const bodyStream = new Readable({ read() {} });
+      const mockSend = vi.fn().mockResolvedValue({
+        Body: bodyStream,
+        ContentType: 'application/pdf',
+        ContentLength: 1000
+      });
+      provider.client = { send: mockSend };
+
+      const result = await provider.getFileStream('test.pdf', { timeoutMs: 25 });
+      expect(result.stream).toBe(bodyStream);
+
+      // Wait 50ms (past the 25ms acquisition timeout)
+      await new Promise((r) => setTimeout(r, 50));
+
+      // The stream must not be destroyed by the acquisition timeout
+      expect(result.stream.destroyed).toBe(false);
+      bodyStream.destroy();
     });
   });
 });

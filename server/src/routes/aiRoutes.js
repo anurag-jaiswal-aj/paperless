@@ -9,11 +9,13 @@ import {
   responseCategorizeHandler
 } from '../controllers/aiController.js';
 import { protect } from '../middleware/authMiddleware.js';
+import { validateObjectId } from '../middleware/validateObjectId.js';
 import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 
 const router = express.Router();
 
-export const getAiRateLimitKey = (req) => req?.user?._id?.toString() || (req?.ip ? ipKeyGenerator(req.ip) : 'unknown');
+export const getAiRateLimitKey = (req) =>
+  req?.user?._id?.toString() || (req?.ip ? ipKeyGenerator(req.ip) : 'unknown');
 
 export const aiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
@@ -29,15 +31,15 @@ router.use(protect, aiLimiter);
 
 router.post('/questions/generate', generateQuestionsHandler);
 router.post('/writing/improve', improveWritingHandler);
-router.post('/consultant/:formId', consultantHandler);
+router.post('/consultant/:formId', validateObjectId('formId'), consultantHandler);
 
 // Phase 7: Response Intelligence
-router.post('/responses/summary/:formId', responseSummaryHandler);
-router.post('/responses/themes/:formId', responseThemesHandler);
-router.post('/responses/categorize/:formId', responseCategorizeHandler);
+router.post('/responses/summary/:formId', validateObjectId('formId'), responseSummaryHandler);
+router.post('/responses/themes/:formId', validateObjectId('formId'), responseThemesHandler);
+router.post('/responses/categorize/:formId', validateObjectId('formId'), responseCategorizeHandler);
 
 // Phase 5 legacy for regression tests
-router.post('/summary/:formId', summaryHandler);
+router.post('/summary/:formId', validateObjectId('formId'), summaryHandler);
 // Map legacy paths if frontend still uses them during transition
 router.post('/suggest', generateQuestionsHandler);
 router.post('/improve', improveWritingHandler);
