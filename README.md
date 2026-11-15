@@ -199,8 +199,9 @@ PORT=5001 # Default port 5001 avoids macOS AirPlay Receiver conflicts on port 50
 NODE_ENV=development
 FRONTEND_URL=http://localhost:5173
 
-# MongoDB
-MONGO_URI=mongodb://localhost:27017/paperless
+# MongoDB (Replica set required for multi-document ACID transactions; standalone is rejected)
+# Ensure local mongod runs with `--replSet rs0` and is initialized via `rs.initiate()`
+MONGO_URI=mongodb://localhost:27017/paperless?replicaSet=rs0
 
 # JWT Authentication
 JWT_SECRET=your_super_secret_jwt_key
