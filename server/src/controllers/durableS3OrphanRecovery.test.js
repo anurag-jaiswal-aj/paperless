@@ -16,7 +16,8 @@ import DeletionCleanupJob from '../models/deletionCleanupJob.js';
 import {
   executeFormDeletion,
   recoverAbandonedFormDeletions,
-  processDeletionCleanupJob
+  processDeletionCleanupJob,
+  CleanupLeaseHeartbeat
 } from './formController.js';
 import { submitResponse } from './responseController.js';
 import { SubmissionReservationManager } from '../utils/submissionReservationManager.js';
@@ -3825,6 +3826,211 @@ describe('Stage 4.3.5 B1: Durable S3 Orphan Recovery & Post-Cascade Lifecycle (1
       const finalJob = await DeletionCleanupJob.findOne({ formId });
       expect(finalJob.status).toBe('reconciled');
       expect(finalJob.vacuumAt).toBeNull();
+    });
+  });
+
+  describe('Stage 4.3.6.1: Single-Page S3 Cleanup Lease Renewal & Heartbeat Suite (5 Tests)', () => {
+    it('Single-Page Renewal Test 1: Delayed single-page listing outlasting lease interval is continuously renewed by owner', async () => {
+      const form = await Form.create({
+        ownerId: userId,
+        title: 'Single Page 1',
+        status: 'published'
+      });
+      const stagedKey = `staging/forms/${form._id}/staged1.pdf`;
+      activeS3Objects.set(stagedKey, { mime: 'application/pdf', timestamp: Date.now() });
+
+      await executeFormDeletion(form._id, { userId, drainWaitMs: 0, skipImmediateCleanup: true });
+      await DeletionCleanupJob.updateOne(
+        { formId: form._id },
+        { $set: { eligibleUntil: new Date(Date.now() - 1000) } }
+      );
+
+      vi.spyOn(storageService, 'listObjectsByPrefix').mockImplementation(async (prefix) => {
+        // Delay single-page listing by 120ms (exceeding 80ms lease duration)
+        await new Promise((r) => setTimeout(r, 120));
+        const matched = [];
+        for (const k of activeS3Objects.keys()) {
+          if (k.startsWith(prefix)) {
+            matched.push(k);
+          }
+        }
+        return {
+          keys: matched,
+          isTruncated: false,
+          nextContinuationToken: null,
+          keyCount: matched.length
+        };
+      });
+
+      const sweep = await processDeletionCleanupJob(form._id, {
+        forceImmediate: true,
+        leaseDurationMs: 80,
+        heartbeatIntervalMs: 25
+      });
+
+      expect(sweep.processed).toBe(true);
+      expect(sweep.deletedCount).toBe(1);
+      expect(activeS3Objects.has(stagedKey)).toBe(false);
+
+      const finalJob = await DeletionCleanupJob.findOne({ formId: form._id });
+      expect(finalJob.status).toBe('reconciled');
+    });
+
+    it('Single-Page Renewal Test 2: Heartbeat renewal strictly matches current {_id, leaseId, epoch} CAS ownership', async () => {
+      const form = await Form.create({
+        ownerId: userId,
+        title: 'Single Page 2',
+        status: 'published'
+      });
+      await executeFormDeletion(form._id, { userId, drainWaitMs: 0, skipImmediateCleanup: true });
+
+      const updateOneSpy = vi.spyOn(DeletionCleanupJob, 'updateOne');
+
+      vi.spyOn(storageService, 'listObjectsByPrefix').mockImplementation(async () => {
+        await new Promise((r) => setTimeout(r, 80));
+        return { keys: [], isTruncated: false };
+      });
+
+      await processDeletionCleanupJob(form._id, {
+        forceImmediate: true,
+        leaseDurationMs: 60,
+        heartbeatIntervalMs: 20
+      });
+
+      // Verify heartbeat update calls specify exact {_id, leaseId, epoch}
+      const heartbeatCalls = updateOneSpy.mock.calls.filter(
+        (call) => call[1]?.$set?.leaseExpiresAt
+      );
+      expect(heartbeatCalls.length).toBeGreaterThanOrEqual(2);
+      for (const call of heartbeatCalls) {
+        expect(call[0]).toMatchObject({
+          _id: expect.any(Object),
+          leaseId: expect.any(String),
+          epoch: expect.any(Number)
+        });
+      }
+    });
+
+    it('Single-Page Renewal Test 3: Competing worker reclamation is detected as lease loss by owner heartbeat', async () => {
+      const form = await Form.create({
+        ownerId: userId,
+        title: 'Single Page 3',
+        status: 'published'
+      });
+      await executeFormDeletion(form._id, { userId, drainWaitMs: 0, skipImmediateCleanup: true });
+
+      let workerReclaimed = false;
+      vi.spyOn(storageService, 'listObjectsByPrefix').mockImplementation(async () => {
+        // Delay listing by 120ms; mid-way, Worker 2 reclaims the job via CAS with bumped epoch
+        setTimeout(async () => {
+          const job = await DeletionCleanupJob.findOne({ formId: form._id });
+          if (job) {
+            await DeletionCleanupJob.updateOne(
+              { _id: job._id },
+              { $set: { leaseId: 'competing-worker-lease', epoch: job.epoch + 10 } }
+            );
+            workerReclaimed = true;
+          }
+        }, 30);
+        await new Promise((r) => setTimeout(r, 120));
+        return { keys: [`staging/forms/${form._id}/item.pdf`], isTruncated: false };
+      });
+
+      const sweep = await processDeletionCleanupJob(form._id, {
+        forceImmediate: true,
+        leaseDurationMs: 60,
+        heartbeatIntervalMs: 20
+      });
+
+      expect(workerReclaimed).toBe(true);
+      expect(sweep.processed).toBe(false);
+      expect(sweep.status).toBe('lease_lost');
+    });
+
+    it('Single-Page Renewal Test 4: Stale worker with lost lease is strictly prevented from calling deleteFiles', async () => {
+      const form = await Form.create({
+        ownerId: userId,
+        title: 'Single Page 4',
+        status: 'published'
+      });
+      const stagedKey = `staging/forms/${form._id}/protected.pdf`;
+      activeS3Objects.set(stagedKey, { mime: 'application/pdf', timestamp: Date.now() });
+
+      await executeFormDeletion(form._id, { userId, drainWaitMs: 0, skipImmediateCleanup: true });
+
+      const deleteFilesSpy = vi.spyOn(storageService, 'deleteFiles');
+
+      vi.spyOn(storageService, 'listObjectsByPrefix').mockImplementation(async () => {
+        // During listing, lease is stolen by competing worker
+        setTimeout(async () => {
+          const job = await DeletionCleanupJob.findOne({ formId: form._id });
+          if (job) {
+            await DeletionCleanupJob.updateOne(
+              { _id: job._id },
+              { $set: { leaseId: 'stealer-lease', epoch: job.epoch + 5 } }
+            );
+          }
+        }, 25);
+        await new Promise((r) => setTimeout(r, 100));
+        return { keys: [stagedKey], isTruncated: false };
+      });
+
+      const sweep = await processDeletionCleanupJob(form._id, {
+        forceImmediate: true,
+        leaseDurationMs: 60,
+        heartbeatIntervalMs: 20
+      });
+
+      expect(sweep.processed).toBe(false);
+      expect(sweep.status).toBe('lease_lost');
+      // deleteFiles must NEVER be called by the stale worker
+      expect(deleteFilesSpy).not.toHaveBeenCalled();
+      // The staged key must NOT have been deleted by the stale worker
+      expect(activeS3Objects.has(stagedKey)).toBe(true);
+    });
+
+    it('Single-Page Renewal Test 5: Heartbeat timer and asynchronous work are cleanly stopped after completion and on failure', async () => {
+      // Unit verification of CleanupLeaseHeartbeat
+      const jobId = new mongoose.Types.ObjectId();
+      const heartbeat = new CleanupLeaseHeartbeat({
+        jobId,
+        leaseId: crypto.randomUUID(),
+        epoch: 1,
+        leaseDurationMs: 60,
+        intervalMs: 15
+      });
+
+      heartbeat.start();
+      expect(heartbeat.timer).not.toBeNull();
+      expect(heartbeat.stopped).toBe(false);
+
+      await heartbeat.stop();
+      expect(heartbeat.timer).toBeNull();
+      expect(heartbeat.stopped).toBe(true);
+
+      // Integration verification: Even if listing throws an unhandled error, heartbeat is stopped
+      const form = await Form.create({
+        ownerId: userId,
+        title: 'Single Page 5',
+        status: 'published'
+      });
+      await executeFormDeletion(form._id, { userId, drainWaitMs: 0, skipImmediateCleanup: true });
+
+      vi.spyOn(storageService, 'listObjectsByPrefix').mockRejectedValueOnce(
+        new Error('Simulated S3 listing fatal error')
+      );
+
+      const result = await processDeletionCleanupJob(form._id, {
+        forceImmediate: true,
+        leaseDurationMs: 60,
+        heartbeatIntervalMs: 20
+      });
+
+      expect(result.processed).toBe(false);
+      expect(result.error).toBe('Simulated S3 listing fatal error');
+
+      // Wait 50ms and confirm no dangling heartbeat timer throws or causes unhandled errors
+      await new Promise((r) => setTimeout(r, 50));
     });
   });
 });

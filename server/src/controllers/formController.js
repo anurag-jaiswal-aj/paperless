@@ -1344,6 +1344,75 @@ export const deleteForm = async (req, res, next) => {
 };
 
 /**
+ * Background heartbeat helper for DeletionCleanupJob workers.
+ * Recursively schedules CAS lease renewals during prolonged storage operations
+ * (both single-page and multi-page prefix scans) and detects lease loss.
+ */
+export class CleanupLeaseHeartbeat {
+  constructor({ jobId, leaseId, epoch, leaseDurationMs, intervalMs }) {
+    this.jobId = jobId;
+    this.leaseId = leaseId;
+    this.epoch = epoch;
+    this.leaseDurationMs = leaseDurationMs;
+    this.intervalMs = intervalMs || Math.max(50, Math.floor(leaseDurationMs / 3));
+    this.timer = null;
+    this.stopped = false;
+    this.isRenewing = false;
+    this.leaseLost = false;
+  }
+
+  start() {
+    this.scheduleNext();
+  }
+
+  scheduleNext() {
+    if (this.stopped || this.leaseLost) return;
+    this.timer = setTimeout(async () => {
+      if (this.stopped || this.leaseLost) return;
+      await this.renew();
+      if (!this.stopped && !this.leaseLost) {
+        this.scheduleNext();
+      }
+    }, this.intervalMs);
+  }
+
+  async renew() {
+    if (this.stopped || this.leaseLost || this.isRenewing) return;
+    this.isRenewing = true;
+    try {
+      const now = Date.now();
+      const updateResult = await DeletionCleanupJob.updateOne(
+        { _id: this.jobId, leaseId: this.leaseId, epoch: this.epoch },
+        { $set: { leaseExpiresAt: new Date(now + this.leaseDurationMs), updatedAt: new Date(now) } }
+      );
+      if (updateResult.matchedCount === 0) {
+        // Ownership fencing: lease was reclaimed by another worker or epoch bumped
+        this.leaseLost = true;
+      }
+    } catch (err) {
+      // Catch DB errors to avoid unhandled rejections
+      logger.warn('storage.cleanup_heartbeat_error', {
+        jobId: this.jobId,
+        error: err.message
+      });
+    } finally {
+      this.isRenewing = false;
+    }
+  }
+
+  async stop() {
+    this.stopped = true;
+    if (this.timer) {
+      clearTimeout(this.timer);
+      this.timer = null;
+    }
+    while (this.isRenewing) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+  }
+}
+
+/**
  * Processes a single DeletionCleanupJob tombstone.
  * Fenced by CAS lease (leaseId, epoch, leaseExpiresAt).
  *
@@ -1433,6 +1502,15 @@ export const processDeletionCleanupJob = async (jobOrFormId, options = {}) => {
   const epoch = claimed.epoch;
   let totalDeleted = 0;
 
+  const heartbeat = new CleanupLeaseHeartbeat({
+    jobId: claimed._id,
+    leaseId,
+    epoch,
+    leaseDurationMs,
+    intervalMs: options.heartbeatIntervalMs
+  });
+  heartbeat.start();
+
   try {
     if (signal?.aborted) {
       await DeletionCleanupJob.updateOne(
@@ -1450,14 +1528,11 @@ export const processDeletionCleanupJob = async (jobOrFormId, options = {}) => {
       let continuationToken = undefined;
       let pageCount = 0;
       do {
-        if (signal?.aborted) break;
+        if (signal?.aborted || heartbeat.leaseLost) break;
         pageCount++;
         if (pageCount > 1) {
-          // Heartbeat lease renewal during large multi-page scans
-          await DeletionCleanupJob.updateOne(
-            { _id: claimed._id, leaseId, epoch: claimed.epoch },
-            { $set: { leaseExpiresAt: new Date(Date.now() + leaseDurationMs) } }
-          ).catch(() => {});
+          // Additional immediate heartbeat renewal during pagination transitions
+          await heartbeat.renew();
         }
         const listResult = await storageService.listObjectsByPrefix(prefix, {
           continuationToken,
@@ -1470,18 +1545,38 @@ export const processDeletionCleanupJob = async (jobOrFormId, options = {}) => {
       } while (continuationToken);
     }
 
+    // Fencing gate: If lease was lost during listing, abort immediately
+    // and prevent initiating subsequent storage operations (deleteFiles).
+    if (heartbeat.leaseLost) {
+      logger.warn('storage.cleanup_lease_lost_during_listing', {
+        jobId: claimed._id,
+        formId: claimed.formId,
+        epoch
+      });
+      return { processed: false, status: 'lease_lost' };
+    }
+
     // Deduplicate and delete discovered keys
     const uniqueKeys = Array.from(new Set(discoveredKeys));
     let hasFailedKeys = false;
     let deleteErrorMsg = null;
 
     if (uniqueKeys.length > 0) {
-      const deleteResult = await storageService.deleteFiles(uniqueKeys);
+      const deleteResult = await storageService.deleteFiles(uniqueKeys, { signal });
       totalDeleted = (deleteResult?.deletedKeys || []).length;
       if (!deleteResult?.success || (deleteResult?.failedKeys || []).length > 0) {
         hasFailedKeys = true;
         deleteErrorMsg = deleteResult?.error || 'Failed to delete some storage files';
       }
+    }
+
+    if (heartbeat.leaseLost) {
+      logger.warn('storage.cleanup_lease_lost_after_deletion', {
+        jobId: claimed._id,
+        formId: claimed.formId,
+        epoch
+      });
+      return { processed: false, status: 'lease_lost' };
     }
 
     const checkNow = new Date();
@@ -1598,6 +1693,8 @@ export const processDeletionCleanupJob = async (jobOrFormId, options = {}) => {
       deletedCount: totalDeleted,
       error: err.message
     };
+  } finally {
+    await heartbeat.stop();
   }
 };
 

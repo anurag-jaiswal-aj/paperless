@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import EmailService from './EmailService.js';
+import EmailService, { DEFAULT_EMAIL_TIMEOUT_MS } from './EmailService.js';
 import { logger } from '../utils/logger.js';
 
 describe('EmailService', () => {
@@ -254,6 +254,287 @@ describe('EmailService', () => {
       expect(loggedOutput).toContain(
         '[Omitted: Sensitive password reset content is never written to logs]'
       );
+    });
+  });
+
+  describe('Stage 4.3.6.1: EmailService Timeout, Cancellation and Provider Failure Resilience', () => {
+    it('defines a default 5,000ms call-level timeout constant', () => {
+      expect(DEFAULT_EMAIL_TIMEOUT_MS).toBe(5000);
+    });
+
+    it('passes genuine AbortSignal to Resend SDK requestOptions and cleans up timer on success', async () => {
+      process.env.NODE_ENV = 'production';
+      process.env.RESEND_API_KEY = 're_testkey1234567890';
+      const emailService = new EmailService();
+
+      let passedSignal = null;
+      emailService.resend = {
+        emails: {
+          send: vi.fn().mockImplementation((payload, requestOptions) => {
+            passedSignal = requestOptions?.signal;
+            return Promise.resolve({ data: { id: 'email-123' }, error: null });
+          })
+        }
+      };
+
+      const result = await emailService.sendEmail({
+        to: 'target@example.com',
+        subject: 'Normal Email',
+        text: 'Normal body'
+      });
+
+      expect(result).toEqual({ data: { id: 'email-123' }, error: null });
+      expect(emailService.resend.emails.send).toHaveBeenCalledTimes(1);
+      expect(passedSignal).toBeInstanceOf(AbortSignal);
+      expect(passedSignal.aborted).toBe(false);
+    });
+
+    it('aborts and throws TimeoutError when provider request exceeds default timeout', async () => {
+      process.env.NODE_ENV = 'production';
+      process.env.RESEND_API_KEY = 're_testkey1234567890';
+      const emailService = new EmailService();
+
+      let receivedSignal = null;
+      emailService.resend = {
+        emails: {
+          send: vi.fn().mockImplementation((_payload, requestOptions) => {
+            receivedSignal = requestOptions?.signal;
+            // Return a promise that never resolves on its own
+            return new Promise(() => {});
+          })
+        }
+      };
+
+      const errorSpy = vi.spyOn(logger, 'error');
+
+      // Use a shorter custom timeout for fast test execution
+      const sendPromise = emailService.sendEmail({
+        to: 'target@example.com',
+        subject: 'Hung Email',
+        text: 'Hung body',
+        timeoutMs: 50
+      });
+
+      await expect(sendPromise).rejects.toThrow(/timed out after 50ms/);
+      expect(receivedSignal).not.toBeNull();
+      expect(receivedSignal.aborted).toBe(true);
+      expect(receivedSignal.reason.name).toBe('TimeoutError');
+
+      expect(errorSpy).toHaveBeenCalledWith(
+        expect.stringContaining('timed out after 50ms'),
+        expect.any(Error),
+        expect.objectContaining({ event: 'email.delivery_failed' })
+      );
+    });
+
+    it('cancels delivery immediately when caller abortSignal is pre-aborted', async () => {
+      process.env.NODE_ENV = 'production';
+      process.env.RESEND_API_KEY = 're_testkey1234567890';
+      const emailService = new EmailService();
+
+      const callerController = new AbortController();
+      callerController.abort(new Error('Caller cancelled before send'));
+
+      emailService.resend = {
+        emails: {
+          send: vi.fn().mockImplementation((_payload, requestOptions) => {
+            if (requestOptions?.signal?.aborted) {
+              return Promise.reject(requestOptions.signal.reason);
+            }
+            return Promise.resolve({ data: { id: 'ok' } });
+          })
+        }
+      };
+
+      await expect(
+        emailService.sendEmail({
+          to: 'target@example.com',
+          subject: 'Pre-aborted',
+          text: 'Pre-aborted',
+          abortSignal: callerController.signal
+        })
+      ).rejects.toThrow('Caller cancelled before send');
+    });
+
+    it('cancels delivery when caller abortSignal is triggered in flight', async () => {
+      process.env.NODE_ENV = 'production';
+      process.env.RESEND_API_KEY = 're_testkey1234567890';
+      const emailService = new EmailService();
+
+      const callerController = new AbortController();
+      emailService.resend = {
+        emails: {
+          send: vi.fn().mockImplementation((_payload, requestOptions) => {
+            return new Promise((resolve, reject) => {
+              requestOptions?.signal?.addEventListener('abort', () => {
+                reject(requestOptions.signal.reason);
+              });
+            });
+          })
+        }
+      };
+
+      const sendPromise = emailService.sendEmail({
+        to: 'target@example.com',
+        subject: 'In-flight abort',
+        text: 'In-flight abort',
+        abortSignal: callerController.signal,
+        timeoutMs: 5000
+      });
+
+      // Trigger caller cancellation mid-flight
+      setTimeout(() => {
+        callerController.abort(new Error('Caller aborted mid-flight'));
+      }, 20);
+
+      await expect(sendPromise).rejects.toThrow('Caller aborted mid-flight');
+    });
+
+    it('handles late promise rejection after timeout without causing unhandled promise rejections', async () => {
+      process.env.NODE_ENV = 'production';
+      process.env.RESEND_API_KEY = 're_testkey1234567890';
+      const emailService = new EmailService();
+
+      let rejectLate;
+      emailService.resend = {
+        emails: {
+          send: vi.fn().mockImplementation(() => {
+            return new Promise((_resolve, reject) => {
+              rejectLate = reject;
+            });
+          })
+        }
+      };
+
+      const debugSpy = vi.spyOn(logger, 'debug');
+
+      const sendPromise = emailService.sendEmail({
+        to: 'target@example.com',
+        subject: 'Late Rejection',
+        text: 'Late Rejection',
+        timeoutMs: 30
+      });
+
+      await expect(sendPromise).rejects.toThrow(/timed out after 30ms/);
+
+      // Provider rejects later, after the timeout has already settled the call
+      expect(() => {
+        rejectLate(new Error('Late network reset error from target@example.com'));
+      }).not.toThrow();
+
+      // Wait a tick for catch handler to execute
+      await new Promise((r) => setTimeout(r, 20));
+
+      expect(debugSpy).toHaveBeenCalledWith(
+        'email.late_rejection_suppressed',
+        expect.objectContaining({
+          error: expect.stringContaining('[REDACTED_EMAIL]')
+        })
+      );
+    });
+
+    it('throws sanitized provider error on HTTP 429 Rate Limit error response', async () => {
+      process.env.NODE_ENV = 'production';
+      process.env.RESEND_API_KEY = 're_testkey1234567890';
+      const emailService = new EmailService();
+
+      emailService.resend = {
+        emails: {
+          send: vi.fn().mockResolvedValue({
+            data: null,
+            error: {
+              name: 'rate_limit_exceeded',
+              message: 'Rate limit exceeded for account with key re_secretkey123456789',
+              statusCode: 429
+            }
+          })
+        }
+      };
+
+      const errorSpy = vi.spyOn(logger, 'error');
+
+      await expect(
+        emailService.sendEmail({
+          to: 'target@example.com',
+          subject: '429 Test',
+          text: '429 Body'
+        })
+      ).rejects.toThrow(/Rate limit exceeded/);
+
+      expect(errorSpy).toHaveBeenCalled();
+      const loggedError = errorSpy.mock.calls
+        .map((c) => c.map((a) => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' '))
+        .join('\n');
+      expect(loggedError).toContain('[REDACTED_API_KEY]');
+      expect(loggedError).not.toContain('re_secretkey123456789');
+    });
+
+    it('throws sanitized provider error on HTTP 504 Gateway Timeout error response', async () => {
+      process.env.NODE_ENV = 'production';
+      process.env.RESEND_API_KEY = 're_testkey1234567890';
+      const emailService = new EmailService();
+
+      emailService.resend = {
+        emails: {
+          send: vi.fn().mockResolvedValue({
+            data: null,
+            error: {
+              name: 'gateway_timeout',
+              message: 'Gateway Timeout connecting to upstream server for target@example.com',
+              statusCode: 504
+            }
+          })
+        }
+      };
+
+      const errorSpy = vi.spyOn(logger, 'error');
+
+      await expect(
+        emailService.sendEmail({
+          to: 'target@example.com',
+          subject: '504 Test',
+          text: '504 Body'
+        })
+      ).rejects.toThrow(/Gateway Timeout/);
+
+      expect(errorSpy).toHaveBeenCalled();
+      const loggedError = errorSpy.mock.calls
+        .map((c) => c.map((a) => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' '))
+        .join('\n');
+      expect(loggedError).toContain('[REDACTED_EMAIL]');
+      expect(loggedError).not.toContain('target@example.com');
+    });
+
+    it('throws and sanitizes ECONNRESET connection reset network errors', async () => {
+      process.env.NODE_ENV = 'production';
+      process.env.RESEND_API_KEY = 're_testkey1234567890';
+      const emailService = new EmailService();
+
+      const netError = new Error('read ECONNRESET while sending to target@example.com');
+      netError.code = 'ECONNRESET';
+
+      emailService.resend = {
+        emails: {
+          send: vi.fn().mockRejectedValue(netError)
+        }
+      };
+
+      const errorSpy = vi.spyOn(logger, 'error');
+
+      await expect(
+        emailService.sendEmail({
+          to: 'target@example.com',
+          subject: 'Network Reset',
+          text: 'Reset body'
+        })
+      ).rejects.toThrow(/ECONNRESET/);
+
+      expect(errorSpy).toHaveBeenCalled();
+      const loggedError = errorSpy.mock.calls
+        .map((c) => c.map((a) => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' '))
+        .join('\n');
+      expect(loggedError).toContain('[REDACTED_EMAIL]');
+      expect(loggedError).not.toContain('target@example.com');
     });
   });
 });

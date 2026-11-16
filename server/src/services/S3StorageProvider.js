@@ -144,7 +144,8 @@ class S3StorageProvider {
     }
 
     const timeoutMs = options.timeoutMs || S3_DEFAULT_TIMEOUTS.DELETE_TIMEOUT_MS;
-    const { signal, cleanup } = createTimeoutSignal(timeoutMs);
+    const parentSignal = options.abortSignal || options.signal;
+    const { signal, cleanup } = createTimeoutSignal(timeoutMs, parentSignal);
 
     try {
       const command = new DeleteObjectCommand({
@@ -162,6 +163,10 @@ class S3StorageProvider {
    * Delete multiple files/objects from storage in bounded batches of up to 1,000 keys.
    *
    * @param {string[]} keys - Array of S3 keys to delete
+   * @param {object} [options] - Optional configurations
+   * @param {number} [options.timeoutMs] - Timeout per batch chunk
+   * @param {AbortSignal} [options.abortSignal] - Optional cancellation signal
+   * @param {AbortSignal} [options.signal] - Alias for abortSignal
    * @returns {Promise<{
    *   success: boolean,
    *   deletedKeys: string[],
@@ -212,13 +217,30 @@ class S3StorageProvider {
     }
 
     const timeoutMs = options.timeoutMs || S3_DEFAULT_TIMEOUTS.DELETE_TIMEOUT_MS;
+    const parentSignal = options.abortSignal || options.signal;
     const CHUNK_SIZE = 1000;
     const deletedKeys = [];
     const failedKeys = [];
 
     for (let i = 0; i < sanitizedKeys.length; i += CHUNK_SIZE) {
+      if (parentSignal?.aborted) {
+        const remainingKeys = sanitizedKeys.slice(i);
+        const abortCode =
+          parentSignal.reason?.name && parentSignal.reason.name !== 'Error'
+            ? parentSignal.reason.name
+            : 'AbortError';
+        for (const key of remainingKeys) {
+          failedKeys.push({
+            key,
+            error: parentSignal.reason?.message || 'Delete operation aborted',
+            code: abortCode
+          });
+        }
+        break;
+      }
+
       const chunk = sanitizedKeys.slice(i, i + CHUNK_SIZE);
-      const { signal, cleanup } = createTimeoutSignal(timeoutMs);
+      const { signal, cleanup } = createTimeoutSignal(timeoutMs, parentSignal);
 
       try {
         const command = new DeleteObjectsCommand({
@@ -276,12 +298,32 @@ class S3StorageProvider {
           error: chunkError.message
         });
 
+        const abortCode =
+          parentSignal?.reason?.name && parentSignal.reason.name !== 'Error'
+            ? parentSignal.reason.name
+            : 'AbortError';
+
         for (const key of chunk) {
           failedKeys.push({
             key,
             error: chunkError.message || 'ChunkDeleteFailed',
-            code: chunkError.name || chunkError.code || 'ChunkError'
+            code: parentSignal?.aborted
+              ? abortCode
+              : chunkError.name || chunkError.code || 'ChunkError'
           });
+        }
+
+        // If parent signal was aborted, do not proceed to subsequent chunks
+        if (parentSignal?.aborted) {
+          const remainingKeys = sanitizedKeys.slice(i + CHUNK_SIZE);
+          for (const key of remainingKeys) {
+            failedKeys.push({
+              key,
+              error: parentSignal.reason?.message || 'Delete operation aborted',
+              code: abortCode
+            });
+          }
+          break;
         }
       } finally {
         cleanup();

@@ -2,12 +2,16 @@ import { Resend } from 'resend';
 import { logger } from '../utils/logger.js';
 
 /**
+ * Default call-level timeout for email delivery in milliseconds.
+ */
+export const DEFAULT_EMAIL_TIMEOUT_MS = 5000;
+
+/**
  * EmailService
  *
  * Abstraction layer for email operations.
  * Isolates the application from the underlying email provider (e.g., Resend).
  */
-
 class EmailService {
   constructor() {
     this.resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null;
@@ -58,16 +62,20 @@ class EmailService {
   }
 
   /**
-   * Send an email
+   * Send an email with a default 5,000ms call-level timeout and genuine AbortSignal cancellation.
+   *
    * @param {Object} options
    * @param {string} options.to - Recipient email address
    * @param {string} options.subject - Email subject
    * @param {string} options.html - HTML body of the email
    * @param {string} [options.text] - Plain text body (fallback)
    * @param {boolean} [options.isSensitive] - Whether the email contains sensitive credentials
+   * @param {number} [options.timeoutMs] - Optional call-level timeout in ms (default: 5000)
+   * @param {AbortSignal} [options.abortSignal] - Optional parent cancellation signal
+   * @param {AbortSignal} [options.signal] - Alias for abortSignal
    * @returns {Promise<Object>} Provider specific response
    */
-  async sendEmail(options) {
+  async sendEmail(options = {}) {
     if (!this.resend) {
       if (process.env.NODE_ENV === 'production') {
         logger.error('Email sending failed: Resend API key is not configured in production', {
@@ -84,14 +92,97 @@ class EmailService {
       return { id: 'dev-email-id' };
     }
 
+    const timeoutMs =
+      typeof options.timeoutMs === 'number'
+        ? options.timeoutMs
+        : parseInt(process.env.EMAIL_TIMEOUT_MS, 10) || DEFAULT_EMAIL_TIMEOUT_MS;
+
+    const parentSignal = options.abortSignal || options.signal;
+    const controller = new AbortController();
+
+    let removeParentListener = null;
+    let timerId = null;
+
+    const timeoutError = new Error(`Email delivery timed out after ${timeoutMs}ms`);
+    timeoutError.name = 'TimeoutError';
+    timeoutError.code = 'ETIMEDOUT';
+
+    if (parentSignal) {
+      if (parentSignal.aborted) {
+        controller.abort(parentSignal.reason);
+      } else {
+        const onParentAbort = () => {
+          controller.abort(parentSignal.reason);
+        };
+        parentSignal.addEventListener('abort', onParentAbort, { once: true });
+        removeParentListener = () => parentSignal.removeEventListener('abort', onParentAbort);
+      }
+    }
+
+    timerId = setTimeout(() => {
+      controller.abort(timeoutError);
+    }, timeoutMs);
+
+    const cleanup = () => {
+      if (timerId) {
+        clearTimeout(timerId);
+        timerId = null;
+      }
+      if (removeParentListener) {
+        removeParentListener();
+        removeParentListener = null;
+      }
+    };
+
+    // Construct a promise that rejects when controller aborts
+    const abortPromise = new Promise((_, reject) => {
+      if (controller.signal.aborted) {
+        reject(controller.signal.reason);
+        return;
+      }
+      controller.signal.addEventListener(
+        'abort',
+        () => {
+          reject(controller.signal.reason);
+        },
+        { once: true }
+      );
+    });
+
+    let sendPromise;
     try {
-      const data = await this.resend.emails.send({
-        from: this.fromEmail,
-        to: options.to,
-        subject: options.subject,
-        html: options.html,
-        text: options.text || options.html.replace(/<[^>]*>?/gm, '')
-      });
+      // Pass genuine AbortSignal to Resend SDK requestOptions
+      sendPromise = this.resend.emails.send(
+        {
+          from: this.fromEmail,
+          to: options.to,
+          subject: options.subject,
+          html: options.html,
+          text: options.text || options.html?.replace(/<[^>]*>?/gm, '')
+        },
+        { signal: controller.signal }
+      );
+
+      // Attach catch handler to suppress late unhandled promise rejections
+      // if provider settles after timeout or cancellation
+      if (sendPromise && typeof sendPromise.catch === 'function') {
+        sendPromise.catch((lateErr) => {
+          const lateMsg = this._sanitizeForLogging(lateErr?.message || 'Unknown late error');
+          logger.debug('email.late_rejection_suppressed', { error: lateMsg });
+        });
+      }
+
+      const data = await Promise.race([sendPromise, abortPromise]);
+
+      if (data && data.error) {
+        const errorMsg = data.error.message || 'Resend provider error';
+        const providerError = new Error(errorMsg);
+        providerError.name = data.error.name || 'ResendError';
+        providerError.statusCode = data.error.statusCode;
+        providerError.status = data.error.statusCode;
+        throw providerError;
+      }
+
       return data;
     } catch (error) {
       const safeErrorMsg = this._sanitizeForLogging(
@@ -102,6 +193,8 @@ class EmailService {
         sanitizedMessage: safeErrorMsg
       });
       throw error;
+    } finally {
+      cleanup();
     }
   }
 

@@ -688,5 +688,170 @@ describe('StorageService and S3StorageProvider', () => {
       expect(result.stream.destroyed).toBe(false);
       bodyStream.destroy();
     });
+
+    describe('Stage 4.3.6.1: Delete Operations Abort Signal Propagation', () => {
+      it('deleteFile forwards caller abortSignal and aborts when caller signal is pre-aborted', async () => {
+        const provider = new S3StorageProvider();
+        provider.isMock = false;
+
+        const callerController = new AbortController();
+        callerController.abort(new Error('Pre-aborted delete'));
+
+        const mockSend = vi.fn().mockImplementation((_cmd, { abortSignal }) => {
+          if (abortSignal?.aborted) {
+            return Promise.reject(abortSignal.reason);
+          }
+          return Promise.resolve({});
+        });
+        provider.client = { send: mockSend };
+
+        await expect(
+          provider.deleteFile('cancel.pdf', { abortSignal: callerController.signal })
+        ).rejects.toThrow('Pre-aborted delete');
+
+        expect(mockSend).toHaveBeenCalledWith(
+          expect.any(Object),
+          expect.objectContaining({ abortSignal: expect.objectContaining({ aborted: true }) })
+        );
+      });
+
+      it('deleteFile aborts when caller abortSignal is triggered in flight', async () => {
+        const provider = new S3StorageProvider();
+        provider.isMock = false;
+
+        const callerController = new AbortController();
+        const mockSend = vi.fn().mockImplementation((_cmd, { abortSignal }) => {
+          return new Promise((_resolve, reject) => {
+            abortSignal?.addEventListener('abort', () => {
+              reject(abortSignal.reason);
+            });
+          });
+        });
+        provider.client = { send: mockSend };
+
+        const deletePromise = provider.deleteFile('slow.pdf', {
+          abortSignal: callerController.signal,
+          timeoutMs: 5000
+        });
+
+        setTimeout(() => {
+          callerController.abort(new Error('Caller cancelled delete mid-flight'));
+        }, 20);
+
+        await expect(deletePromise).rejects.toThrow('Caller cancelled delete mid-flight');
+      });
+
+      it('deleteFile aborts and throws TimeoutError when delete exceeds timeoutMs', async () => {
+        const provider = new S3StorageProvider();
+        provider.isMock = false;
+
+        const mockSend = vi.fn().mockImplementation((_cmd, { abortSignal }) => {
+          return new Promise((_resolve, reject) => {
+            abortSignal?.addEventListener('abort', () => {
+              reject(abortSignal.reason);
+            });
+          });
+        });
+        provider.client = { send: mockSend };
+
+        await expect(provider.deleteFile('hung.pdf', { timeoutMs: 25 })).rejects.toThrow(
+          /timed out after 25ms/
+        );
+      });
+
+      it('deleteFiles forwards caller abortSignal to DeleteObjectsCommand', async () => {
+        const provider = new S3StorageProvider();
+        provider.isMock = false;
+
+        const callerController = new AbortController();
+        let passedSignal = null;
+
+        const mockSend = vi.fn().mockImplementation((_cmd, { abortSignal }) => {
+          passedSignal = abortSignal;
+          return Promise.resolve({ Deleted: [{ Key: 'k1' }], Errors: [] });
+        });
+        provider.client = { send: mockSend };
+
+        const result = await provider.deleteFiles(['k1'], { abortSignal: callerController.signal });
+        expect(result.success).toBe(true);
+        expect(result.deletedKeys).toEqual(['k1']);
+        expect(passedSignal).not.toBeNull();
+        expect(passedSignal.aborted).toBe(false);
+      });
+
+      it('deleteFiles marks all keys aborted when pre-aborted signal is supplied without sending S3 requests', async () => {
+        const provider = new S3StorageProvider();
+        provider.isMock = false;
+
+        const callerController = new AbortController();
+        callerController.abort(new Error('Pre-aborted batch'));
+
+        const mockSend = vi.fn();
+        provider.client = { send: mockSend };
+
+        const result = await provider.deleteFiles(['k1', 'k2'], {
+          abortSignal: callerController.signal
+        });
+
+        expect(result.success).toBe(false);
+        expect(result.deletedKeys).toEqual([]);
+        expect(result.failedKeys).toHaveLength(2);
+        expect(result.failedKeys[0]).toMatchObject({
+          key: 'k1',
+          error: 'Pre-aborted batch',
+          code: 'AbortError'
+        });
+        expect(result.failedKeys[1]).toMatchObject({
+          key: 'k2',
+          error: 'Pre-aborted batch',
+          code: 'AbortError'
+        });
+        // S3 client should never have been invoked
+        expect(mockSend).not.toHaveBeenCalled();
+      });
+
+      it('deleteFiles handles mid-flight caller abort and marks remaining chunks as aborted', async () => {
+        const provider = new S3StorageProvider();
+        provider.isMock = false;
+
+        const callerController = new AbortController();
+        const mockSend = vi.fn().mockImplementation((cmd, { abortSignal }) => {
+          // If chunk has k1, abort callerController and throw AbortError
+          return new Promise((_resolve, reject) => {
+            callerController.abort(new Error('Caller cancelled during chunk 1'));
+            if (abortSignal?.aborted) {
+              return reject(abortSignal.reason);
+            }
+            abortSignal?.addEventListener('abort', () => reject(abortSignal.reason));
+          });
+        });
+        provider.client = { send: mockSend };
+
+        const result = await provider.deleteFiles(['k1', 'k2'], {
+          abortSignal: callerController.signal
+        });
+
+        expect(result.success).toBe(false);
+        expect(result.failedKeys).toHaveLength(2);
+        expect(result.failedKeys.map((f) => f.code)).toEqual(['AbortError', 'AbortError']);
+      });
+
+      it('storageService delegates signal options to s3Provider deleteFile and deleteFiles', async () => {
+        const deleteFileSpy = vi.spyOn(s3Provider, 'deleteFile').mockResolvedValueOnce();
+        const deleteFilesSpy = vi.spyOn(s3Provider, 'deleteFiles').mockResolvedValueOnce({
+          success: true,
+          deletedKeys: ['k1'],
+          failedKeys: [],
+          totalRequested: 1
+        });
+
+        const controller = new AbortController();
+        await storageService.deleteFile('f.pdf', { signal: controller.signal });
+        expect(deleteFileSpy).toHaveBeenCalledWith('f.pdf', { signal: controller.signal });
+
+        await storageService.deleteFiles(['k1'], { abortSignal: controller.signal });
+        expect(deleteFilesSpy).toHaveBeenCalledWith(['k1'], { abortSignal: controller.signal });
+      });
+    });
   });
 });
