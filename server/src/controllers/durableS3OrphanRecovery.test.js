@@ -4288,4 +4288,264 @@ describe('Stage 4.3.5 B1: Durable S3 Orphan Recovery & Post-Cascade Lifecycle (1
       await heartbeatFail.stop();
     });
   });
+
+  describe('Stage 4.3.6.2: Durable S3 Cleanup Failure-Path Integration Suite (6 Tests)', () => {
+    it('Cleanup Failure Test 1: S3 listing rejection records lastError, resets to pending, and remains recoverable', async () => {
+      const form = await Form.create({
+        ownerId: userId,
+        title: 'S3 Fail 1',
+        status: 'published'
+      });
+      const stagedKey = `staging/forms/${form._id}/file1.pdf`;
+      activeS3Objects.set(stagedKey, { mime: 'application/pdf', timestamp: Date.now() });
+
+      await executeFormDeletion(form._id, { userId, drainWaitMs: 0, skipImmediateCleanup: true });
+      await DeletionCleanupJob.updateOne(
+        { formId: form._id },
+        { $set: { eligibleUntil: new Date(Date.now() - 1000) } }
+      );
+
+      vi.spyOn(storageService, 'listObjectsByPrefix').mockRejectedValueOnce(
+        new Error('S3 listing network timeout 500')
+      );
+
+      const sweep1 = await processDeletionCleanupJob(form._id, { forceImmediate: true });
+      expect(sweep1.processed).toBe(false);
+      expect(sweep1.status).toBe('pending');
+      expect(sweep1.error).toBe('S3 listing network timeout 500');
+
+      const jobAfterFail = await DeletionCleanupJob.findOne({ formId: form._id });
+      expect(jobAfterFail.status).toBe('pending');
+      expect(jobAfterFail.leaseId).toBeNull();
+      expect(jobAfterFail.leaseExpiresAt).toBeNull();
+      expect(jobAfterFail.lastError).toBe('S3 listing network timeout 500');
+
+      // Subsequent sweep recovers when S3 is reachable
+      const sweep2 = await processDeletionCleanupJob(form._id, { forceImmediate: true });
+      expect(sweep2.processed).toBe(true);
+      expect(sweep2.status).toBe('reconciled');
+      expect(sweep2.deletedCount).toBe(1);
+
+      const jobAfterRecovery = await DeletionCleanupJob.findOne({ formId: form._id });
+      expect(jobAfterRecovery.status).toBe('reconciled');
+      expect(jobAfterRecovery.lastError).toBeNull();
+      expect(activeS3Objects.has(stagedKey)).toBe(false);
+    });
+
+    it('Cleanup Failure Test 2: S3 listing cancellation via AbortSignal resets job to pending without corruption', async () => {
+      const form = await Form.create({
+        ownerId: userId,
+        title: 'S3 Fail 2',
+        status: 'published'
+      });
+      const stagedKey = `staging/forms/${form._id}/file2.pdf`;
+      activeS3Objects.set(stagedKey, { mime: 'application/pdf', timestamp: Date.now() });
+
+      await executeFormDeletion(form._id, { userId, drainWaitMs: 0, skipImmediateCleanup: true });
+      await DeletionCleanupJob.updateOne(
+        { formId: form._id },
+        { $set: { eligibleUntil: new Date(Date.now() - 1000) } }
+      );
+
+      const controller = new AbortController();
+      controller.abort();
+
+      const sweep = await processDeletionCleanupJob(form._id, {
+        forceImmediate: true,
+        signal: controller.signal
+      });
+
+      expect(sweep.processed).toBe(false);
+      expect(sweep.status).toBe('aborted');
+
+      const jobAfterAbort = await DeletionCleanupJob.findOne({ formId: form._id });
+      expect(jobAfterAbort.status).toBe('pending');
+      expect(jobAfterAbort.leaseId).toBeNull();
+      expect(jobAfterAbort.leaseExpiresAt).toBeNull();
+
+      // Ensure object was not deleted and job is recoverable
+      expect(activeS3Objects.has(stagedKey)).toBe(true);
+
+      const recoverySweep = await processDeletionCleanupJob(form._id, { forceImmediate: true });
+      expect(recoverySweep.processed).toBe(true);
+      expect(recoverySweep.status).toBe('reconciled');
+      expect(activeS3Objects.has(stagedKey)).toBe(false);
+    });
+
+    it('Cleanup Failure Test 3: Partial S3 deletion failure preserves job as pending and later sweep reconciles', async () => {
+      const form = await Form.create({
+        ownerId: userId,
+        title: 'S3 Fail 3',
+        status: 'published'
+      });
+      const key1 = `staging/forms/${form._id}/part1.pdf`;
+      const key2 = `staging/forms/${form._id}/part2.pdf`;
+      activeS3Objects.set(key1, { mime: 'application/pdf', timestamp: Date.now() });
+      activeS3Objects.set(key2, { mime: 'application/pdf', timestamp: Date.now() });
+
+      await executeFormDeletion(form._id, { userId, drainWaitMs: 0, skipImmediateCleanup: true });
+      await DeletionCleanupJob.updateOne(
+        { formId: form._id },
+        { $set: { eligibleUntil: new Date(Date.now() - 1000) } }
+      );
+
+      // Simulate partial deleteFiles failure on key2
+      vi.spyOn(storageService, 'deleteFiles').mockResolvedValueOnce({
+        success: false,
+        deletedKeys: [key1],
+        failedKeys: [key2],
+        totalRequested: 2,
+        error: 'Failed to delete some storage files'
+      });
+      activeS3Objects.delete(key1);
+
+      const sweep1 = await processDeletionCleanupJob(form._id, { forceImmediate: true });
+      expect(sweep1.processed).toBe(true);
+      expect(sweep1.status).toBe('pending');
+      expect(sweep1.deletedCount).toBe(1);
+      expect(sweep1.error).toBe('Failed to delete some storage files');
+
+      const jobAfterPartial = await DeletionCleanupJob.findOne({ formId: form._id });
+      expect(jobAfterPartial.status).toBe('pending');
+      expect(jobAfterPartial.leaseId).toBeNull();
+      expect(jobAfterPartial.lastError).toBe('Failed to delete some storage files');
+      expect(jobAfterPartial.stats.objectsDeleted).toBe(1);
+      expect(activeS3Objects.has(key2)).toBe(true);
+
+      // Next sweep deletes key2 successfully and moves to reconciled
+      const sweep2 = await processDeletionCleanupJob(form._id, { forceImmediate: true });
+      expect(sweep2.processed).toBe(true);
+      expect(sweep2.status).toBe('reconciled');
+      expect(sweep2.deletedCount).toBe(1);
+
+      const jobAfterComplete = await DeletionCleanupJob.findOne({ formId: form._id });
+      expect(jobAfterComplete.status).toBe('reconciled');
+      expect(jobAfterComplete.stats.objectsDeleted).toBe(2);
+      expect(activeS3Objects.has(key2)).toBe(false);
+    });
+
+    it('Cleanup Failure Test 4: S3 error during multi-page prefix listing aborts before any deletion occurs', async () => {
+      const form = await Form.create({
+        ownerId: userId,
+        title: 'S3 Fail 4',
+        status: 'published'
+      });
+      const stagedKey = `staging/forms/${form._id}/paged.pdf`;
+      activeS3Objects.set(stagedKey, { mime: 'application/pdf', timestamp: Date.now() });
+
+      await executeFormDeletion(form._id, { userId, drainWaitMs: 0, skipImmediateCleanup: true });
+      await DeletionCleanupJob.updateOne(
+        { formId: form._id },
+        { $set: { eligibleUntil: new Date(Date.now() - 1000) } }
+      );
+
+      const deleteFilesSpy = vi.spyOn(storageService, 'deleteFiles');
+
+      // Page 1 succeeds with continuationToken, Page 2 throws error
+      let pageCallCount = 0;
+      vi.spyOn(storageService, 'listObjectsByPrefix').mockImplementation(async (prefix) => {
+        if (prefix.includes('staging')) {
+          pageCallCount++;
+          if (pageCallCount === 1) {
+            return {
+              keys: [stagedKey],
+              isTruncated: true,
+              nextContinuationToken: 'token-page-2'
+            };
+          }
+          throw new Error('S3 connection reset during page 2');
+        }
+        return { keys: [], isTruncated: false };
+      });
+
+      const sweep = await processDeletionCleanupJob(form._id, { forceImmediate: true });
+      expect(sweep.processed).toBe(false);
+      expect(sweep.status).toBe('pending');
+      expect(sweep.error).toBe('S3 connection reset during page 2');
+
+      // deleteFiles must NEVER be called because listing did not complete cleanly
+      expect(deleteFilesSpy).not.toHaveBeenCalled();
+      expect(activeS3Objects.has(stagedKey)).toBe(true);
+
+      const job = await DeletionCleanupJob.findOne({ formId: form._id });
+      expect(job.status).toBe('pending');
+      expect(job.leaseId).toBeNull();
+      expect(job.lastError).toBe('S3 connection reset during page 2');
+    });
+
+    it('Cleanup Failure Test 5: Lease ownership loss during listing prevents deleteFiles invocation', async () => {
+      const form = await Form.create({
+        ownerId: userId,
+        title: 'S3 Fail 5',
+        status: 'published'
+      });
+      const stagedKey = `staging/forms/${form._id}/staged-lost.pdf`;
+      activeS3Objects.set(stagedKey, { mime: 'application/pdf', timestamp: Date.now() });
+
+      await executeFormDeletion(form._id, { userId, drainWaitMs: 0, skipImmediateCleanup: true });
+      await DeletionCleanupJob.updateOne(
+        { formId: form._id },
+        { $set: { eligibleUntil: new Date(Date.now() - 1000) } }
+      );
+
+      const deleteFilesSpy = vi.spyOn(storageService, 'deleteFiles');
+
+      // While listing is occurring, another worker hijacks the lease
+      vi.spyOn(storageService, 'listObjectsByPrefix').mockImplementation(async () => {
+        await DeletionCleanupJob.updateOne(
+          { formId: form._id },
+          { $set: { leaseId: 'hijacker-lease-id', epoch: 999 } }
+        );
+        return { keys: [stagedKey], isTruncated: false };
+      });
+
+      const sweep = await processDeletionCleanupJob(form._id, { forceImmediate: true });
+      expect(sweep.processed).toBe(false);
+      expect(sweep.status).toBe('lease_lost');
+
+      // Stale worker is completely fenced: deleteFiles is NEVER called
+      expect(deleteFilesSpy).not.toHaveBeenCalled();
+      expect(activeS3Objects.has(stagedKey)).toBe(true);
+
+      // Verify DB record retains the hijacker's epoch and leaseId
+      const job = await DeletionCleanupJob.findOne({ formId: form._id });
+      expect(job.epoch).toBe(999);
+      expect(job.leaseId).toBe('hijacker-lease-id');
+    });
+
+    it('Cleanup Failure Test 6: Stale worker with obsolete epoch is prevented from advancing tombstone status', async () => {
+      const form = await Form.create({
+        ownerId: userId,
+        title: 'S3 Fail 6',
+        status: 'published'
+      });
+
+      await executeFormDeletion(form._id, { userId, drainWaitMs: 0, skipImmediateCleanup: true });
+      const job = await DeletionCleanupJob.findOne({ formId: form._id });
+
+      const staleEpoch = job.epoch;
+      const staleLeaseId = 'stale-lease-123';
+
+      // Advanced epoch in DB
+      await DeletionCleanupJob.updateOne(
+        { _id: job._id },
+        { $set: { status: 'cleaning', leaseId: 'active-lease-456', epoch: staleEpoch + 1 } }
+      );
+
+      // Stale worker tries CAS update with staleEpoch
+      const staleUpdateResult = await DeletionCleanupJob.updateOne(
+        { _id: job._id, leaseId: staleLeaseId, epoch: staleEpoch },
+        { $set: { status: 'reconciled', lastError: null } }
+      );
+
+      expect(staleUpdateResult.matchedCount).toBe(0);
+      expect(staleUpdateResult.modifiedCount).toBe(0);
+
+      // Verify the active state in DB remains untouched
+      const currentJob = await DeletionCleanupJob.findById(job._id);
+      expect(currentJob.epoch).toBe(staleEpoch + 1);
+      expect(currentJob.leaseId).toBe('active-lease-456');
+      expect(currentJob.status).toBe('cleaning');
+    });
+  });
 });

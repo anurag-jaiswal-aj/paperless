@@ -4954,4 +4954,169 @@ describe('Response Controller - Phase 2', () => {
       });
     });
   });
+
+  describe('Stage 4.3.6.2: Submission Email Notification Failure Resilience Suite (5 Tests)', () => {
+    it('Email Failure Test 1: Email provider rejection after successful response save does not fail submission', async () => {
+      const emailSpy = vi
+        .spyOn(EmailService.prototype, 'sendEmail')
+        .mockRejectedValueOnce(new Error('Resend provider HTTP 500 error'));
+      const warnSpy = vi.spyOn(logger, 'warn');
+
+      const res = await request(app)
+        .post(`/api/responses/${form._id}`)
+        .send({
+          answers: [
+            { questionId: qText._id.toString(), value: 'Alice' },
+            { questionId: qEmail._id.toString(), value: 'alice@example.com' },
+            { questionId: qChoice._id.toString(), value: 'Blue' }
+          ]
+        });
+
+      expect(res.status).toBe(201);
+      expect(res.body.success).toBe(true);
+      expect(res.body.data?.id).toBeDefined();
+
+      // Wait for setImmediate and User.findById to settle
+      await new Promise((resolve) => setTimeout(resolve, 30));
+
+      expect(emailSpy).toHaveBeenCalled();
+      const savedResponse = await Response.findById(res.body.data.id);
+      expect(savedResponse).not.toBeNull();
+      expect(savedResponse.formId.toString()).toBe(form._id.toString());
+      expect(warnSpy).toHaveBeenCalledWith(
+        'notification.email_failed',
+        expect.any(Error),
+        expect.objectContaining({ formId: form._id })
+      );
+    });
+
+    it('Email Failure Test 2: Synchronous email invocation failure in background does not fail submission', async () => {
+      vi.spyOn(EmailService.prototype, 'sendEmail').mockImplementationOnce(() => {
+        throw new Error('Synchronous crash in email dispatch');
+      });
+      const warnSpy = vi.spyOn(logger, 'warn');
+
+      const res = await request(app)
+        .post(`/api/responses/${form._id}`)
+        .send({
+          answers: [
+            { questionId: qText._id.toString(), value: 'Bob' },
+            { questionId: qEmail._id.toString(), value: 'bob@example.com' },
+            { questionId: qChoice._id.toString(), value: 'Blue' }
+          ]
+        });
+
+      expect(res.status).toBe(201);
+      expect(res.body.success).toBe(true);
+
+      // Wait for setImmediate and User.findById to settle
+      await new Promise((resolve) => setTimeout(resolve, 30));
+
+      const count = await Response.countDocuments({ formId: form._id });
+      expect(count).toBe(1);
+      expect(warnSpy).toHaveBeenCalledWith(
+        'notification.email_failed',
+        expect.any(Error),
+        expect.objectContaining({ formId: form._id })
+      );
+    });
+
+    it('Email Failure Test 3: Missing form owner gracefully completes submission without email dispatch or crash', async () => {
+      // Create a form with a non-existent owner ID
+      const missingOwnerId = new mongoose.Types.ObjectId();
+      const orphanForm = await Form.create({
+        ownerId: missingOwnerId,
+        title: 'Orphan Owner Form',
+        status: 'published'
+      });
+      const orphanQ = await Question.create({
+        formId: orphanForm._id,
+        type: 'short_text',
+        label: 'Feedback',
+        required: true,
+        order: 0
+      });
+
+      const emailSpy = vi.spyOn(EmailService.prototype, 'sendEmail');
+
+      const res = await request(app)
+        .post(`/api/responses/${orphanForm._id}`)
+        .send({
+          answers: [{ questionId: orphanQ._id.toString(), value: 'Great service' }]
+        });
+
+      expect(res.status).toBe(201);
+      expect(res.body.success).toBe(true);
+
+      await new Promise((resolve) => setImmediate(resolve));
+
+      // No email should be sent if owner is missing
+      expect(emailSpy).not.toHaveBeenCalled();
+      const saved = await Response.findOne({ formId: orphanForm._id });
+      expect(saved).not.toBeNull();
+    });
+
+    it('Email Failure Test 4: Email timeout after HTTP response has been returned does not mutate response or throw', async () => {
+      vi.spyOn(EmailService.prototype, 'sendEmail').mockImplementationOnce(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        throw new Error('TimeoutError: Email request timed out after 5000ms');
+      });
+
+      const res = await request(app)
+        .post(`/api/responses/${form._id}`)
+        .send({
+          answers: [
+            { questionId: qText._id.toString(), value: 'Charlie' },
+            { questionId: qEmail._id.toString(), value: 'charlie@example.com' },
+            { questionId: qChoice._id.toString(), value: 'Blue' }
+          ]
+        });
+
+      expect(res.status).toBe(201);
+      expect(res.body.success).toBe(true);
+
+      // Wait 50ms for asynchronous timeout to fire in background
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      const responses = await Response.find({ formId: form._id });
+      expect(responses).toHaveLength(1);
+      expect(responses[0]._id.toString()).toBe(res.body.data.id);
+    });
+
+    it('Email Failure Test 5: Late asynchronous rejection does not trigger unhandled promise rejections or duplicate responses', async () => {
+      let unhandledCaught = null;
+      const unhandledHandler = (err) => {
+        unhandledCaught = err;
+      };
+      process.on('unhandledRejection', unhandledHandler);
+
+      try {
+        vi.spyOn(EmailService.prototype, 'sendEmail').mockImplementationOnce(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 20));
+          throw new Error('Late asynchronous provider rejection');
+        });
+
+        const res = await request(app)
+          .post(`/api/responses/${form._id}`)
+          .send({
+            answers: [
+              { questionId: qText._id.toString(), value: 'Diana' },
+              { questionId: qEmail._id.toString(), value: 'diana@example.com' },
+              { questionId: qChoice._id.toString(), value: 'Blue' }
+            ]
+          });
+
+        expect(res.status).toBe(201);
+
+        // Wait 40ms to ensure the async rejection settles
+        await new Promise((resolve) => setTimeout(resolve, 40));
+
+        expect(unhandledCaught).toBeNull();
+        const count = await Response.countDocuments({ formId: form._id });
+        expect(count).toBe(1);
+      } finally {
+        process.removeListener('unhandledRejection', unhandledHandler);
+      }
+    });
+  });
 });

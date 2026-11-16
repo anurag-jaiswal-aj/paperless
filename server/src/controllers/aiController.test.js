@@ -106,6 +106,12 @@ vi.mock('../models/response.js', () => ({
 
 const app = express();
 app.use(express.json());
+app.use((req, res, next) => {
+  if (req.headers['x-request-id']) {
+    req.id = req.headers['x-request-id'];
+  }
+  next();
+});
 // Apply the route which includes rate limiting and protect middlewares
 app.use('/api/ai', aiRoutes);
 app.use(errorHandler);
@@ -423,6 +429,104 @@ describe('AI Controller (Phase 6)', () => {
       const res = await request(app).post(`/api/ai/responses/categorize/${DELETING_FORM_ID}`);
       expect(res.status).toBe(409);
       expect(res.body.message).toBe('Form is currently being deleted');
+    });
+  });
+
+  describe('Stage 4.3.6.2: AI Provider Error Mapping & Failure Resilience Suite (6 Tests)', () => {
+    it('maps AI_AUTH_FAILED to HTTP 502 with standard message', async () => {
+      AIService.generateQuestions.mockRejectedValue(new Error('AI_AUTH_FAILED'));
+
+      const res = await request(app)
+        .post('/api/ai/questions/generate')
+        .send({ topic: 'Employee Wellness' });
+
+      expect(res.status).toBe(502);
+      expect(res.body).toEqual({
+        success: false,
+        message: 'AI provider authentication failed'
+      });
+    });
+
+    it('maps AI_SCHEMA_VALIDATION_FAILED to HTTP 400 with standard message', async () => {
+      AIService.generateQuestions.mockRejectedValue(new Error('AI_SCHEMA_VALIDATION_FAILED'));
+
+      const res = await request(app)
+        .post('/api/ai/questions/generate')
+        .send({ topic: 'Employee Wellness' });
+
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual({
+        success: false,
+        message: 'Invalid AI request or response'
+      });
+    });
+
+    it('maps AI_PROVIDER_NOT_CONFIGURED to HTTP 503 with standard message', async () => {
+      AIService.generateQuestions.mockRejectedValue(new Error('AI_PROVIDER_NOT_CONFIGURED'));
+
+      const res = await request(app)
+        .post('/api/ai/questions/generate')
+        .send({ topic: 'Employee Wellness' });
+
+      expect(res.status).toBe(503);
+      expect(res.body).toEqual({
+        success: false,
+        message: 'AI service temporarily unavailable'
+      });
+    });
+
+    it('redacts sensitive credentials and raw error internals from public responses', async () => {
+      const sensitiveErr = new Error('AI_AUTH_FAILED');
+      sensitiveErr.apiKey = 'sk-proj-secret-key-12345';
+      sensitiveErr.bearerToken = 'bearer-token-secret-xyz';
+      sensitiveErr.providerConfig = { endpoint: 'https://api.openai.com/v1', key: 'secret' };
+      AIService.generateQuestions.mockRejectedValue(sensitiveErr);
+
+      const res = await request(app)
+        .post('/api/ai/questions/generate')
+        .send({ topic: 'Employee Wellness' });
+
+      expect(res.status).toBe(502);
+      expect(res.body.success).toBe(false);
+      expect(res.body.message).toBe('AI provider authentication failed');
+      const responseString = JSON.stringify(res.body);
+      expect(responseString).not.toContain('sk-proj-secret-key-12345');
+      expect(responseString).not.toContain('bearer-token-secret-xyz');
+      expect(responseString).not.toContain('providerConfig');
+      expect(res.body.apiKey).toBeUndefined();
+      expect(res.body.bearerToken).toBeUndefined();
+      expect(res.body.providerConfig).toBeUndefined();
+    });
+
+    it('preserves and propagates request correlation ID in error responses', async () => {
+      AIService.generateQuestions.mockRejectedValue(new Error('AI_PROVIDER_NOT_CONFIGURED'));
+
+      const testRequestId = 'req-ai-test-correlation-uuid-4362';
+      const res = await request(app)
+        .post('/api/ai/questions/generate')
+        .set('X-Request-ID', testRequestId)
+        .send({ topic: 'Employee Wellness' });
+
+      expect(res.status).toBe(503);
+      expect(res.body).toEqual({
+        success: false,
+        message: 'AI service temporarily unavailable',
+        requestId: testRequestId
+      });
+    });
+
+    it('falls through to generic 500 error handling for unmapped unexpected provider errors without crashing', async () => {
+      AIService.generateQuestions.mockRejectedValue(
+        new Error('Unexpected lower-level socket hangup')
+      );
+
+      const res = await request(app)
+        .post('/api/ai/questions/generate')
+        .send({ topic: 'Employee Wellness' });
+
+      expect(res.status).toBe(500);
+      expect(res.body.success).toBe(false);
+      expect(res.body.message).toBeDefined();
     });
   });
 });
