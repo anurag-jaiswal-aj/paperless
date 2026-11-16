@@ -1346,7 +1346,8 @@ export const deleteForm = async (req, res, next) => {
 /**
  * Background heartbeat helper for DeletionCleanupJob workers.
  * Recursively schedules CAS lease renewals during prolonged storage operations
- * (both single-page and multi-page prefix scans) and detects lease loss.
+ * (both single-page and multi-page prefix scans), tracks in-flight renewal promises,
+ * detects wall-clock expiration, and provides fail-closed ownership barriers.
  */
 export class CleanupLeaseHeartbeat {
   constructor({ jobId, leaseId, epoch, leaseDurationMs, intervalMs }) {
@@ -1357,47 +1358,114 @@ export class CleanupLeaseHeartbeat {
     this.intervalMs = intervalMs || Math.max(50, Math.floor(leaseDurationMs / 3));
     this.timer = null;
     this.stopped = false;
-    this.isRenewing = false;
+    this.inFlightPromise = null;
     this.leaseLost = false;
+    this.hasError = false;
+    this.lastError = null;
+    // Authoritative local timestamp of confirmed lease expiration
+    this.confirmedExpiresAtMs = Date.now() + this.leaseDurationMs;
   }
 
   start() {
     this.scheduleNext();
   }
 
+  isExpired(clockToleranceMs = 0) {
+    return Date.now() >= this.confirmedExpiresAtMs - clockToleranceMs;
+  }
+
   scheduleNext() {
-    if (this.stopped || this.leaseLost) return;
+    if (this.stopped || this.leaseLost || this.hasError) return;
     this.timer = setTimeout(async () => {
-      if (this.stopped || this.leaseLost) return;
+      if (this.stopped || this.leaseLost || this.hasError) return;
       await this.renew();
-      if (!this.stopped && !this.leaseLost) {
+      if (!this.stopped && !this.leaseLost && !this.hasError) {
         this.scheduleNext();
       }
     }, this.intervalMs);
   }
 
-  async renew() {
-    if (this.stopped || this.leaseLost || this.isRenewing) return;
-    this.isRenewing = true;
-    try {
-      const now = Date.now();
-      const updateResult = await DeletionCleanupJob.updateOne(
-        { _id: this.jobId, leaseId: this.leaseId, epoch: this.epoch },
-        { $set: { leaseExpiresAt: new Date(now + this.leaseDurationMs), updatedAt: new Date(now) } }
-      );
-      if (updateResult.matchedCount === 0) {
-        // Ownership fencing: lease was reclaimed by another worker or epoch bumped
-        this.leaseLost = true;
-      }
-    } catch (err) {
-      // Catch DB errors to avoid unhandled rejections
-      logger.warn('storage.cleanup_heartbeat_error', {
-        jobId: this.jobId,
-        error: err.message
-      });
-    } finally {
-      this.isRenewing = false;
+  async waitForInFlight() {
+    if (this.inFlightPromise) {
+      await this.inFlightPromise.catch(() => {});
     }
+  }
+
+  renew() {
+    if (this.stopped || this.leaseLost) {
+      return Promise.resolve(false);
+    }
+    if (this.inFlightPromise) {
+      return this.inFlightPromise;
+    }
+
+    this.inFlightPromise = (async () => {
+      try {
+        const now = Date.now();
+        const updateResult = await DeletionCleanupJob.updateOne(
+          {
+            _id: this.jobId,
+            status: 'cleaning',
+            leaseId: this.leaseId,
+            epoch: this.epoch
+          },
+          {
+            $set: {
+              leaseExpiresAt: new Date(now + this.leaseDurationMs),
+              updatedAt: new Date(now)
+            }
+          }
+        );
+        if (updateResult.matchedCount === 0) {
+          // Ownership fencing: lease was reclaimed by another worker, epoch bumped, or status changed
+          this.leaseLost = true;
+          return false;
+        }
+        // Only advance locally recorded expiry when MongoDB confirms the update
+        this.confirmedExpiresAtMs = now + this.leaseDurationMs;
+        this.hasError = false;
+        this.lastError = null;
+        return true;
+      } catch (err) {
+        // Fail closed: record error state so worker cannot assume valid ownership
+        this.hasError = true;
+        this.lastError = err;
+        logger.warn('storage.cleanup_heartbeat_error', {
+          jobId: this.jobId,
+          error: err.message
+        });
+        return false;
+      } finally {
+        this.inFlightPromise = null;
+      }
+    })();
+
+    // Suppress unhandled rejection if background caller does not await
+    this.inFlightPromise.catch(() => {});
+
+    return this.inFlightPromise;
+  }
+
+  async assertOwnershipOrRenew() {
+    if (this.stopped || this.leaseLost) {
+      return false;
+    }
+
+    // 1. Await any renewal operation already in progress
+    await this.waitForInFlight();
+
+    // 2. Fail closed if ownership lost, DB error occurred, or locally confirmed lease expired
+    if (this.leaseLost || this.hasError || this.isExpired()) {
+      return false;
+    }
+
+    // 3. Perform a fresh atomic ownership confirmation/renewal
+    const renewed = await this.renew();
+    if (!renewed || this.leaseLost || this.hasError || this.isExpired()) {
+      return false;
+    }
+
+    return true;
   }
 
   async stop() {
@@ -1406,9 +1474,7 @@ export class CleanupLeaseHeartbeat {
       clearTimeout(this.timer);
       this.timer = null;
     }
-    while (this.isRenewing) {
-      await new Promise((r) => setTimeout(r, 10));
-    }
+    await this.waitForInFlight();
   }
 }
 
@@ -1528,7 +1594,8 @@ export const processDeletionCleanupJob = async (jobOrFormId, options = {}) => {
       let continuationToken = undefined;
       let pageCount = 0;
       do {
-        if (signal?.aborted || heartbeat.leaseLost) break;
+        if (signal?.aborted || heartbeat.leaseLost || heartbeat.hasError || heartbeat.isExpired())
+          break;
         pageCount++;
         if (pageCount > 1) {
           // Additional immediate heartbeat renewal during pagination transitions
@@ -1545,13 +1612,22 @@ export const processDeletionCleanupJob = async (jobOrFormId, options = {}) => {
       } while (continuationToken);
     }
 
-    // Fencing gate: If lease was lost during listing, abort immediately
-    // and prevent initiating subsequent storage operations (deleteFiles).
-    if (heartbeat.leaseLost) {
+    // Pre-deletion ownership barrier:
+    // Awaits any in-flight renewal, verifies fail-closed state & local expiry,
+    // and executes a fresh atomic CAS renewal against MongoDB before invoking deleteFiles.
+    const ownershipConfirmed = await heartbeat.assertOwnershipOrRenew();
+    if (!ownershipConfirmed) {
       logger.warn('storage.cleanup_lease_lost_during_listing', {
         jobId: claimed._id,
         formId: claimed.formId,
-        epoch
+        epoch,
+        reason: heartbeat.leaseLost
+          ? 'lease_lost'
+          : heartbeat.hasError
+            ? 'db_error'
+            : heartbeat.isExpired()
+              ? 'expired'
+              : 'unconfirmed'
       });
       return { processed: false, status: 'lease_lost' };
     }
@@ -1570,7 +1646,7 @@ export const processDeletionCleanupJob = async (jobOrFormId, options = {}) => {
       }
     }
 
-    if (heartbeat.leaseLost) {
+    if (heartbeat.leaseLost || heartbeat.hasError) {
       logger.warn('storage.cleanup_lease_lost_after_deletion', {
         jobId: claimed._id,
         formId: claimed.formId,

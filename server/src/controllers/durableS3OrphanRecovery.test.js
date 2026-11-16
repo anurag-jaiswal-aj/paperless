@@ -4033,4 +4033,259 @@ describe('Stage 4.3.5 B1: Durable S3 Orphan Recovery & Post-Cascade Lifecycle (1
       await new Promise((r) => setTimeout(r, 50));
     });
   });
+
+  describe('Stage 4.3.6.1.1: Fail-Closed Cleanup Lease Fencing & Barrier Suite (5 Tests)', () => {
+    it('Fail-Closed Fencing Test A: Worker awaits pending renewal before deleteFiles and halts when renewal resolves with CAS mismatch', async () => {
+      const form = await Form.create({
+        ownerId: userId,
+        title: 'Pending Renewal Race Form',
+        status: 'published'
+      });
+      const stagedKey = `staging/forms/${form._id}/item.pdf`;
+      activeS3Objects.set(stagedKey, { mime: 'application/pdf', timestamp: Date.now() });
+
+      await executeFormDeletion(form._id, { userId, drainWaitMs: 0, skipImmediateCleanup: true });
+
+      const deleteFilesSpy = vi.spyOn(storageService, 'deleteFiles');
+
+      // Create a deferred promise for the background updateOne call
+      let resolveUpdateOne;
+      let updateOneInitiated = false;
+      const pendingUpdatePromise = new Promise((resolve) => {
+        resolveUpdateOne = resolve;
+      });
+
+      const origUpdateOne = DeletionCleanupJob.updateOne.bind(DeletionCleanupJob);
+      vi.spyOn(DeletionCleanupJob, 'updateOne').mockImplementation(
+        async (filter, update, options) => {
+          // Intercept heartbeat renewal calls (they update leaseExpiresAt)
+          if (update?.$set?.leaseExpiresAt && !updateOneInitiated) {
+            updateOneInitiated = true;
+            // Hold this update pending until listing finishes and competing worker reclaims
+            await pendingUpdatePromise;
+            // Return CAS mismatch since competing worker stole the lease
+            return { matchedCount: 0, modifiedCount: 0, acknowledged: true };
+          }
+          return origUpdateOne(filter, update, options);
+        }
+      );
+
+      // Listing completes while updateOne is pending
+      vi.spyOn(storageService, 'listObjectsByPrefix').mockImplementation(async () => {
+        // Wait until updateOne has been initiated
+        while (!updateOneInitiated) {
+          await new Promise((r) => setTimeout(r, 5));
+        }
+        // Listing is ready, but before updateOne resolves, Worker 2 reclaims the job in DB
+        const job = await DeletionCleanupJob.findOne({ formId: form._id });
+        await origUpdateOne(
+          { _id: job._id },
+          { $set: { leaseId: 'competitor-lease-id', epoch: job.epoch + 1 } }
+        );
+
+        // Schedule resolution of the pending update after listing returns
+        setTimeout(() => {
+          resolveUpdateOne();
+        }, 15);
+
+        return { keys: [stagedKey], isTruncated: false };
+      });
+
+      const sweep = await processDeletionCleanupJob(form._id, {
+        forceImmediate: true,
+        leaseDurationMs: 1000,
+        heartbeatIntervalMs: 10
+      });
+
+      expect(sweep.processed).toBe(false);
+      expect(sweep.status).toBe('lease_lost');
+      expect(deleteFilesSpy).not.toHaveBeenCalled();
+      expect(activeS3Objects.has(stagedKey)).toBe(true);
+    });
+
+    it('Fail-Closed Fencing Test B: Heartbeat renewal database exception fails closed and prevents deleteFiles', async () => {
+      const form = await Form.create({
+        ownerId: userId,
+        title: 'Heartbeat DB Exception Form',
+        status: 'published'
+      });
+      const stagedKey = `staging/forms/${form._id}/error-item.pdf`;
+      activeS3Objects.set(stagedKey, { mime: 'application/pdf', timestamp: Date.now() });
+
+      await executeFormDeletion(form._id, { userId, drainWaitMs: 0, skipImmediateCleanup: true });
+
+      const deleteFilesSpy = vi.spyOn(storageService, 'deleteFiles');
+
+      const origUpdateOne = DeletionCleanupJob.updateOne.bind(DeletionCleanupJob);
+      let errorInjected = false;
+      vi.spyOn(DeletionCleanupJob, 'updateOne').mockImplementation(
+        async (filter, update, options) => {
+          if (update?.$set?.leaseExpiresAt) {
+            errorInjected = true;
+            throw new Error('MongoNetworkTimeoutError: connection timed out during lease renewal');
+          }
+          return origUpdateOne(filter, update, options);
+        }
+      );
+
+      vi.spyOn(storageService, 'listObjectsByPrefix').mockImplementation(async () => {
+        // Wait for renewal error to be injected
+        await new Promise((r) => setTimeout(r, 30));
+        return { keys: [stagedKey], isTruncated: false };
+      });
+
+      const sweep = await processDeletionCleanupJob(form._id, {
+        forceImmediate: true,
+        leaseDurationMs: 1000,
+        heartbeatIntervalMs: 10
+      });
+
+      expect(errorInjected).toBe(true);
+      expect(sweep.processed).toBe(false);
+      expect(sweep.status).toBe('lease_lost');
+      expect(deleteFilesSpy).not.toHaveBeenCalled();
+      expect(activeS3Objects.has(stagedKey)).toBe(true);
+    });
+
+    it('Fail-Closed Fencing Test C: Wall-clock lease expiration blocks deleteFiles even if no explicit CAS rejection occurred', async () => {
+      const form = await Form.create({
+        ownerId: userId,
+        title: 'Wall Clock Expiry Form',
+        status: 'published'
+      });
+      const stagedKey = `staging/forms/${form._id}/clock-item.pdf`;
+      activeS3Objects.set(stagedKey, { mime: 'application/pdf', timestamp: Date.now() });
+
+      await executeFormDeletion(form._id, { userId, drainWaitMs: 0, skipImmediateCleanup: true });
+
+      const deleteFilesSpy = vi.spyOn(storageService, 'deleteFiles');
+
+      // Prevent renewals from updating confirmedExpiresAtMs
+      vi.spyOn(DeletionCleanupJob, 'updateOne').mockImplementation(async (filter, update) => {
+        if (update?.$set?.leaseExpiresAt) {
+          throw new Error('Connection lost');
+        }
+        return { matchedCount: 1, modifiedCount: 1 };
+      });
+
+      vi.spyOn(storageService, 'listObjectsByPrefix').mockImplementation(async () => {
+        // Listing takes 60ms, exceeding the 30ms leaseDurationMs
+        await new Promise((r) => setTimeout(r, 60));
+        return { keys: [stagedKey], isTruncated: false };
+      });
+
+      const sweep = await processDeletionCleanupJob(form._id, {
+        forceImmediate: true,
+        leaseDurationMs: 30, // 30ms lease
+        heartbeatIntervalMs: 100 // renewal interval is beyond expiry
+      });
+
+      expect(sweep.processed).toBe(false);
+      expect(sweep.status).toBe('lease_lost');
+      expect(deleteFilesSpy).not.toHaveBeenCalled();
+      expect(activeS3Objects.has(stagedKey)).toBe(true);
+    });
+
+    it('Fail-Closed Fencing Test D: Pre-deletion barrier verifies exact {_id, status: "cleaning", leaseId, epoch} CAS semantics', async () => {
+      const form = await Form.create({
+        ownerId: userId,
+        title: 'CAS Filter Verification Form',
+        status: 'published'
+      });
+      const stagedKey = `staging/forms/${form._id}/cas-item.pdf`;
+      activeS3Objects.set(stagedKey, { mime: 'application/pdf', timestamp: Date.now() });
+
+      await executeFormDeletion(form._id, { userId, drainWaitMs: 0, skipImmediateCleanup: true });
+
+      const updateOneSpy = vi.spyOn(DeletionCleanupJob, 'updateOne');
+      const deleteFilesSpy = vi.spyOn(storageService, 'deleteFiles');
+
+      vi.spyOn(storageService, 'listObjectsByPrefix').mockResolvedValue({
+        keys: [stagedKey],
+        isTruncated: false
+      });
+
+      const sweep = await processDeletionCleanupJob(form._id, {
+        forceImmediate: true,
+        leaseDurationMs: 500,
+        heartbeatIntervalMs: 200
+      });
+
+      expect(sweep.processed).toBe(true);
+      expect(deleteFilesSpy).toHaveBeenCalledWith([stagedKey], expect.any(Object));
+
+      // Inspect CAS calls
+      const renewalCalls = updateOneSpy.mock.calls.filter((call) => call[1]?.$set?.leaseExpiresAt);
+      expect(renewalCalls.length).toBeGreaterThanOrEqual(1);
+      for (const call of renewalCalls) {
+        expect(call[0]).toMatchObject({
+          _id: expect.any(Object),
+          status: 'cleaning',
+          leaseId: expect.any(String),
+          epoch: expect.any(Number)
+        });
+      }
+    });
+
+    it('Fail-Closed Fencing Test E: Heartbeat lifecycle ensures single in-flight renewal, clean stop, and no unhandled rejections', async () => {
+      const jobId = new mongoose.Types.ObjectId();
+      const leaseId = crypto.randomUUID();
+      const heartbeat = new CleanupLeaseHeartbeat({
+        jobId,
+        leaseId,
+        epoch: 1,
+        leaseDurationMs: 100,
+        intervalMs: 20
+      });
+
+      // 1. Mock updateOne to be slow
+      let resolveFirst;
+      const firstUpdate = new Promise((r) => {
+        resolveFirst = r;
+      });
+      let updateCount = 0;
+      vi.spyOn(DeletionCleanupJob, 'updateOne').mockImplementation(async () => {
+        updateCount++;
+        await firstUpdate;
+        return { matchedCount: 1, modifiedCount: 1 };
+      });
+
+      // 2. Call renew() twice concurrently
+      const promise1 = heartbeat.renew();
+      const promise2 = heartbeat.renew();
+
+      // Only one renewal should be dispatched
+      expect(updateCount).toBe(1);
+      // Both promises must reference the same in-flight operation
+      expect(promise1).toBe(promise2);
+
+      // Resolve update
+      resolveFirst();
+      await promise1;
+
+      // 3. Verify stop() halts timers and settles pending work
+      heartbeat.start();
+      expect(heartbeat.timer).not.toBeNull();
+      await heartbeat.stop();
+      expect(heartbeat.timer).toBeNull();
+      expect(heartbeat.stopped).toBe(true);
+
+      // 4. Verify rejection does not cause unhandled rejection
+      vi.spyOn(DeletionCleanupJob, 'updateOne').mockRejectedValueOnce(
+        new Error('Simulated network crash during renew')
+      );
+      const heartbeatFail = new CleanupLeaseHeartbeat({
+        jobId,
+        leaseId: crypto.randomUUID(),
+        epoch: 2,
+        leaseDurationMs: 100,
+        intervalMs: 10
+      });
+      const result = await heartbeatFail.renew();
+      expect(result).toBe(false);
+      expect(heartbeatFail.hasError).toBe(true);
+      expect(heartbeatFail.lastError.message).toBe('Simulated network crash during renew');
+      await heartbeatFail.stop();
+    });
+  });
 });
