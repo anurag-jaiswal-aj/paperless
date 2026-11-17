@@ -999,11 +999,16 @@ export class SubmissionReservationManager {
               }
             }
             if (failedStagedOnly.length === 0) {
-              await SubmissionReservation.deleteOne({ _id: claimed._id });
-              summary.purgedAbandoned += 1;
+              const delRes = await SubmissionReservation.deleteOne({
+                _id: claimed._id,
+                promotionEpoch: claimed.promotionEpoch
+              });
+              if (delRes.deletedCount > 0) {
+                summary.purgedAbandoned += 1;
+              }
             } else {
               await SubmissionReservation.updateOne(
-                { _id: claimed._id },
+                { _id: claimed._id, promotionEpoch: claimed.promotionEpoch },
                 {
                   $set: {
                     promotedKeys: [],
@@ -1070,8 +1075,8 @@ export class SubmissionReservationManager {
             const nextQuarantinedUntil = new Date(now.getTime() + reconcileIntervalMs);
             const nextPass = (claimed.reconciliationPasses || 0) + 1;
 
-            await SubmissionReservation.updateOne(
-              { _id: claimed._id },
+            const updateRes = await SubmissionReservation.updateOne(
+              { _id: claimed._id, promotionEpoch: claimed.promotionEpoch },
               {
                 $set: {
                   status: 'abandoned',
@@ -1090,11 +1095,13 @@ export class SubmissionReservationManager {
                 }
               }
             );
-            summary.reconciledTombstones = (summary.reconciledTombstones || 0) + 1;
+            if (updateRes.matchedCount > 0) {
+              summary.reconciledTombstones = (summary.reconciledTombstones || 0) + 1;
+            }
           } else {
             summary.failedKeysCount += failedPromoted.length + failedStaged.length;
             await SubmissionReservation.updateOne(
-              { _id: claimed._id },
+              { _id: claimed._id, promotionEpoch: claimed.promotionEpoch },
               {
                 $set: {
                   promotedKeys: failedPromoted,

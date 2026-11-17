@@ -4548,4 +4548,373 @@ describe('Stage 4.3.5 B1: Durable S3 Orphan Recovery & Post-Cascade Lifecycle (1
       expect(currentJob.status).toBe('cleaning');
     });
   });
+
+  describe('Maintenance Task 3: Submission Reservation Epoch Fencing (AUD-REL-01)', () => {
+    it('Epoch Fencing Test 1: Stale worker post-quarantine tombstone update is rejected when epoch advances', async () => {
+      const form = await Form.create({
+        ownerId: userId,
+        title: 'Epoch Fencing Form 1',
+        status: 'published'
+      });
+      const canonicalKey = `forms/${form._id}/responses/${crypto.randomUUID()}/doc1.pdf`;
+      activeS3Objects.set(canonicalKey, { mime: 'application/pdf', timestamp: Date.now() });
+
+      const reservation = await SubmissionReservation.create({
+        formId: form._id,
+        leaseId: crypto.randomUUID(),
+        fenceToken: crypto.randomUUID(),
+        status: 'abandoned',
+        expiresAt: new Date(Date.now() - 60000),
+        stagedKeys: [],
+        promotedKeys: [canonicalKey],
+        promotionStatus: 'abandoned',
+        quarantinedUntil: new Date(Date.now() - 10000),
+        promotionEpoch: 10,
+        vacuumAt: null,
+        counterReleased: true
+      });
+
+      // Worker 1 claims the post-quarantine sweep (simulating line 949)
+      const claimedWorker1 = await SubmissionReservation.findOneAndUpdate(
+        {
+          _id: reservation._id,
+          status: 'abandoned',
+          promotionEpoch: 10,
+          quarantinedUntil: { $lte: new Date() }
+        },
+        {
+          $set: {
+            promotionLeaseId: 'worker-1-lease',
+            promotionLeaseExpiresAt: new Date(Date.now() + 30000),
+            quarantinedUntil: new Date(Date.now() + 30000),
+            updatedAt: new Date()
+          },
+          $inc: { promotionEpoch: 1 }
+        },
+        { new: true }
+      ).lean();
+
+      expect(claimedWorker1.promotionEpoch).toBe(11);
+
+      // Simulate Worker 1 stalling while its lease expires
+      await SubmissionReservation.updateOne(
+        { _id: reservation._id },
+        { $set: { quarantinedUntil: new Date(Date.now() - 1000) } }
+      );
+
+      // Worker 2 reclaims the reservation via sweepAbandonedReservations
+      const worker2Summary = await SubmissionReservationManager.sweepAbandonedReservations({
+        quarantineMs: 0,
+        graceMs: 0
+      });
+
+      expect(worker2Summary.reconciledTombstones).toBe(1);
+      const postWorker2 = await SubmissionReservation.findById(reservation._id);
+      expect(postWorker2.promotionEpoch).toBe(12);
+      expect(postWorker2.promotionStatus).toBe('tombstone');
+      expect(postWorker2.reconciliationState).toBe('reconciled');
+
+      // Now Worker 1 wakes up and attempts its terminal update using its stale epoch (11)
+      const staleUpdateResult = await SubmissionReservation.updateOne(
+        { _id: claimedWorker1._id, promotionEpoch: claimedWorker1.promotionEpoch },
+        {
+          $set: {
+            status: 'abandoned',
+            promotionStatus: 'tombstone',
+            reconciliationState: 'reconciled',
+            reconciliationPasses: 999,
+            lastReconciledAt: new Date(),
+            quarantinedUntil: new Date(Date.now() + 60000),
+            stagedKeys: [],
+            promotedKeys: [canonicalKey],
+            promotionLeaseId: null,
+            promotionLeaseExpiresAt: null,
+            vacuumAt: null,
+            counterReleased: true,
+            updatedAt: new Date()
+          }
+        }
+      );
+
+      // Stale update must match 0 documents and modify 0 documents
+      expect(staleUpdateResult.matchedCount).toBe(0);
+      expect(staleUpdateResult.modifiedCount).toBe(0);
+
+      // Verify DB record retains Worker 2's epoch and state
+      const finalDoc = await SubmissionReservation.findById(reservation._id);
+      expect(finalDoc.promotionEpoch).toBe(12);
+      expect(finalDoc.reconciliationPasses).not.toBe(999);
+    });
+
+    it('Epoch Fencing Test 2: Stale worker failed-status update is rejected when epoch advances', async () => {
+      const form = await Form.create({
+        ownerId: userId,
+        title: 'Epoch Fencing Form 2',
+        status: 'published'
+      });
+      const canonicalKey = `forms/${form._id}/responses/${crypto.randomUUID()}/doc2.pdf`;
+
+      const reservation = await SubmissionReservation.create({
+        formId: form._id,
+        leaseId: crypto.randomUUID(),
+        fenceToken: crypto.randomUUID(),
+        status: 'abandoned',
+        expiresAt: new Date(Date.now() - 60000),
+        stagedKeys: [],
+        promotedKeys: [canonicalKey],
+        promotionStatus: 'abandoned',
+        quarantinedUntil: new Date(Date.now() - 10000),
+        promotionEpoch: 20,
+        vacuumAt: null,
+        counterReleased: true
+      });
+
+      // Worker 1 claims with epoch 20 -> epoch becomes 21
+      const claimedWorker1 = await SubmissionReservation.findOneAndUpdate(
+        {
+          _id: reservation._id,
+          status: 'abandoned',
+          promotionEpoch: 20,
+          quarantinedUntil: { $lte: new Date() }
+        },
+        {
+          $set: {
+            promotionLeaseId: 'worker-1-lease',
+            quarantinedUntil: new Date(Date.now() + 30000),
+            updatedAt: new Date()
+          },
+          $inc: { promotionEpoch: 1 }
+        },
+        { new: true }
+      ).lean();
+
+      expect(claimedWorker1.promotionEpoch).toBe(21);
+
+      // Worker 2 advances the epoch to 22 (e.g., claiming due to lease expiration)
+      await SubmissionReservation.updateOne(
+        { _id: reservation._id },
+        {
+          $set: {
+            promotionLeaseId: 'worker-2-lease',
+            promotionStatus: 'in_flight',
+            promotionEpoch: 22
+          }
+        }
+      );
+
+      // Worker 1 experiences S3 failure and attempts terminal update to failed using stale epoch (21)
+      const staleUpdateResult = await SubmissionReservation.updateOne(
+        { _id: claimedWorker1._id, promotionEpoch: claimedWorker1.promotionEpoch },
+        {
+          $set: {
+            promotedKeys: [canonicalKey],
+            stagedKeys: [],
+            promotionStatus: 'failed',
+            reconciliationState: 'failed',
+            quarantinedUntil: new Date(Date.now() + 10000),
+            promotionLeaseId: null,
+            promotionLeaseExpiresAt: null,
+            vacuumAt: null,
+            counterReleased: true,
+            updatedAt: new Date()
+          }
+        }
+      );
+
+      expect(staleUpdateResult.matchedCount).toBe(0);
+      expect(staleUpdateResult.modifiedCount).toBe(0);
+
+      // Verify DB record retains Worker 2's epoch and active state
+      const currentDoc = await SubmissionReservation.findById(reservation._id);
+      expect(currentDoc.promotionEpoch).toBe(22);
+      expect(currentDoc.promotionLeaseId).toBe('worker-2-lease');
+      expect(currentDoc.promotionStatus).toBe('in_flight');
+    });
+
+    it('Epoch Fencing Test 3: Current owner successfully performs terminal update when epoch matches', async () => {
+      const form = await Form.create({
+        ownerId: userId,
+        title: 'Epoch Fencing Form 3',
+        status: 'published'
+      });
+      const canonicalKey = `forms/${form._id}/responses/${crypto.randomUUID()}/doc3.pdf`;
+      activeS3Objects.set(canonicalKey, { mime: 'application/pdf', timestamp: Date.now() });
+
+      const reservation = await SubmissionReservation.create({
+        formId: form._id,
+        leaseId: crypto.randomUUID(),
+        fenceToken: crypto.randomUUID(),
+        status: 'abandoned',
+        expiresAt: new Date(Date.now() - 60000),
+        stagedKeys: [],
+        promotedKeys: [canonicalKey],
+        promotionStatus: 'abandoned',
+        quarantinedUntil: new Date(Date.now() - 10000),
+        promotionEpoch: 5,
+        vacuumAt: null,
+        counterReleased: true
+      });
+
+      // sweepAbandonedReservations executes end-to-end with matching epoch
+      const summary = await SubmissionReservationManager.sweepAbandonedReservations({
+        quarantineMs: 0,
+        graceMs: 0
+      });
+
+      expect(summary.reconciledTombstones).toBe(1);
+      expect(activeS3Objects.has(canonicalKey)).toBe(false);
+
+      const reconciledDoc = await SubmissionReservation.findById(reservation._id);
+      expect(reconciledDoc.promotionEpoch).toBe(6);
+      expect(reconciledDoc.promotionStatus).toBe('tombstone');
+      expect(reconciledDoc.reconciliationState).toBe('reconciled');
+      expect(reconciledDoc.reconciliationPasses).toBe(1);
+      expect(reconciledDoc.promotionLeaseId).toBeNull();
+    });
+
+    it('Epoch Fencing Test 4: S3 deletion failure with matching epoch transitions to failed and arms retry', async () => {
+      const form = await Form.create({
+        ownerId: userId,
+        title: 'Epoch Fencing Form 4',
+        status: 'published'
+      });
+      const canonicalKey = `forms/${form._id}/responses/${crypto.randomUUID()}/doc4.pdf`;
+      activeS3Objects.set(canonicalKey, { mime: 'application/pdf', timestamp: Date.now() });
+
+      const reservation = await SubmissionReservation.create({
+        formId: form._id,
+        leaseId: crypto.randomUUID(),
+        fenceToken: crypto.randomUUID(),
+        status: 'abandoned',
+        expiresAt: new Date(Date.now() - 60000),
+        stagedKeys: [],
+        promotedKeys: [canonicalKey],
+        promotionStatus: 'abandoned',
+        quarantinedUntil: new Date(Date.now() - 10000),
+        promotionEpoch: 1,
+        vacuumAt: null,
+        counterReleased: true
+      });
+
+      // Force deleteFile to fail for canonicalKey
+      vi.spyOn(storageService, 'deleteFile').mockRejectedValueOnce(
+        new Error('S3 503 SlowDown transient error')
+      );
+
+      const summary = await SubmissionReservationManager.sweepAbandonedReservations({
+        quarantineMs: 10000,
+        graceMs: 0
+      });
+
+      expect(summary.failedKeysCount).toBe(1);
+      const failedDoc = await SubmissionReservation.findById(reservation._id);
+      expect(failedDoc.promotionEpoch).toBe(2);
+      expect(failedDoc.promotionStatus).toBe('failed');
+      expect(failedDoc.reconciliationState).toBe('failed');
+      expect(failedDoc.promotedKeys).toContain(canonicalKey);
+      expect(new Date(failedDoc.quarantinedUntil).getTime()).toBeGreaterThan(Date.now());
+    });
+
+    it('Epoch Fencing Test 5: End-to-end concurrent sweeper race where Worker 1 stalls during S3 deletion and is fenced out by Worker 2 reclamation', async () => {
+      const form = await Form.create({
+        ownerId: userId,
+        title: 'Epoch Fencing Form 5',
+        status: 'published'
+      });
+      const canonicalKey = `forms/${form._id}/responses/${crypto.randomUUID()}/doc5.pdf`;
+      activeS3Objects.set(canonicalKey, { mime: 'application/pdf', timestamp: Date.now() });
+
+      const reservation = await SubmissionReservation.create({
+        formId: form._id,
+        leaseId: crypto.randomUUID(),
+        fenceToken: crypto.randomUUID(),
+        status: 'abandoned',
+        expiresAt: new Date(Date.now() - 60000),
+        stagedKeys: [],
+        promotedKeys: [canonicalKey],
+        promotionStatus: 'abandoned',
+        quarantinedUntil: new Date(Date.now() - 10000),
+        promotionEpoch: 30,
+        vacuumAt: null,
+        counterReleased: true
+      });
+
+      const createDeferred = () => {
+        let resolve, reject;
+        const promise = new Promise((res, rej) => {
+          resolve = res;
+          reject = rej;
+        });
+        return { promise, resolve, reject };
+      };
+
+      const worker1InS3Barrier = createDeferred();
+      const allowWorker1ResumeBarrier = createDeferred();
+      let deleteFileCallCount = 0;
+
+      vi.spyOn(storageService, 'deleteFile').mockImplementation(async (key) => {
+        deleteFileCallCount++;
+        if (deleteFileCallCount === 1) {
+          // Worker 1 enters S3 deletion after CAS claim and pauses
+          worker1InS3Barrier.resolve();
+          await allowWorker1ResumeBarrier.promise;
+        }
+        activeS3Objects.delete(key);
+        return Promise.resolve();
+      });
+
+      // 1. Launch Worker 1 asynchronously via real sweepAbandonedReservations
+      const worker1Promise = SubmissionReservationManager.sweepAbandonedReservations({
+        quarantineMs: 0,
+        graceMs: 0
+      });
+
+      // 2. Wait until Worker 1 has claimed the reservation and paused inside deleteFile
+      await worker1InS3Barrier.promise;
+
+      // Verify Worker 1 claimed with incremented epoch (30 -> 31)
+      const midClaimDoc = await SubmissionReservation.findById(reservation._id);
+      expect(midClaimDoc.promotionEpoch).toBe(31);
+      expect(midClaimDoc.promotionLeaseId).toBeTruthy();
+
+      // 3. Simulate Worker 1 stalling and its promotion lease expiring deterministically
+      await SubmissionReservation.updateOne(
+        { _id: reservation._id },
+        {
+          $set: {
+            quarantinedUntil: new Date(Date.now() - 1000),
+            promotionLeaseExpiresAt: new Date(Date.now() - 1000)
+          }
+        }
+      );
+
+      // 4. Worker 2 executes sweeper, reclaims reservation (31 -> 32), and completes
+      const worker2Summary = await SubmissionReservationManager.sweepAbandonedReservations({
+        quarantineMs: 0,
+        graceMs: 0
+      });
+
+      expect(worker2Summary.reconciledTombstones).toBe(1);
+      const postWorker2Doc = await SubmissionReservation.findById(reservation._id);
+      expect(postWorker2Doc.promotionEpoch).toBe(32);
+      expect(postWorker2Doc.promotionStatus).toBe('tombstone');
+      expect(postWorker2Doc.reconciliationPasses).toBe(1);
+
+      // 5. Unpause Worker 1 and let it attempt terminal update with stale epoch (31)
+      allowWorker1ResumeBarrier.resolve();
+      const worker1Summary = await worker1Promise;
+
+      // 6. Worker 1 must be strictly fenced out by the CAS epoch mismatch
+      expect(worker1Summary.reconciledTombstones || 0).toBe(0);
+
+      // 7. Verify DB retains Worker 2's epoch and state without double-incrementing passes
+      const finalDoc = await SubmissionReservation.findById(reservation._id);
+      expect(finalDoc.promotionEpoch).toBe(32);
+      expect(finalDoc.reconciliationPasses).toBe(1);
+      expect(finalDoc.promotionStatus).toBe('tombstone');
+      expect(finalDoc.reconciliationState).toBe('reconciled');
+      expect(finalDoc.promotionLeaseId).toBeNull();
+      expect(activeS3Objects.has(canonicalKey)).toBe(false);
+    });
+  });
 });
