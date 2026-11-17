@@ -14,6 +14,7 @@ import path from 'path';
 import contentDisposition from 'content-disposition';
 import { validateDocxZip } from '../utils/docxValidator.js';
 import { cleanupRequestTempFiles } from '../utils/fileCleanup.js';
+import { escapeHtml } from '../utils/helpers.js';
 import { logger } from '../utils/logger.js';
 import { withRequiredTransaction } from '../utils/dbTransaction.js';
 import { classifyStorageKey, trackDeletionTask } from './formController.js';
@@ -841,10 +842,11 @@ export const submitResponse = async (req, res, next) => {
         const owner = await User.findById(authoritativeForm.ownerId);
         if (owner) {
           const emailService = new EmailService();
+          const escapedTitle = escapeHtml(authoritativeForm.title);
           await emailService.sendEmail({
             to: owner.email,
             subject: `New submission for form: ${authoritativeForm.title}`,
-            html: `<p>You have received a new submission for your form <strong>${authoritativeForm.title}</strong>.</p><p><a href="${process.env.FRONTEND_URL || 'http://localhost:5173'}/dashboard">View Responses</a></p>`
+            html: `<p>You have received a new submission for your form <strong>${escapedTitle}</strong>.</p><p><a href="${process.env.FRONTEND_URL || 'http://localhost:5173'}/dashboard">View Responses</a></p>`
           });
         }
       } catch (emailErr) {
@@ -1549,6 +1551,8 @@ export const escapeCsvCell = (value) => {
   const escaped = str.replace(/"/g, '""');
   return `"${escaped}"`;
 };
+
+export { escapeHtml };
 
 /**
  * @route   GET /api/responses/:formId/export

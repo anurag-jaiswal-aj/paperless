@@ -27,6 +27,28 @@ export const sanitizeInput = (input) => {
   return input.trim();
 };
 
+const HTML_ESCAPE_LOOKUP = {
+  '&': '&amp;',
+  '<': '&lt;',
+  '>': '&gt;',
+  '"': '&quot;',
+  "'": '&#39;'
+};
+
+/**
+ * Escape HTML special characters in user-controlled strings to prevent HTML injection / XSS.
+ * Safely encodes &, <, >, ", and '.
+ *
+ * @param {any} value - Input value to escape
+ * @returns {string} Escaped HTML string
+ */
+export const escapeHtml = (value) => {
+  if (value === null || value === undefined) {
+    return '';
+  }
+  return String(value).replace(/[&<>"']/g, (char) => HTML_ESCAPE_LOOKUP[char]);
+};
+
 /**
  * Generate random string
  */

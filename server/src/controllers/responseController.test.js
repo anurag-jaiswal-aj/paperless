@@ -30,6 +30,7 @@ import {
   formatCsvAnswer,
   sanitizeCsvCell,
   escapeCsvCell,
+  escapeHtml,
   isQuestionVisible,
   submitResponse,
   exportResponses,
@@ -5117,6 +5118,182 @@ describe('Response Controller - Phase 2', () => {
       } finally {
         process.removeListener('unhandledRejection', unhandledHandler);
       }
+    });
+  });
+
+  describe('Maintenance Task 2: Secure Email HTML Escaping (AUD-SEC-01)', () => {
+    it('escapes malicious script tags in form title for email HTML while preserving subject', async () => {
+      const maliciousTitle = '<script>alert(1)</script>';
+      const xssForm = await Form.create({
+        ownerId: form.ownerId,
+        title: maliciousTitle,
+        status: 'published'
+      });
+      const q = await Question.create({
+        formId: xssForm._id,
+        type: 'short_text',
+        label: 'Feedback',
+        required: true,
+        order: 0
+      });
+
+      const emailSpy = vi
+        .spyOn(EmailService.prototype, 'sendEmail')
+        .mockResolvedValueOnce({ success: true });
+
+      const res = await request(app)
+        .post(`/api/responses/${xssForm._id}`)
+        .send({
+          answers: [{ questionId: q._id.toString(), value: 'Testing XSS' }]
+        });
+
+      expect(res.status).toBe(201);
+      expect(res.body.success).toBe(true);
+
+      // Wait for setImmediate and User.findById to settle
+      await new Promise((resolve) => setTimeout(resolve, 30));
+
+      expect(emailSpy).toHaveBeenCalledTimes(1);
+      const emailOptions = emailSpy.mock.calls[0][0];
+
+      // Plain text subject preserves original title
+      expect(emailOptions.subject).toBe(`New submission for form: ${maliciousTitle}`);
+
+      // HTML body encodes tags as text and does not interpret script tag
+      expect(emailOptions.html).toContain('<strong>&lt;script&gt;alert(1)&lt;/script&gt;</strong>');
+      expect(emailOptions.html).not.toContain('<script>');
+      expect(emailOptions.html).not.toContain('</script>');
+    });
+
+    it('escapes complex titles containing angle brackets, quotes, and ampersands', async () => {
+      const complexTitle = 'Client Intake <Q1> & "Review"';
+      const complexForm = await Form.create({
+        ownerId: form.ownerId,
+        title: complexTitle,
+        status: 'published'
+      });
+      const q = await Question.create({
+        formId: complexForm._id,
+        type: 'short_text',
+        label: 'Feedback',
+        required: true,
+        order: 0
+      });
+
+      const emailSpy = vi
+        .spyOn(EmailService.prototype, 'sendEmail')
+        .mockResolvedValueOnce({ success: true });
+
+      const res = await request(app)
+        .post(`/api/responses/${complexForm._id}`)
+        .send({
+          answers: [{ questionId: q._id.toString(), value: 'Testing Complex Title' }]
+        });
+
+      expect(res.status).toBe(201);
+      expect(res.body.success).toBe(true);
+
+      await new Promise((resolve) => setTimeout(resolve, 30));
+
+      expect(emailSpy).toHaveBeenCalledTimes(1);
+      const emailOptions = emailSpy.mock.calls[0][0];
+
+      // Plain text subject preserves original title
+      expect(emailOptions.subject).toBe(`New submission for form: ${complexTitle}`);
+
+      // HTML body encodes <, >, &, and "
+      expect(emailOptions.html).toContain(
+        '<strong>Client Intake &lt;Q1&gt; &amp; &quot;Review&quot;</strong>'
+      );
+      expect(emailOptions.html).not.toContain('<Q1>');
+      expect(emailOptions.html).not.toContain('"Review"');
+    });
+
+    it('renders ordinary titles cleanly in email notification HTML and subject', async () => {
+      const normalTitle = 'Customer Satisfaction Survey 2026';
+      const normalForm = await Form.create({
+        ownerId: form.ownerId,
+        title: normalTitle,
+        status: 'published'
+      });
+      const q = await Question.create({
+        formId: normalForm._id,
+        type: 'short_text',
+        label: 'Feedback',
+        required: true,
+        order: 0
+      });
+
+      const emailSpy = vi
+        .spyOn(EmailService.prototype, 'sendEmail')
+        .mockResolvedValueOnce({ success: true });
+
+      const res = await request(app)
+        .post(`/api/responses/${normalForm._id}`)
+        .send({
+          answers: [{ questionId: q._id.toString(), value: 'Clean feedback' }]
+        });
+
+      expect(res.status).toBe(201);
+      expect(res.body.success).toBe(true);
+
+      await new Promise((resolve) => setTimeout(resolve, 30));
+
+      expect(emailSpy).toHaveBeenCalledTimes(1);
+      const emailOptions = emailSpy.mock.calls[0][0];
+
+      expect(emailOptions.subject).toBe(`New submission for form: ${normalTitle}`);
+      expect(emailOptions.html).toContain(`<strong>${normalTitle}</strong>`);
+      expect(emailOptions.html).toContain(
+        `<a href="${process.env.FRONTEND_URL || 'http://localhost:5173'}/dashboard">View Responses</a>`
+      );
+    });
+
+    it('escapes single quotes correctly in form titles', async () => {
+      const titleWithSingleQuote = "O'Connor & Sons 'Priority' Intake";
+      const quoteForm = await Form.create({
+        ownerId: form.ownerId,
+        title: titleWithSingleQuote,
+        status: 'published'
+      });
+      const q = await Question.create({
+        formId: quoteForm._id,
+        type: 'short_text',
+        label: 'Feedback',
+        required: true,
+        order: 0
+      });
+
+      const emailSpy = vi
+        .spyOn(EmailService.prototype, 'sendEmail')
+        .mockResolvedValueOnce({ success: true });
+
+      const res = await request(app)
+        .post(`/api/responses/${quoteForm._id}`)
+        .send({
+          answers: [{ questionId: q._id.toString(), value: 'Quote feedback' }]
+        });
+
+      expect(res.status).toBe(201);
+      await new Promise((resolve) => setTimeout(resolve, 30));
+
+      expect(emailSpy).toHaveBeenCalledTimes(1);
+      const emailOptions = emailSpy.mock.calls[0][0];
+      expect(emailOptions.html).toContain(
+        '<strong>O&#39;Connor &amp; Sons &#39;Priority&#39; Intake</strong>'
+      );
+    });
+
+    it('escapeHtml helper handles all entity requirements and boundary inputs', () => {
+      expect(escapeHtml('<script>alert(1)</script>')).toBe('&lt;script&gt;alert(1)&lt;/script&gt;');
+      expect(escapeHtml('Client Intake <Q1> & "Review"')).toBe(
+        'Client Intake &lt;Q1&gt; &amp; &quot;Review&quot;'
+      );
+      expect(escapeHtml("Tom's & Jerry's")).toBe('Tom&#39;s &amp; Jerry&#39;s');
+      expect(escapeHtml(null)).toBe('');
+      expect(escapeHtml(undefined)).toBe('');
+      expect(escapeHtml('')).toBe('');
+      expect(escapeHtml(42)).toBe('42');
     });
   });
 });
