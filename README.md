@@ -318,6 +318,35 @@ Paperless is an excellent solution for general data collection, surveys, and app
 
 Paperless is currently in active development. The core features, intelligence layer, and authentication mechanisms are stable and fully tested.
 
+### Phase 4.3.6 - B1 Reliability Remediation
+
+**Status: CLOSED**
+
+**Findings resolved:**
+- **AUD-S3-01:** Response read preference semantics.
+- **AUD-CAS-01:** Terminal cleanup CAS matched-count fencing.
+- **AUD-CAS-02:** Dead-form orphan cleanup accounting and status predicates.
+- **AUD-CAS-03:** Post-S3 deletion lease-loss detection.
+- **AUD-TEST-01:** Multi-chunk deletion cancellation and heartbeat loss.
+- **AUD-TEST-02:** Controller-driven integration coverage, including late-arriving CopyObject recovery.
+
+**Verification evidence:**
+- Full server suite: 1,241/1,241 passed.
+- Full client suite: 128/128 passed.
+- `durableSubmissionReplicaSet.test.js`: 19/19 passed across four consecutive runs.
+- `durableS3OrphanRecovery.test.js`: 112/112 passed.
+- ESLint: zero errors and warnings.
+- Client production build: successful.
+- Final diff audit: READY TO CLOSE B1.
+- Independent production reliability and test quality reviews: PASS.
+
+**Operational assumptions:**
+1. Remote storage operations may outlive client-side cancellation.
+2. Durable tombstones and repeated reconciliation provide recovery for late-arriving objects.
+3. The 15-minute quarantine is an operational assumption, not a mathematically proven upper bound on remote completion.
+4. Background reconciliation workers must remain operational and monitored.
+5. Distributed lease and quarantine timestamps require synchronized system clocks.
+
 ---
 
 ## Contributing

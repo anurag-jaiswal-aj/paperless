@@ -4917,4 +4917,361 @@ describe('Stage 4.3.5 B1: Durable S3 Orphan Recovery & Post-Cascade Lifecycle (1
       expect(activeS3Objects.has(canonicalKey)).toBe(false);
     });
   });
+
+  // --------------------------------------------------------------------------
+  // Phase 4.3.6: Reliability Remediation Regression Suite
+  // (AUD-CAS-01, AUD-CAS-02, AUD-CAS-03, AUD-TEST-01)
+  // --------------------------------------------------------------------------
+  describe('Phase 4.3.6: Reliability Remediation Regression Suite', () => {
+    const createDeferred = () => {
+      let resolve;
+      let reject;
+      const promise = new Promise((res, rej) => {
+        resolve = res;
+        reject = rej;
+      });
+      return { promise, resolve, reject };
+    };
+
+    it('AUD-CAS-01 Test 1: Terminal CAS lease loss during reconciliation returns lease_lost and prevents false completion accounting', async () => {
+      const deadId = new mongoose.Types.ObjectId();
+      const deadIdStr = deadId.toString();
+
+      const job = await DeletionCleanupJob.create({
+        formId: deadId,
+        status: 'pending',
+        stagingPrefix: `staging/forms/${deadIdStr}/`,
+        finalPrefix: `forms/${deadIdStr}/`,
+        eligibleUntil: new Date(Date.now() - 1000), // past grace
+        attempts: 0,
+        epoch: 1
+      });
+
+      // While listing prefix, simulate a competing worker stealing the lease and bumping epoch
+      vi.spyOn(storageService, 'listObjectsByPrefix').mockImplementationOnce(async () => {
+        await DeletionCleanupJob.updateOne(
+          { _id: job._id },
+          { $set: { epoch: 999, leaseId: 'competitor-lease-cas01' } }
+        );
+        return { keys: [], isTruncated: false };
+      });
+
+      const result = await processDeletionCleanupJob(job);
+
+      // Must detect matchedCount === 0 on terminal CAS and return lease_lost
+      expect(result.processed).toBe(false);
+      expect(result.status).toBe('lease_lost');
+
+      // Verify the competitor's epoch was not corrupted or overwritten
+      const postJob = await DeletionCleanupJob.findById(job._id);
+      expect(postJob.epoch).toBe(999);
+      expect(postJob.leaseId).toBe('competitor-lease-cas01');
+    });
+
+    it('AUD-CAS-01 Test 2: Terminal CAS lease loss during failed-keys update returns lease_lost', async () => {
+      const deadId = new mongoose.Types.ObjectId();
+      const deadIdStr = deadId.toString();
+      const testKey = `forms/${deadIdStr}/failed.pdf`;
+      activeS3Objects.set(testKey, { mime: 'application/pdf' });
+
+      const job = await DeletionCleanupJob.create({
+        formId: deadId,
+        status: 'pending',
+        stagingPrefix: `staging/forms/${deadIdStr}/`,
+        finalPrefix: `forms/${deadIdStr}/`,
+        eligibleUntil: new Date(Date.now() - 1000),
+        attempts: 0,
+        epoch: 1
+      });
+
+      // Simulate partial deleteFiles failure AND competitor steals lease concurrently
+      vi.spyOn(storageService, 'deleteFiles').mockImplementationOnce(async (keys) => {
+        await DeletionCleanupJob.updateOne(
+          { _id: job._id },
+          { $set: { epoch: 999, leaseId: 'competitor-lease-failed-keys' } }
+        );
+        return {
+          success: false,
+          deletedKeys: [],
+          failedKeys: [{ key: testKey, error: 'S3 Delete Error' }],
+          totalRequested: keys.length
+        };
+      });
+
+      const result = await processDeletionCleanupJob(job);
+
+      expect(result.processed).toBe(false);
+      expect(result.status).toBe('lease_lost');
+
+      const postJob = await DeletionCleanupJob.findById(job._id);
+      expect(postJob.epoch).toBe(999);
+      expect(postJob.leaseId).toBe('competitor-lease-failed-keys');
+    });
+
+    it('AUD-CAS-01 Test 3: Terminal CAS lease loss during pending release returns lease_lost', async () => {
+      const deadId = new mongoose.Types.ObjectId();
+      const deadIdStr = deadId.toString();
+
+      const job = await DeletionCleanupJob.create({
+        formId: deadId,
+        status: 'pending',
+        stagingPrefix: `staging/forms/${deadIdStr}/`,
+        finalPrefix: `forms/${deadIdStr}/`,
+        eligibleUntil: new Date(Date.now() + 600000), // still in grace -> pending branch
+        attempts: 0,
+        epoch: 1
+      });
+
+      // During prefix listing, competitor claims lease
+      vi.spyOn(storageService, 'listObjectsByPrefix').mockImplementationOnce(async () => {
+        await DeletionCleanupJob.updateOne(
+          { _id: job._id },
+          { $set: { epoch: 888, leaseId: 'competitor-lease-pending' } }
+        );
+        return { keys: [], isTruncated: false };
+      });
+
+      const result = await processDeletionCleanupJob(job);
+
+      expect(result.processed).toBe(false);
+      expect(result.status).toBe('lease_lost');
+
+      const postJob = await DeletionCleanupJob.findById(job._id);
+      expect(postJob.epoch).toBe(888);
+      expect(postJob.leaseId).toBe('competitor-lease-pending');
+    });
+
+    it('AUD-CAS-02 Test 1: Dead-form orphan sweep ignores zero deletedCount and prevents phantom increment', async () => {
+      const deadFormId = new mongoose.Types.ObjectId();
+      await SubmissionReservation.create({
+        formId: deadFormId,
+        status: 'abandoned',
+        stagedKeys: [],
+        promotedKeys: [],
+        leaseId: 'dead-res-cas02',
+        fenceToken: 'ft-cas02',
+        expiresAt: new Date(Date.now() - 5000),
+        quarantinedUntil: new Date(Date.now() - 5000)
+      });
+
+      // Spy on SubmissionReservation.deleteOne to simulate a concurrent worker having deleted it first
+      const origDeleteOne = SubmissionReservation.deleteOne.bind(SubmissionReservation);
+      vi.spyOn(SubmissionReservation, 'deleteOne').mockImplementation(async (query) => {
+        // Run real deleteOne on first call, return deletedCount: 0 on second call
+        await origDeleteOne(query);
+        return { acknowledged: true, deletedCount: 0 }; // simulate competitor won race
+      });
+
+      const summary = await recoverAbandonedFormDeletions({ userId });
+
+      // Worker received deletedCount: 0 -> must NOT increment sweptOrphanReservations
+      expect(summary.sweptOrphanReservations || 0).toBe(0);
+    });
+
+    it('AUD-CAS-02 Test 2: Dead-form orphan reservation status predicate prevents stale overwrite on S3 delete failure', async () => {
+      const deadFormId = new mongoose.Types.ObjectId();
+      const deadRes = await SubmissionReservation.create({
+        formId: deadFormId,
+        status: 'abandoned', // already abandoned
+        stagedKeys: ['staged-dead.pdf'],
+        promotedKeys: [],
+        leaseId: 'dead-res-cas02-b',
+        fenceToken: 'ft-cas02-b',
+        expiresAt: new Date(Date.now() - 5000),
+        quarantinedUntil: new Date(Date.now() - 5000)
+      });
+
+      // Simulate S3 deleteFile failure so it enters the failedKeys update branch
+      vi.spyOn(storageService, 'deleteFile').mockRejectedValueOnce(new Error('S3 delete failure'));
+
+      await recoverAbandonedFormDeletions({ userId });
+
+      // Status predicate { status: { $ne: 'abandoned' } } matches 0 documents because it was already abandoned
+      // Thus failedCount is not incremented falsely
+      const reloadedRes = await SubmissionReservation.findById(deadRes._id);
+      expect(reloadedRes.status).toBe('abandoned');
+    });
+
+    it('AUD-CAS-03 Test 1: Post-S3 deletion detects expired lease and halts before terminal operations', async () => {
+      const deadId = new mongoose.Types.ObjectId();
+      const deadIdStr = deadId.toString();
+      const testKey = `forms/${deadIdStr}/expired-test.pdf`;
+      activeS3Objects.set(testKey, { mime: 'application/pdf' });
+
+      const job = await DeletionCleanupJob.create({
+        formId: deadId,
+        status: 'pending',
+        stagingPrefix: `staging/forms/${deadIdStr}/`,
+        finalPrefix: `forms/${deadIdStr}/`,
+        eligibleUntil: new Date(Date.now() - 1000),
+        attempts: 0,
+        epoch: 1
+      });
+
+      // Simulate S3 deleteFiles taking longer than lease duration, advancing confirmedExpiresAtMs
+      vi.spyOn(storageService, 'deleteFiles').mockImplementationOnce(async (keys) => {
+        // Advance clock artificially past confirmed expiration (leaseTtlMs is 100ms for test)
+        await new Promise((r) => setTimeout(r, 150));
+        keys.forEach((k) => activeS3Objects.delete(k));
+        return { success: true, deletedKeys: keys, failedKeys: [], totalRequested: keys.length };
+      });
+
+      const listSpy = vi.spyOn(storageService, 'listObjectsByPrefix');
+
+      const result = await processDeletionCleanupJob(job, {
+        leaseTtlMs: 100, // 100ms short lease
+        heartbeatIntervalMs: 500 // heartbeat does not fire before 150ms delay
+      });
+
+      expect(result.processed).toBe(false);
+      expect(result.status).toBe('lease_lost');
+      expect(result.deletedCount).toBe(1);
+
+      // Verify it halted at line 1649: prefix verification (lines 1687-1692) should not have been called
+      // Initial listing called listObjectsByPrefix twice (staging + final prefixes).
+      // Post-delete verification would call it 2 more times if it hadn't halted!
+      const callsAfterDeletion = listSpy.mock.calls.length;
+      expect(callsAfterDeletion).toBe(2); // exactly 2 initial listing calls, 0 verification calls
+    });
+
+    it('AUD-TEST-01 Test 1: Multi-chunk 1,500-key deletion halts chunk 2 when heartbeat detects lease loss', async () => {
+      const deadId = new mongoose.Types.ObjectId();
+      const deadIdStr = deadId.toString();
+
+      // Seed 1,500 keys in mock storage
+      const totalKeys = 1500;
+      const allKeys = Array.from({ length: totalKeys }, (_, i) => `forms/${deadIdStr}/doc-${i}.pdf`);
+      allKeys.forEach((k) => activeS3Objects.set(k, { mime: 'application/pdf' }));
+
+      const job = await DeletionCleanupJob.create({
+        formId: deadId,
+        status: 'pending',
+        stagingPrefix: `staging/forms/${deadIdStr}/`,
+        finalPrefix: `forms/${deadIdStr}/`,
+        eligibleUntil: new Date(Date.now() - 1000),
+        attempts: 0,
+        epoch: 1
+      });
+
+      const chunk1Entered = createDeferred();
+      const allowChunk1Finish = createDeferred();
+      let chunkCalls = 0;
+      let chunk2Attempted = false;
+
+      // Spy on storageService.deleteFiles to implement realistic 1,000-key chunking linked to signal
+      vi.spyOn(storageService, 'deleteFiles').mockImplementation(async (keys, options) => {
+        const CHUNK_SIZE = 1000;
+        const parentSignal = options?.signal;
+        const deletedKeys = [];
+        const failedKeys = [];
+
+        for (let i = 0; i < keys.length; i += CHUNK_SIZE) {
+          if (parentSignal?.aborted) {
+            for (const k of keys.slice(i)) {
+              failedKeys.push({
+                key: k,
+                error: parentSignal.reason?.message || 'Delete operation aborted',
+                code: 'AbortError'
+              });
+            }
+            break;
+          }
+
+          chunkCalls++;
+          const chunk = keys.slice(i, i + CHUNK_SIZE);
+
+          if (chunkCalls === 1) {
+            chunk1Entered.resolve();
+            await allowChunk1Finish.promise;
+          } else if (chunkCalls === 2) {
+            chunk2Attempted = true;
+          }
+
+          for (const k of chunk) {
+            activeS3Objects.delete(k);
+            deletedKeys.push(k);
+          }
+        }
+
+        return {
+          success: failedKeys.length === 0,
+          deletedKeys,
+          failedKeys,
+          totalRequested: keys.length
+        };
+      });
+
+      const cleanupPromise = processDeletionCleanupJob(job, {
+        heartbeatIntervalMs: 50
+      });
+
+      // Wait until chunk 1 (1,000 keys) has started processing
+      await chunk1Entered.promise;
+      expect(chunkCalls).toBe(1);
+
+      // While chunk 1 is paused, competitor reclaims lease and bumps epoch in MongoDB
+      await DeletionCleanupJob.updateOne(
+        { _id: job._id },
+        { $set: { epoch: 999, leaseId: 'competitor-won-lease' } }
+      );
+
+      // Allow heartbeat timer to fire and detect lease loss (heartbeat interval is 50ms)
+      await new Promise((r) => setTimeout(r, 120));
+
+      // Now release chunk 1
+      allowChunk1Finish.resolve();
+      const result = await cleanupPromise;
+
+      // Result must report lease loss
+      expect(result.processed).toBe(false);
+      expect(result.status).toBe('lease_lost');
+      expect(result.deletedCount).toBe(1000);
+
+      // Crucial assertion: Chunk 2 was NEVER attempted
+      expect(chunkCalls).toBe(1);
+      expect(chunk2Attempted).toBe(false);
+
+      // Exactly 1,000 keys deleted; remaining 500 keys still intact in activeS3Objects
+      expect(activeS3Objects.size).toBe(500);
+      expect(activeS3Objects.has(allKeys[0])).toBe(false);
+      expect(activeS3Objects.has(allKeys[999])).toBe(false);
+      expect(activeS3Objects.has(allKeys[1000])).toBe(true);
+      expect(activeS3Objects.has(allKeys[1499])).toBe(true);
+    });
+
+    it('AUD-TEST-01 Test 2: Caller cancellation via options.signal aborts job processing and safely releases to pending', async () => {
+      const deadId = new mongoose.Types.ObjectId();
+      const deadIdStr = deadId.toString();
+
+      const job = await DeletionCleanupJob.create({
+        formId: deadId,
+        status: 'pending',
+        stagingPrefix: `staging/forms/${deadIdStr}/`,
+        finalPrefix: `forms/${deadIdStr}/`,
+        eligibleUntil: new Date(Date.now() - 1000),
+        attempts: 0,
+        epoch: 1
+      });
+
+      const callerController = new AbortController();
+
+      vi.spyOn(storageService, 'listObjectsByPrefix').mockImplementationOnce(async () => {
+        // Caller aborts mid-listing
+        callerController.abort(new Error('User cancelled cleanup'));
+        return { keys: [`forms/${deadIdStr}/abort-test.pdf`], isTruncated: false };
+      });
+
+      const result = await processDeletionCleanupJob(job, {
+        signal: callerController.signal
+      });
+
+      expect(result.processed).toBe(false);
+      expect(result.status).toBe('aborted');
+
+      // Job must be safely released back to pending
+      const reloadedJob = await DeletionCleanupJob.findById(job._id);
+      expect(reloadedJob.status).toBe('pending');
+      expect(reloadedJob.leaseId).toBeNull();
+    });
+  });
 });

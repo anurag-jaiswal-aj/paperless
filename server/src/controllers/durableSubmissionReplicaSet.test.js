@@ -59,7 +59,15 @@ describe('Stage 4.3.5 B1: Replica Set Multi-Document Transaction Integration & A
     upload = multer({ dest: os.tmpdir() });
     app = express();
     app.use(express.json());
-    app.post('/api/responses/:formId', upload.any(), submitResponse);
+    app.post(
+      '/api/responses/:formId',
+      (req, res, next) => {
+        req.app.locals.lastReq = req;
+        next();
+      },
+      upload.any(),
+      submitResponse
+    );
     app.delete(
       '/api/responses/:formId/:responseId',
       (req, res, next) => {
@@ -172,6 +180,9 @@ describe('Stage 4.3.5 B1: Replica Set Multi-Document Transaction Integration & A
 
   afterEach(() => {
     vi.restoreAllMocks();
+    if (app?.locals) {
+      app.locals.lastReq = null;
+    }
   });
 
   // --------------------------------------------------------------------------
@@ -1162,5 +1173,367 @@ describe('Stage 4.3.5 B1: Replica Set Multi-Document Transaction Integration & A
     const w1Res = await w1Promise;
     expect(w1Res.statusCode).toBe(409);
     expect(await Form.findById(form910._id)).toBeNull();
+  });
+
+  // --------------------------------------------------------------------------
+  // Phase 4.3.6: Controller-Driven Integration Tests (AUD-TEST-02)
+  // --------------------------------------------------------------------------
+  describe('Phase 4.3.6: Controller-Driven Integration Tests (AUD-TEST-02)', () => {
+    it('AUD-TEST-02 Test A: Multi-file HTTP submission handles partial promotion failure and cleans up orphaned storage files', async () => {
+      const form = await Form.create({ ownerId: userId, title: 'Multi-File Form', status: 'published' });
+      const q1 = await Question.create({ formId: form._id, type: 'file', label: 'File 1', order: 0 });
+      const q2 = await Question.create({ formId: form._id, type: 'file', label: 'File 2', order: 1 });
+
+      const tmp1 = createTempPdfFile();
+      const tmp2 = createTempPdfFile();
+
+      try {
+        let copyCount = 0;
+        const copiedKeys = [];
+        vi.spyOn(storageService, 'copyFile').mockImplementation(async (sourceKey, destKey) => {
+          copyCount++;
+          if (copyCount === 1) {
+            activeS3Objects.set(destKey, { mime: 'application/pdf', timestamp: Date.now() });
+            copiedKeys.push(destKey);
+            return destKey;
+          }
+          // Fail deterministically on the second file promotion
+          const copyErr = new Error('Simulated S3 copyFile promotion failure on second file');
+          copyErr.statusCode = 500;
+          throw copyErr;
+        });
+
+        const res = await request(app)
+          .post(`/api/responses/${form._id}`)
+          .field('answers', JSON.stringify([]))
+          .attach(`file_${q1._id.toString()}`, tmp1)
+          .attach(`file_${q2._id.toString()}`, tmp2);
+
+        expect(res.status).toBe(500);
+
+        // Database state: No response should be committed
+        const responseCount = await Response.countDocuments({ formId: form._id });
+        expect(responseCount).toBe(0);
+
+        // Form activeSubmissions counter should be decremented back
+        const reloadedForm = await Form.findById(form._id);
+        expect(reloadedForm.activeSubmissions).toBe(0);
+
+        // Reservation should be marked abandoned or released
+        const reservation = await SubmissionReservation.findOne({ formId: form._id });
+        expect(reservation).not.toBeNull();
+        expect(reservation.status).toBe('abandoned');
+
+        // Fast-forward quarantine so sweeper reclaims it immediately
+        await SubmissionReservation.updateOne(
+          { _id: reservation._id },
+          { $set: { quarantinedUntil: new Date(Date.now() - 1000) } }
+        );
+        const sweepSummary = await SubmissionReservationManager.sweepAbandonedReservations({
+          quarantineMs: 0,
+          graceMs: 0
+        });
+        expect(sweepSummary.reconciledTombstones).toBe(1);
+
+        // Cleaned up in S3
+        for (const key of copiedKeys) {
+          expect(activeS3Objects.has(key)).toBe(false);
+        }
+      } finally {
+        try { fs.unlinkSync(tmp1); } catch (e) { void e; }
+        try { fs.unlinkSync(tmp2); } catch (e) { void e; }
+      }
+    });
+
+    it('AUD-TEST-02 Test B: In-flight CopyObject delayed during HTTP submission races with sweeper without data loss', async () => {
+      const form = await Form.create({ ownerId: userId, title: 'In-Flight Copy Form', status: 'published' });
+      const q1 = await Question.create({ formId: form._id, type: 'file', label: 'File 1', order: 0 });
+
+      const tmp1 = createTempPdfFile();
+      const copyStarted = createDeferred();
+      const allowCopyFinish = createDeferred();
+      let promotedKey = null;
+
+      try {
+        vi.spyOn(storageService, 'copyFile').mockImplementation(async (sourceKey, destKey) => {
+          promotedKey = destKey;
+          copyStarted.resolve();
+          await allowCopyFinish.promise;
+          activeS3Objects.set(destKey, { mime: 'application/pdf', timestamp: Date.now() });
+          return destKey;
+        });
+
+        const subPromise = (async () =>
+          await request(app)
+            .post(`/api/responses/${form._id}`)
+            .field('answers', JSON.stringify([]))
+            .attach(`file_${q1._id.toString()}`, tmp1))();
+
+        // Wait until copyFile is actively executing
+        await copyStarted.promise;
+
+        // While copyFile is in-flight, reservation is active within its lease.
+        // Trigger orphan recovery / sweeper concurrently:
+        const sweep1 = await SubmissionReservationManager.sweepAbandonedReservations({
+          quarantineMs: 0,
+          graceMs: 0
+        });
+        // Active submission must NOT be swept or stolen!
+        expect(sweep1.sweptExpired || 0).toBe(0);
+        expect(sweep1.purgedAbandoned || 0).toBe(0);
+
+        // Allow copy to finish and submission to complete
+        allowCopyFinish.resolve();
+        const subRes = await subPromise;
+
+        expect(subRes.status).toBe(201);
+        expect(await Response.countDocuments({ formId: form._id })).toBe(1);
+        expect(activeS3Objects.has(promotedKey)).toBe(true);
+
+        // Subsequent sweep should also never delete this committed response attachment
+        const sweep2 = await SubmissionReservationManager.sweepAbandonedReservations({
+          quarantineMs: 0,
+          graceMs: 0
+        });
+        expect(sweep2.sweptExpired || 0).toBe(0);
+        expect(sweep2.purgedAbandoned || 0).toBe(0);
+        expect(activeS3Objects.has(promotedKey)).toBe(true);
+      } finally {
+        copyStarted.resolve();
+        allowCopyFinish.resolve();
+        try { fs.unlinkSync(tmp1); } catch (e) { void e; }
+      }
+    });
+
+    it('AUD-TEST-02 Test C: Client abort during copyFile halts promotion, rolls back transaction, and cleans up orphaned objects', async () => {
+      const form = await Form.create({ ownerId: userId, title: 'Client Abort Form', status: 'published' });
+      const q1 = await Question.create({ formId: form._id, type: 'file', label: 'File 1', order: 0 });
+
+      const tmp1 = createTempPdfFile();
+      const copyStarted = createDeferred();
+      const allowCopyFinish = createDeferred();
+      let capturedDestKey = null;
+
+      try {
+        const releaseSpy = vi.spyOn(SubmissionReservationManager, 'release');
+
+        vi.spyOn(storageService, 'copyFile').mockImplementation(async (sourceKey, destKey, options) => {
+          capturedDestKey = destKey;
+          copyStarted.resolve();
+          await allowCopyFinish.promise;
+          if (options?.abortSignal?.aborted) {
+            const abortErr = new Error('Copy aborted');
+            abortErr.name = 'AbortError';
+            throw abortErr;
+          }
+          activeS3Objects.set(destKey, { mime: 'application/pdf', timestamp: Date.now() });
+          return destKey;
+        });
+
+        let subReqInstance;
+        const subPromise = (async () => {
+          const reqInstance = request(app)
+            .post(`/api/responses/${form._id}`)
+            .field('answers', JSON.stringify([]))
+            .attach(`file_${q1._id.toString()}`, tmp1);
+          subReqInstance = reqInstance;
+          return await reqInstance;
+        })();
+
+        // Wait until copyFile starts
+        await copyStarted.promise;
+
+        // Simulate client aborting connection while copying is in progress
+        const serverReq = app.locals.lastReq;
+        if (serverReq && typeof serverReq.emit === 'function') {
+          serverReq.emit('close');
+        }
+        if (subReqInstance && typeof subReqInstance.abort === 'function') {
+          subReqInstance.abort();
+        }
+
+        // Release copy barrier
+        allowCopyFinish.resolve();
+
+        // Request was aborted by client
+        await subPromise.catch(() => null);
+
+        // Deterministically await the server-side rollback release
+        if (releaseSpy.mock.results.length > 0) {
+          await releaseSpy.mock.results[0].value.catch(() => {});
+        }
+
+        // Database assertion: No response document should have been created
+        expect(await Response.countDocuments({ formId: form._id })).toBe(0);
+
+        // Form activeSubmissions counter should be 0
+        const reloadedForm = await Form.findById(form._id);
+        expect(reloadedForm.activeSubmissions).toBe(0);
+
+        // Reservation should be marked abandoned or released
+        const reservation = await SubmissionReservation.findOne({ formId: form._id });
+        if (reservation) {
+          // Fast-forward quarantine so sweeper reconciles
+          await SubmissionReservation.updateOne(
+            { _id: reservation._id },
+            { $set: { quarantinedUntil: new Date(Date.now() - 1000) } }
+          );
+          await SubmissionReservationManager.sweepAbandonedReservations({
+            quarantineMs: 0,
+            graceMs: 0
+          });
+        }
+
+        // Staging and promoted keys must be clean
+        if (capturedDestKey) {
+          expect(activeS3Objects.has(capturedDestKey)).toBe(false);
+        }
+      } finally {
+        copyStarted.resolve();
+        allowCopyFinish.resolve();
+        try { fs.unlinkSync(tmp1); } catch (e) { void e; }
+      }
+    });
+
+    it('AUD-TEST-02 Test D: Late-arriving CopyObject completes after pass 1 tombstone reconciliation and is purged by pass 2 without data loss', async () => {
+      const form = await Form.create({ ownerId: userId, title: 'Late Copy Form', status: 'published' });
+      const q1 = await Question.create({ formId: form._id, type: 'file', label: 'File 1', order: 0 });
+
+      const tmp1 = createTempPdfFile();
+      const copyStarted = createDeferred();
+      const allowRemoteCopyFinish = createDeferred();
+      let capturedDestKey = null;
+
+      try {
+        const releaseSpy = vi.spyOn(SubmissionReservationManager, 'release');
+
+        // Mock copyFile: signals admission, spawns background simulated remote S3 task,
+        // and rejects locally when the client aborts to simulate TCP socket termination.
+        vi.spyOn(storageService, 'copyFile').mockImplementation(async (sourceKey, destKey, options) => {
+          capturedDestKey = destKey;
+          copyStarted.resolve();
+
+          // Background simulation of the remote S3 server finishing the CopyObject
+          const remoteS3Task = (async () => {
+            await allowRemoteCopyFinish.promise;
+            activeS3Objects.set(destKey, { mime: 'application/pdf', timestamp: Date.now() });
+          })();
+          remoteS3Task.catch(() => {});
+
+          if (options?.abortSignal) {
+            if (options.abortSignal.aborted) {
+              const abortErr = new Error('Copy aborted by client');
+              abortErr.name = 'AbortError';
+              throw abortErr;
+            }
+            await new Promise((resolve, reject) => {
+              const onAbort = () => {
+                const abortErr = new Error('Copy aborted by client');
+                abortErr.name = 'AbortError';
+                reject(abortErr);
+              };
+              options.abortSignal.addEventListener('abort', onAbort, { once: true });
+            });
+          }
+          return destKey;
+        });
+
+        let subReqInstance;
+        const subPromise = (async () => {
+          const reqInstance = request(app)
+            .post(`/api/responses/${form._id}`)
+            .field('answers', JSON.stringify([]))
+            .attach(`file_${q1._id.toString()}`, tmp1);
+          subReqInstance = reqInstance;
+          return await reqInstance;
+        })();
+
+        // 1. Wait until copyFile is admitted by simulated S3
+        await copyStarted.promise;
+
+        // 2. Abort the HTTP request while remote copy remains in flight
+        const serverReq = app.locals.lastReq;
+        if (serverReq && typeof serverReq.emit === 'function') {
+          serverReq.emit('close');
+        }
+        if (subReqInstance && typeof subReqInstance.abort === 'function') {
+          subReqInstance.abort();
+        }
+
+        // 3. Await request completion and async reservation compensation rollback
+        await subPromise.catch(() => null);
+        if (releaseSpy.mock.results.length > 0) {
+          await releaseSpy.mock.results[0].value.catch(() => {});
+        }
+
+        // 4. Verify no committed Response document references the canonical key
+        expect(await Response.countDocuments({ formId: form._id })).toBe(0);
+        const reloadedForm = await Form.findById(form._id);
+        expect(reloadedForm.activeSubmissions).toBe(0);
+
+        // 5. Verify initial abandoned reservation state before S3 copy finishes
+        const reservation = await SubmissionReservation.findOne({ formId: form._id });
+        expect(reservation).not.toBeNull();
+        expect(reservation.status).toBe('abandoned');
+        expect(reservation.stagedKeys).toEqual([]);
+        expect(reservation.promotedKeys).toContain(capturedDestKey);
+        expect(activeS3Objects.has(capturedDestKey)).toBe(false);
+
+        // 6. Expire initial quarantine deterministically and execute Reconciliation Pass 1
+        await SubmissionReservation.updateOne(
+          { _id: reservation._id },
+          { $set: { quarantinedUntil: new Date(Date.now() - 1000) } }
+        );
+        const sweep1 = await SubmissionReservationManager.sweepAbandonedReservations({
+          quarantineMs: 0,
+          reconcileIntervalMs: 300000,
+          graceMs: 0
+        });
+        expect(sweep1.reconciledTombstones).toBe(1);
+
+        // 7. Verify Pass 1 result: canonical key absent in S3, tombstone retained with re-armed quarantine
+        expect(activeS3Objects.has(capturedDestKey)).toBe(false);
+        const t1 = await SubmissionReservation.findById(reservation._id);
+        expect(t1.status).toBe('abandoned');
+        expect(t1.promotionStatus).toBe('tombstone');
+        expect(t1.reconciliationState).toBe('reconciled');
+        expect(t1.reconciliationPasses).toBe(1);
+        expect(t1.promotedKeys).toContain(capturedDestKey);
+        expect(t1.vacuumAt).toBeNull(); // Immune to TTL
+        expect(new Date(t1.quarantinedUntil).getTime()).toBeGreaterThan(Date.now()); // Re-armed for future pass
+
+        // 8. ADVERSARIAL EVENT: Remote CopyObject completes AFTER Pass 1, explicitly recreating canonical key in S3
+        allowRemoteCopyFinish.resolve();
+        await new Promise((r) => setImmediate(r));
+        expect(activeS3Objects.has(capturedDestKey)).toBe(true); // Recreated in S3!
+
+        // 9. Expire tombstone quarantine deterministically and execute Reconciliation Pass 2
+        await SubmissionReservation.updateOne(
+          { _id: reservation._id },
+          { $set: { quarantinedUntil: new Date(Date.now() - 1000) } }
+        );
+        const sweep2 = await SubmissionReservationManager.sweepAbandonedReservations({
+          quarantineMs: 0,
+          reconcileIntervalMs: 300000,
+          graceMs: 0
+        });
+        expect(sweep2.reconciledTombstones).toBe(1);
+
+        // 10. Verify Pass 2 result: Recreated canonical key discovered and purged from S3
+        expect(activeS3Objects.has(capturedDestKey)).toBe(false); // Affirmatively purged!
+        const t2 = await SubmissionReservation.findById(reservation._id);
+        expect(t2.status).toBe('abandoned');
+        expect(t2.promotionStatus).toBe('tombstone');
+        expect(t2.reconciliationState).toBe('reconciled');
+        expect(t2.reconciliationPasses).toBe(2);
+        expect(t2.promotedKeys).toContain(capturedDestKey);
+        expect(t2.vacuumAt).toBeNull();
+        expect(new Date(t2.quarantinedUntil).getTime()).toBeGreaterThan(Date.now()); // Remains eligible for next pass
+      } finally {
+        copyStarted.resolve();
+        allowRemoteCopyFinish.resolve();
+        try { fs.unlinkSync(tmp1); } catch (e) { void e; }
+      }
+    });
   });
 });

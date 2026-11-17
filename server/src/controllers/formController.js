@@ -1350,12 +1350,13 @@ export const deleteForm = async (req, res, next) => {
  * detects wall-clock expiration, and provides fail-closed ownership barriers.
  */
 export class CleanupLeaseHeartbeat {
-  constructor({ jobId, leaseId, epoch, leaseDurationMs, intervalMs }) {
+  constructor({ jobId, leaseId, epoch, leaseDurationMs, intervalMs, abortController }) {
     this.jobId = jobId;
     this.leaseId = leaseId;
     this.epoch = epoch;
     this.leaseDurationMs = leaseDurationMs;
     this.intervalMs = intervalMs || Math.max(50, Math.floor(leaseDurationMs / 3));
+    this.abortController = abortController || null;
     this.timer = null;
     this.stopped = false;
     this.inFlightPromise = null;
@@ -1378,6 +1379,15 @@ export class CleanupLeaseHeartbeat {
     if (this.stopped || this.leaseLost || this.hasError) return;
     this.timer = setTimeout(async () => {
       if (this.stopped || this.leaseLost || this.hasError) return;
+      if (this.isExpired()) {
+        this.leaseLost = true;
+        if (this.abortController && !this.abortController.signal.aborted) {
+          const err = new Error('Cleanup lease expired');
+          err.name = 'LeaseExpiredError';
+          this.abortController.abort(err);
+        }
+        return;
+      }
       await this.renew();
       if (!this.stopped && !this.leaseLost && !this.hasError) {
         this.scheduleNext();
@@ -1419,6 +1429,11 @@ export class CleanupLeaseHeartbeat {
         if (updateResult.matchedCount === 0) {
           // Ownership fencing: lease was reclaimed by another worker, epoch bumped, or status changed
           this.leaseLost = true;
+          if (this.abortController && !this.abortController.signal.aborted) {
+            const err = new Error('Cleanup lease lost to competing worker');
+            err.name = 'LeaseLostError';
+            this.abortController.abort(err);
+          }
           return false;
         }
         // Only advance locally recorded expiry when MongoDB confirms the update
@@ -1434,6 +1449,11 @@ export class CleanupLeaseHeartbeat {
           jobId: this.jobId,
           error: err.message
         });
+        if (this.abortController && !this.abortController.signal.aborted) {
+          const abortErr = new Error(`Cleanup heartbeat database error: ${err.message}`);
+          abortErr.name = 'HeartbeatError';
+          this.abortController.abort(abortErr);
+        }
         return false;
       } finally {
         this.inFlightPromise = null;
@@ -1489,7 +1509,7 @@ export class CleanupLeaseHeartbeat {
  * @returns {Promise<{ processed: boolean, status: string, deletedCount: number, error?: string }>}
  */
 export const processDeletionCleanupJob = async (jobOrFormId, options = {}) => {
-  const { signal, leaseTtlMs = 30000, leaseDurationMs = leaseTtlMs } = options;
+  const { leaseTtlMs = 30000, leaseDurationMs = leaseTtlMs } = options;
   const now = new Date();
   const leaseId = crypto.randomUUID();
   const leaseExpiresAt = new Date(now.getTime() + leaseDurationMs);
@@ -1568,22 +1588,51 @@ export const processDeletionCleanupJob = async (jobOrFormId, options = {}) => {
   const epoch = claimed.epoch;
   let totalDeleted = 0;
 
+  const callerSignal = options.signal;
+  const cleanupAbortController = new AbortController();
+
+  let callerAbortListener = null;
+  if (callerSignal) {
+    if (callerSignal.aborted) {
+      cleanupAbortController.abort(callerSignal.reason || new Error('Aborted by caller'));
+    } else {
+      callerAbortListener = () => {
+        cleanupAbortController.abort(callerSignal.reason || new Error('Aborted by caller'));
+      };
+      callerSignal.addEventListener('abort', callerAbortListener, { once: true });
+    }
+  }
+
+  const effectiveSignal = cleanupAbortController.signal;
+
   const heartbeat = new CleanupLeaseHeartbeat({
     jobId: claimed._id,
     leaseId,
     epoch,
     leaseDurationMs,
-    intervalMs: options.heartbeatIntervalMs
+    intervalMs: options.heartbeatIntervalMs,
+    abortController: cleanupAbortController
   });
   heartbeat.start();
 
   try {
-    if (signal?.aborted) {
-      await DeletionCleanupJob.updateOne(
-        { _id: claimed._id, leaseId, epoch },
-        { $set: { status: 'pending', leaseId: null, leaseExpiresAt: null, updatedAt: new Date() } }
-      );
-      return { processed: false, status: 'aborted' };
+    if (effectiveSignal.aborted) {
+      if (callerSignal?.aborted && !heartbeat.leaseLost && !heartbeat.isExpired()) {
+        const updateRes = await DeletionCleanupJob.updateOne(
+          { _id: claimed._id, leaseId, epoch },
+          { $set: { status: 'pending', leaseId: null, leaseExpiresAt: null, updatedAt: new Date() } }
+        );
+        if (updateRes.matchedCount === 0) {
+          logger.warn('storage.cleanup_lease_lost_during_abort_release', {
+            jobId: claimed._id,
+            formId: claimed.formId,
+            epoch
+          });
+          return { processed: false, status: 'lease_lost', deletedCount: totalDeleted };
+        }
+        return { processed: false, status: 'aborted', deletedCount: totalDeleted };
+      }
+      return { processed: false, status: 'lease_lost', deletedCount: totalDeleted };
     }
 
     // List all objects across staging and final namespaces
@@ -1594,7 +1643,7 @@ export const processDeletionCleanupJob = async (jobOrFormId, options = {}) => {
       let continuationToken = undefined;
       let pageCount = 0;
       do {
-        if (signal?.aborted || heartbeat.leaseLost || heartbeat.hasError || heartbeat.isExpired())
+        if (effectiveSignal.aborted || heartbeat.leaseLost || heartbeat.hasError || heartbeat.isExpired())
           break;
         pageCount++;
         if (pageCount > 1) {
@@ -1603,7 +1652,7 @@ export const processDeletionCleanupJob = async (jobOrFormId, options = {}) => {
         }
         const listResult = await storageService.listObjectsByPrefix(prefix, {
           continuationToken,
-          signal
+          signal: effectiveSignal
         });
         if (Array.isArray(listResult?.keys) && listResult.keys.length > 0) {
           discoveredKeys.push(...listResult.keys);
@@ -1638,7 +1687,7 @@ export const processDeletionCleanupJob = async (jobOrFormId, options = {}) => {
     let deleteErrorMsg = null;
 
     if (uniqueKeys.length > 0) {
-      const deleteResult = await storageService.deleteFiles(uniqueKeys, { signal });
+      const deleteResult = await storageService.deleteFiles(uniqueKeys, { signal: effectiveSignal });
       totalDeleted = (deleteResult?.deletedKeys || []).length;
       if (!deleteResult?.success || (deleteResult?.failedKeys || []).length > 0) {
         hasFailedKeys = true;
@@ -1646,13 +1695,47 @@ export const processDeletionCleanupJob = async (jobOrFormId, options = {}) => {
       }
     }
 
-    if (heartbeat.leaseLost || heartbeat.hasError) {
+    if (heartbeat.leaseLost || heartbeat.hasError || heartbeat.isExpired() || effectiveSignal.aborted) {
+      if (callerSignal?.aborted && !heartbeat.leaseLost && !heartbeat.isExpired()) {
+        const nextStatus = claimed.attempts >= (claimed.maxAttempts || 10) ? 'failed' : 'pending';
+        const updateRes = await DeletionCleanupJob.updateOne(
+          { _id: claimed._id, leaseId, epoch },
+          {
+            $set: {
+              status: nextStatus,
+              leaseId: null,
+              leaseExpiresAt: null,
+              lastError: 'Aborted by caller',
+              'stats.objectsDeleted': (claimed.stats?.objectsDeleted || 0) + totalDeleted,
+              'stats.lastSweepAt': new Date(),
+              updatedAt: new Date()
+            }
+          }
+        );
+        if (updateRes.matchedCount === 0) {
+          logger.warn('storage.cleanup_lease_lost_during_abort_release', {
+            jobId: claimed._id,
+            formId: claimed.formId,
+            epoch
+          });
+          return { processed: false, status: 'lease_lost', deletedCount: totalDeleted };
+        }
+        return { processed: false, status: 'aborted', deletedCount: totalDeleted };
+      }
+
       logger.warn('storage.cleanup_lease_lost_after_deletion', {
         jobId: claimed._id,
         formId: claimed.formId,
-        epoch
+        epoch,
+        reason: heartbeat.leaseLost
+          ? 'lease_lost'
+          : heartbeat.hasError
+            ? 'db_error'
+            : heartbeat.isExpired()
+              ? 'expired'
+              : 'aborted'
       });
-      return { processed: false, status: 'lease_lost' };
+      return { processed: false, status: 'lease_lost', deletedCount: totalDeleted };
     }
 
     const checkNow = new Date();
@@ -1660,7 +1743,7 @@ export const processDeletionCleanupJob = async (jobOrFormId, options = {}) => {
 
     if (hasFailedKeys) {
       const nextStatus = claimed.attempts >= (claimed.maxAttempts || 10) ? 'failed' : 'pending';
-      await DeletionCleanupJob.updateOne(
+      const updateRes = await DeletionCleanupJob.updateOne(
         { _id: claimed._id, leaseId, epoch },
         {
           $set: {
@@ -1674,6 +1757,14 @@ export const processDeletionCleanupJob = async (jobOrFormId, options = {}) => {
           }
         }
       );
+      if (updateRes.matchedCount === 0) {
+        logger.warn('storage.cleanup_lease_lost_during_failed_keys_update', {
+          jobId: claimed._id,
+          formId: claimed.formId,
+          epoch
+        });
+        return { processed: false, status: 'lease_lost', deletedCount: totalDeleted };
+      }
       return {
         processed: true,
         status: nextStatus,
@@ -1685,7 +1776,7 @@ export const processDeletionCleanupJob = async (jobOrFormId, options = {}) => {
     // Verify remaining objects across prefixes
     let remainingCount = 0;
     for (const prefix of prefixes) {
-      const verifyList = await storageService.listObjectsByPrefix(prefix, { maxKeys: 1, signal });
+      const verifyList = await storageService.listObjectsByPrefix(prefix, { maxKeys: 1, signal: effectiveSignal });
       if ((verifyList?.keys || []).length > 0) {
         remainingCount += verifyList.keys.length;
       }
@@ -1702,7 +1793,7 @@ export const processDeletionCleanupJob = async (jobOrFormId, options = {}) => {
           : calculateNextSweepDelay(currentPasses);
       const nextSweepAt = new Date(checkNow.getTime() + sweepDelayMs);
 
-      await DeletionCleanupJob.updateOne(
+      const updateRes = await DeletionCleanupJob.updateOne(
         { _id: claimed._id, leaseId, epoch },
         {
           $set: {
@@ -1720,11 +1811,19 @@ export const processDeletionCleanupJob = async (jobOrFormId, options = {}) => {
           }
         }
       );
+      if (updateRes.matchedCount === 0) {
+        logger.warn('storage.cleanup_lease_lost_during_terminal_reconciliation', {
+          jobId: claimed._id,
+          formId: claimed.formId,
+          epoch
+        });
+        return { processed: false, status: 'lease_lost', deletedCount: totalDeleted };
+      }
       return { processed: true, status: 'reconciled', deletedCount: totalDeleted };
     }
 
     // Still within grace period, or remaining objects found: release lease to allow future sweep
-    await DeletionCleanupJob.updateOne(
+    const updateRes = await DeletionCleanupJob.updateOne(
       { _id: claimed._id, leaseId, epoch },
       {
         $set: {
@@ -1739,6 +1838,14 @@ export const processDeletionCleanupJob = async (jobOrFormId, options = {}) => {
         }
       }
     );
+    if (updateRes.matchedCount === 0) {
+      logger.warn('storage.cleanup_lease_lost_during_pending_release', {
+        jobId: claimed._id,
+        formId: claimed.formId,
+        epoch
+      });
+      return { processed: false, status: 'lease_lost', deletedCount: totalDeleted };
+    }
 
     return { processed: true, status: 'pending', deletedCount: totalDeleted };
   } catch (err) {
@@ -1749,7 +1856,7 @@ export const processDeletionCleanupJob = async (jobOrFormId, options = {}) => {
     });
 
     const nextStatus = claimed.attempts >= (claimed.maxAttempts || 10) ? 'failed' : 'pending';
-    await DeletionCleanupJob.updateOne(
+    const updateRes = await DeletionCleanupJob.updateOne(
       { _id: claimed._id, leaseId, epoch },
       {
         $set: {
@@ -1761,7 +1868,21 @@ export const processDeletionCleanupJob = async (jobOrFormId, options = {}) => {
           updatedAt: new Date()
         }
       }
-    ).catch(() => {});
+    ).catch(() => null);
+
+    if (!updateRes || updateRes.matchedCount === 0) {
+      logger.warn('storage.cleanup_lease_lost_during_error_update', {
+        jobId: claimed._id,
+        formId: claimed.formId,
+        epoch
+      });
+      return {
+        processed: false,
+        status: 'lease_lost',
+        deletedCount: totalDeleted,
+        error: err.message
+      };
+    }
 
     return {
       processed: false,
@@ -1770,6 +1891,9 @@ export const processDeletionCleanupJob = async (jobOrFormId, options = {}) => {
       error: err.message
     };
   } finally {
+    if (callerSignal && callerAbortListener) {
+      callerSignal.removeEventListener('abort', callerAbortListener);
+    }
     await heartbeat.stop();
   }
 };
@@ -2025,12 +2149,14 @@ export const recoverAbandonedFormDeletions = async (options = {}) =>
                 );
 
                 if (failedStagedKeys.length === 0 && failedPromotedKeys.length === 0) {
-                  await SubmissionReservation.deleteOne({ _id: resItem._id });
-                  resultSummary.sweptOrphanReservations += 1;
+                  const delRes = await SubmissionReservation.deleteOne({ _id: resItem._id });
+                  if (delRes.deletedCount > 0) {
+                    resultSummary.sweptOrphanReservations =
+                      (resultSummary.sweptOrphanReservations || 0) + 1;
+                  }
                 } else {
-                  resultSummary.failedCount++;
-                  await SubmissionReservation.updateOne(
-                    { _id: resItem._id },
+                  const updateRes = await SubmissionReservation.updateOne(
+                    { _id: resItem._id, status: { $ne: 'abandoned' } },
                     {
                       $set: {
                         status: 'abandoned',
@@ -2042,6 +2168,14 @@ export const recoverAbandonedFormDeletions = async (options = {}) =>
                       }
                     }
                   );
+                  if (updateRes.matchedCount > 0) {
+                    resultSummary.failedCount++;
+                  } else {
+                    logger.warn('storage.dead_form_reservation_abandon_state_mismatch', {
+                      formId: deadIdStr,
+                      reservationId: resItem._id
+                    });
+                  }
                 }
               } catch (resItemErr) {
                 resultSummary.failedCount++;
