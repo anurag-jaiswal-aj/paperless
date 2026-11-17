@@ -20,6 +20,7 @@ describe('LoginProtectionService Atomicity and Adversarial Concurrency Suite', (
   beforeEach(async () => {
     mongod = await MongoMemoryServer.create();
     await mongoose.connect(mongod.getUri());
+    await Promise.all([LoginPair.init(), LoginAccount.init()]);
     service = new LoginProtectionService({
       pairModel: LoginPair,
       accountModel: LoginAccount,
