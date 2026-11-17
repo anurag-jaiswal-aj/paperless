@@ -1945,6 +1945,189 @@ describe('Response Controller - Phase 2', () => {
       expect(disposition).toBeDefined();
       expect(disposition).toContain("filename*=UTF-8''%E6%97%A5%E6%9C%AC%E8%AA%9E-2026.pdf");
     });
+
+    describe('P44-SEC-02: Storage Key Boundary & Namespace Classification', () => {
+      it('blocks download of foreign-form storage key with 404 and does not call storageService', async () => {
+        const foreignFormId = new mongoose.Types.ObjectId();
+        const foreignResponse = await Response.create({
+          formId: fileForm._id,
+          answers: [
+            {
+              questionId: fileQuestion._id,
+              value: {
+                key: `forms/${foreignFormId}/${fileQuestion._id}/secret.pdf`,
+                originalName: 'secret.pdf',
+                mimeType: 'application/pdf',
+                size: 25
+              }
+            }
+          ]
+        });
+
+        const getStreamSpy = vi.spyOn(storageService, 'getFileStream');
+        const warnSpy = vi.spyOn(logger, 'warn');
+
+        const res = await request(app)
+          .get(`/api/responses/${fileForm._id}/${foreignResponse._id}/file/${fileQuestion._id}`)
+          .set('Cookie', [`token=${ownerToken}`]);
+
+        expect(res.status).toBe(404);
+        expect(res.body.success).toBe(false);
+        expect(res.body.message).toBe('File not found in response');
+        expect(getStreamSpy).not.toHaveBeenCalled();
+        expect(warnSpy).toHaveBeenCalledWith(
+          'storage.download_unsafe_key_blocked',
+          expect.objectContaining({
+            category: 'B',
+            formId: fileForm._id.toString()
+          })
+        );
+
+        getStreamSpy.mockRestore();
+        warnSpy.mockRestore();
+      });
+
+      it('blocks download of foreign staging storage key with 404', async () => {
+        const foreignFormId = new mongoose.Types.ObjectId();
+        const foreignStagingResponse = await Response.create({
+          formId: fileForm._id,
+          answers: [
+            {
+              questionId: fileQuestion._id,
+              value: {
+                key: `staging/forms/${foreignFormId}/lease-1/secret.pdf`,
+                originalName: 'secret.pdf',
+                mimeType: 'application/pdf',
+                size: 25
+              }
+            }
+          ]
+        });
+
+        const getStreamSpy = vi.spyOn(storageService, 'getFileStream');
+
+        const res = await request(app)
+          .get(`/api/responses/${fileForm._id}/${foreignStagingResponse._id}/file/${fileQuestion._id}`)
+          .set('Cookie', [`token=${ownerToken}`]);
+
+        expect(res.status).toBe(404);
+        expect(res.body.message).toBe('File not found in response');
+        expect(getStreamSpy).not.toHaveBeenCalled();
+        getStreamSpy.mockRestore();
+      });
+
+      it('blocks path traversal storage key with 404 and does not invoke storage', async () => {
+        const traversalKeyResponse = await Response.create({
+          formId: fileForm._id,
+          answers: [
+            {
+              questionId: fileQuestion._id,
+              value: {
+                key: `forms/${fileForm._id}/../../etc/passwd`,
+                originalName: 'passwd',
+                mimeType: 'text/plain',
+                size: 25
+              }
+            }
+          ]
+        });
+
+        const getStreamSpy = vi.spyOn(storageService, 'getFileStream');
+
+        const res = await request(app)
+          .get(`/api/responses/${fileForm._id}/${traversalKeyResponse._id}/file/${fileQuestion._id}`)
+          .set('Cookie', [`token=${ownerToken}`]);
+
+        expect(res.status).toBe(404);
+        expect(res.body.message).toBe('File not found in response');
+        expect(getStreamSpy).not.toHaveBeenCalled();
+        getStreamSpy.mockRestore();
+      });
+
+      it('blocks external URI storage keys with 404', async () => {
+        const uriResponse = await Response.create({
+          formId: fileForm._id,
+          answers: [
+            {
+              questionId: fileQuestion._id,
+              value: {
+                key: 'https://evil.example.com/malware.exe',
+                originalName: 'malware.exe',
+                mimeType: 'application/octet-stream',
+                size: 100
+              }
+            }
+          ]
+        });
+
+        const getStreamSpy = vi.spyOn(storageService, 'getFileStream');
+
+        const res = await request(app)
+          .get(`/api/responses/${fileForm._id}/${uriResponse._id}/file/${fileQuestion._id}`)
+          .set('Cookie', [`token=${ownerToken}`]);
+
+        expect(res.status).toBe(404);
+        expect(res.body.message).toBe('File not found in response');
+        expect(getStreamSpy).not.toHaveBeenCalled();
+        getStreamSpy.mockRestore();
+      });
+
+      it('blocks arbitrary bucket / Category C keys outside form namespace with 404', async () => {
+        const categoryCResponse = await Response.create({
+          formId: fileForm._id,
+          answers: [
+            {
+              questionId: fileQuestion._id,
+              value: {
+                key: 'backups/mongo-backup.tar.gz',
+                originalName: 'mongo-backup.tar.gz',
+                mimeType: 'application/gzip',
+                size: 1024
+              }
+            }
+          ]
+        });
+
+        const getStreamSpy = vi.spyOn(storageService, 'getFileStream');
+
+        const res = await request(app)
+          .get(`/api/responses/${fileForm._id}/${categoryCResponse._id}/file/${fileQuestion._id}`)
+          .set('Cookie', [`token=${ownerToken}`]);
+
+        expect(res.status).toBe(404);
+        expect(res.body.message).toBe('File not found in response');
+        expect(getStreamSpy).not.toHaveBeenCalled();
+        getStreamSpy.mockRestore();
+      });
+
+      it('blocks malformed namespace subpath with double slash with 404', async () => {
+        const malformedResponse = await Response.create({
+          formId: fileForm._id,
+          answers: [
+            {
+              questionId: fileQuestion._id,
+              value: {
+                key: `forms/${fileForm._id}//double-slash.pdf`,
+                originalName: 'double-slash.pdf',
+                mimeType: 'application/pdf',
+                size: 50
+              }
+            }
+          ]
+        });
+
+        const getStreamSpy = vi.spyOn(storageService, 'getFileStream');
+
+        const res = await request(app)
+          .get(`/api/responses/${fileForm._id}/${malformedResponse._id}/file/${fileQuestion._id}`)
+          .set('Cookie', [`token=${ownerToken}`]);
+
+        expect(res.status).toBe(404);
+        expect(res.body.message).toBe('File not found in response');
+        expect(getStreamSpy).not.toHaveBeenCalled();
+        getStreamSpy.mockRestore();
+      });
+    });
   });
 
   describe('Hardening and Boundary Verification: Input Robustness', () => {

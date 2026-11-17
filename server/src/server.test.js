@@ -209,6 +209,73 @@ describe('Stage 3.4: Server Startup & Graceful Teardown Lifecycle Integration', 
       }
     });
 
+    it('fails startup validation when protection is enabled and HMAC secret is empty string', () => {
+      const env = {
+        PROGRESSIVE_LOGIN_PROTECTION_ENABLED: 'true',
+        LOGIN_PROTECTION_HMAC_SECRET: '',
+        NODE_ENV: 'test'
+      };
+      expect(() => validateStartupConfig(env)).toThrow(
+        /Invalid progressive login protection configuration: HMAC secret cannot be empty/
+      );
+    });
+
+    it('injects pre-validated secretBuffer into authController and avoids re-parsing on startup', async () => {
+      const parseSpy = vi.spyOn(loginCrypto, 'parseHmacSecret');
+      const setComponentsSpy = vi.spyOn(authController, 'setLoginProtectionComponents');
+      vi.spyOn(mongoose, 'connect').mockResolvedValueOnce(
+        createMockReplicaSetConnection('mock-db')
+      );
+      vi.spyOn(authController, 'ensureLoginWorkerPoolReady').mockResolvedValueOnce({});
+
+      const result = await startServer({
+        env: {
+          PROGRESSIVE_LOGIN_PROTECTION_ENABLED: 'true',
+          LOGIN_PROTECTION_HMAC_SECRET: validSecret,
+          NODE_ENV: 'test'
+        },
+        port: 0,
+        skipSignalRegistration: true
+      });
+
+      expect(result).not.toBeNull();
+      expect(parseSpy).toHaveBeenCalledTimes(1);
+      expect(setComponentsSpy).toHaveBeenCalledWith(
+        expect.objectContaining({ secretBuffer: expect.any(Buffer) })
+      );
+
+      const svc = authController.getLoginProtectionService();
+      expect(svc).toBeDefined();
+      expect(parseSpy).toHaveBeenCalledTimes(1);
+
+      if (result.server && result.server.close) {
+        await new Promise((res) => result.server.close(res));
+      }
+    });
+
+    it('does not initialize login protection service when protection is disabled', async () => {
+      const setComponentsSpy = vi.spyOn(authController, 'setLoginProtectionComponents');
+      vi.spyOn(mongoose, 'connect').mockResolvedValueOnce(
+        createMockReplicaSetConnection('mock-db')
+      );
+
+      const result = await startServer({
+        env: {
+          PROGRESSIVE_LOGIN_PROTECTION_ENABLED: 'false',
+          NODE_ENV: 'test'
+        },
+        port: 0,
+        skipSignalRegistration: true
+      });
+
+      expect(result).not.toBeNull();
+      expect(setComponentsSpy).not.toHaveBeenCalled();
+
+      if (result.server && result.server.close) {
+        await new Promise((res) => result.server.close(res));
+      }
+    });
+
     it('aborts startServer before binding HTTP port if configuration validation fails', async () => {
       const mockExit = vi.fn();
       const errorSpy = vi.spyOn(logger, 'fatal');

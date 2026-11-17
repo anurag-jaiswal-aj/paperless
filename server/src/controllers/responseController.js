@@ -1930,6 +1930,21 @@ export const downloadResponseFile = async (req, res, next) => {
       return res.status(404).json({ success: false, message: 'File not found in response' });
     }
 
+    // P44-SEC-02: Validate storage key namespace and path integrity
+    const classification = classifyStorageKey(answer.value.key, form._id.toString());
+    if (classification.category !== 'A') {
+      logger.warn('storage.download_unsafe_key_blocked', {
+        key: answer.value.key,
+        category: classification.category,
+        reason: classification.reason,
+        formId: form._id.toString(),
+        responseId: req.params.responseId,
+        questionId: req.params.questionId,
+        userId: req.user.id
+      });
+      return res.status(404).json({ success: false, message: 'File not found in response' });
+    }
+
     // Client disconnect detection during S3 acquisition
     const clientAbortController = new AbortController();
     const onClientClosePreStream = () => {
@@ -1941,7 +1956,7 @@ export const downloadResponseFile = async (req, res, next) => {
 
     let fileData;
     try {
-      fileData = await storageService.getFileStream(answer.value.key, {
+      fileData = await storageService.getFileStream(classification.key, {
         timeoutMs: STREAM_TIMEOUTS.ACQUISITION_TIMEOUT_MS,
         abortSignal: clientAbortController.signal
       });

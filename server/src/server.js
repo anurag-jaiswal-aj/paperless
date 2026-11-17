@@ -41,6 +41,7 @@ import { errorHandler, notFound } from './middleware/errorHandler.js';
 import { csrfProtection, isTrustedOrigin } from './middleware/csrfProtection.js';
 import { requestCorrelation } from './middleware/requestCorrelation.js';
 import { httpAccessLogger } from './middleware/httpAccessLogger.js';
+import { createIngressGate } from './middleware/ingressGate.js';
 import { logger } from './utils/logger.js';
 
 // Import services
@@ -52,6 +53,7 @@ import { verifyReplicaSetTopology, supportsTransactions } from './utils/dbTransa
 import {
   ensureLoginWorkerPoolReady,
   resetLoginProtectionComponents,
+  setLoginProtectionComponents,
   getLoginCoordinator,
   getLoginWorkerPool
 } from './controllers/authController.js';
@@ -59,12 +61,14 @@ import {
 // Initialize Express app
 const app = express();
 
-export const DEFAULT_TRUSTED_PROXIES = ['loopback', 'linklocal', 'uniquelocal'];
+export const DEFAULT_TRUSTED_PROXIES = ['loopback'];
 
 /**
  * Resolves the trusted proxy boundary for Express.
  * Prevents client-spoofed X-Forwarded-For headers from bypassing rate limits
- * by trusting only private subnets and reverse proxies when behind a proxy.
+ * by trusting only verified loopback addresses by default.
+ * Blanket RFC 1918 / RFC 4193 subnets (uniquelocal) are deliberately excluded
+ * to ensure that internal or container network entities cannot spoof req.ip.
  *
  * @param {string|undefined} trustProxyEnv - The TRUST_PROXY environment variable value
  * @param {string|undefined} nodeEnv - The NODE_ENV environment variable value
@@ -82,8 +86,8 @@ export const resolveTrustProxy = (trustProxyEnv, nodeEnv) => {
       // Setting Express 'trust proxy' to boolean true trusts every proxy hop unconditionally
       // and accepts the leftmost client-provided IP, completely defeating IP-based rate limiting
       // and triggering ERR_ERL_PERMISSIVE_TRUST_PROXY in express-rate-limit.
-      // Safely map 'true' to the standard trusted proxy configuration.
-      return DEFAULT_TRUSTED_PROXIES;
+      // Safely map 'true' to 1 hop (the immediate reverse proxy).
+      return 1;
     }
 
     const num = Number(trimmed);
@@ -98,10 +102,8 @@ export const resolveTrustProxy = (trustProxyEnv, nodeEnv) => {
     return parts.length === 1 ? parts[0] : parts;
   }
 
-  // In production and staging, Express runs behind our reverse proxy (Nginx).
-  // Default to trusting loopback and standard RFC 1918 / RFC 4193 private networks
-  // (loopback: 127.0.0.0/8, ::1; linklocal: 169.254.0.0/16, fe80::/10; uniquelocal: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, fc00::/7).
-  // Direct untrusted internet IPs are never trusted, ensuring spoofed X-Forwarded-For headers are ignored.
+  // In production and staging without an explicit TRUST_PROXY, default strictly to loopback.
+  // Direct untrusted internet IPs and private subnets are never implicitly trusted.
   if (nodeEnv === 'production' || nodeEnv === 'staging') {
     return DEFAULT_TRUSTED_PROXIES;
   }
@@ -170,6 +172,7 @@ export { sanitizeRequestUrl };
 
 // Middleware
 app.use(requestCorrelation); // Server-side request correlation and AsyncLocalStorage context
+app.use(createIngressGate()); // Ingress verification gate for trusted reverse proxy
 app.use(httpAccessLogger); // Structured HTTP access logging
 app.use(helmet()); // Security headers
 app.use(
@@ -841,6 +844,11 @@ const startServer = async (options = {}) => {
     if (options.throwOnError) throw err;
     exitFn(1);
     return null;
+  }
+
+  // Pre-initialize login protection singleton with the validated Buffer before handling traffic
+  if (config.isEnabled && config.secretBuffer) {
+    setLoginProtectionComponents({ secretBuffer: config.secretBuffer });
   }
 
   // Log effective progressive login protection state

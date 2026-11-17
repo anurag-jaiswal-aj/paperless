@@ -25,6 +25,7 @@ import LoginAccount from '../models/LoginAccount.js';
 import { sanitizeRequestUrl } from '../server.js';
 import { notFound } from '../middleware/errorHandler.js';
 import { logger } from '../utils/logger.js';
+import * as loginCrypto from '../utils/loginProtectionCrypto.js';
 
 // Mock EmailService
 vi.mock('../services/EmailService', () => {
@@ -2648,6 +2649,36 @@ describe('Auth Controller', () => {
             message: 'Too many failed login attempts. Please try again later.'
           })
         );
+      });
+
+      describe('P44-INF-01: Secret Lifecycle & Injection', () => {
+        it('initializes LoginProtectionService via setLoginProtectionComponents with secretBuffer', () => {
+          const testSecretBuf = Buffer.alloc(32, 'a');
+          setLoginProtectionComponents({ secretBuffer: testSecretBuf });
+
+          const svc = getLoginProtectionService();
+          expect(svc).toBeDefined();
+          expect(svc.secretBuffer).toEqual(testSecretBuf);
+        });
+
+        it('uses pre-initialized loginProtectionService and does not invoke parseHmacSecret during login request processing', async () => {
+          const testSecretBuf = Buffer.from(
+            '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+            'hex'
+          );
+          setLoginProtectionComponents({ secretBuffer: testSecretBuf });
+
+          const parseSpy = vi.spyOn(loginCrypto, 'parseHmacSecret');
+
+          const res = await request(app)
+            .post('/api/auth/login')
+            .set('X-Forwarded-For', '192.168.1.50')
+            .send({ email: protectedUser.email, password: protectedUser.password });
+
+          expect(res.status).toBe(200);
+          expect(parseSpy).not.toHaveBeenCalled();
+          parseSpy.mockRestore();
+        });
       });
     });
   });

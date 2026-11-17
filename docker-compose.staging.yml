@@ -6,7 +6,7 @@ services:
     volumes:
       - staging_mongo_data:/data/db
     networks:
-      - staging-network
+      - staging-backend-network
     healthcheck:
       test:
         - CMD
@@ -50,7 +50,7 @@ services:
     volumes:
       - staging_minio_data:/data
     networks:
-      staging-network:
+      staging-backend-network:
         aliases:
           - minio
           - ${S3_BUCKET:-paperless-staging}.minio
@@ -81,7 +81,7 @@ services:
       - MINIO_ROOT_PASSWORD=${S3_SECRET_ACCESS_KEY:-staging_minio_password}
       - S3_BUCKET=${S3_BUCKET:-paperless-staging}
     networks:
-      - staging-network
+      - staging-backend-network
 
   server:
     build:
@@ -101,9 +101,12 @@ services:
       - JWT_SECRET=${JWT_SECRET}
       - JWT_REFRESH_SECRET=${JWT_REFRESH_SECRET}
       - COOKIE_SAMESITE=${COOKIE_SAMESITE:-lax}
+      - PROGRESSIVE_LOGIN_PROTECTION_ENABLED=${PROGRESSIVE_LOGIN_PROTECTION_ENABLED:-false}
+      - LOGIN_PROTECTION_HMAC_SECRET=${LOGIN_PROTECTION_HMAC_SECRET:-}
       - FRONTEND_URL=${FRONTEND_URL}
       - TRUSTED_ORIGINS=${TRUSTED_ORIGINS:-${FRONTEND_URL}}
-      - TRUST_PROXY=${TRUST_PROXY:-loopback,linklocal,uniquelocal}
+      - TRUST_PROXY=${TRUST_PROXY:-1}
+      - PAPERLESS_INGRESS_SECRET=${PAPERLESS_INGRESS_SECRET:-paperless_staging_ingress_secret_default}
       - S3_ENDPOINT=${S3_ENDPOINT:-http://minio:9000}
       - S3_REGION=${S3_REGION:-us-east-1}
       - S3_BUCKET=${S3_BUCKET:-paperless-staging}
@@ -115,7 +118,10 @@ services:
       - RESEND_API_KEY=${RESEND_API_KEY:-}
       - EMAIL_FROM=${EMAIL_FROM:-noreply@example.com}
     networks:
-      - staging-network
+      staging-frontend-network:
+        aliases:
+          - server
+      staging-backend-network:
 
   client:
     build:
@@ -126,17 +132,21 @@ services:
     restart: unless-stopped
     depends_on:
       - server
+    environment:
+      - PAPERLESS_INGRESS_SECRET=${PAPERLESS_INGRESS_SECRET:-paperless_staging_ingress_secret_default}
     ports:
       # Expose strictly on loopback (127.0.0.1) for Cloudflare Quick Tunnel.
       # Never exposed to 0.0.0.0 or public interfaces.
       - "127.0.0.1:${STAGING_PORT:-8080}:80"
     networks:
-      - staging-network
+      - staging-frontend-network
 
 volumes:
   staging_mongo_data:
   staging_minio_data:
 
 networks:
-  staging-network:
+  staging-frontend-network:
+    driver: bridge
+  staging-backend-network:
     driver: bridge

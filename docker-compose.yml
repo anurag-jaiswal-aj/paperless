@@ -8,7 +8,7 @@ services:
     volumes:
       - mongo_data:/data/db
     networks:
-      - paperless-network
+      - backend-network
     healthcheck:
       test:
         - CMD
@@ -54,7 +54,7 @@ services:
     volumes:
       - minio_data:/data
     networks:
-      paperless-network:
+      backend-network:
         aliases:
           - minio
           - ${S3_BUCKET:-paperless}.minio
@@ -85,7 +85,7 @@ services:
       - MINIO_ROOT_PASSWORD=${S3_SECRET_ACCESS_KEY:-minio_password}
       - S3_BUCKET=${S3_BUCKET:-paperless}
     networks:
-      - paperless-network
+      - backend-network
 
   server:
     build:
@@ -121,9 +121,12 @@ services:
       - JWT_SECRET=${JWT_SECRET}
       - JWT_REFRESH_SECRET=${JWT_REFRESH_SECRET}
       - COOKIE_SAMESITE=${COOKIE_SAMESITE:-lax}
+      - PROGRESSIVE_LOGIN_PROTECTION_ENABLED=${PROGRESSIVE_LOGIN_PROTECTION_ENABLED:-false}
+      - LOGIN_PROTECTION_HMAC_SECRET=${LOGIN_PROTECTION_HMAC_SECRET:-}
       - FRONTEND_URL=${FRONTEND_URL}
       - TRUSTED_ORIGINS=${TRUSTED_ORIGINS:-${FRONTEND_URL}}
-      - TRUST_PROXY=${TRUST_PROXY:-loopback,linklocal,uniquelocal}
+      - TRUST_PROXY=${TRUST_PROXY:-1}
+      - PAPERLESS_INGRESS_SECRET=${PAPERLESS_INGRESS_SECRET:-paperless_internal_ingress_secret_default}
       - S3_ENDPOINT=${S3_ENDPOINT:-http://minio:9000}
       - S3_REGION=${S3_REGION:-us-east-1}
       - S3_BUCKET=${S3_BUCKET:-paperless}
@@ -135,7 +138,10 @@ services:
       - RESEND_API_KEY=${RESEND_API_KEY:-}
       - EMAIL_FROM=${EMAIL_FROM:-noreply@example.com}
     networks:
-      - paperless-network
+      frontend-network:
+        aliases:
+          - server
+      backend-network:
 
   client:
     build:
@@ -147,6 +153,8 @@ services:
     depends_on:
       server:
         condition: service_healthy
+    environment:
+      - PAPERLESS_INGRESS_SECRET=${PAPERLESS_INGRESS_SECRET:-paperless_internal_ingress_secret_default}
     security_opt:
       - no-new-privileges:true
     healthcheck:
@@ -160,12 +168,14 @@ services:
       # Never exposed to 0.0.0.0 without explicit operator override.
       - "${HOST_BIND:-127.0.0.1}:${PORT:-8080}:80"
     networks:
-      - paperless-network
+      - frontend-network
 
 volumes:
   mongo_data:
   minio_data:
 
 networks:
-  paperless-network:
+  frontend-network:
+    driver: bridge
+  backend-network:
     driver: bridge

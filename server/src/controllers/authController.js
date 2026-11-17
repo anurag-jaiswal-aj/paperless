@@ -97,11 +97,16 @@ export const getLoginProtectionService = (options = {}) => {
 export const setLoginProtectionComponents = ({
   coordinator,
   workerPool,
-  protectionService
+  protectionService,
+  secretBuffer
 } = {}) => {
   if (coordinator !== undefined) loginCoordinator = coordinator;
   if (workerPool !== undefined) loginWorkerPool = workerPool;
-  if (protectionService !== undefined) loginProtectionService = protectionService;
+  if (protectionService !== undefined) {
+    loginProtectionService = protectionService;
+  } else if (secretBuffer !== undefined) {
+    loginProtectionService = getLoginProtectionService({ secretBuffer, forceNew: true });
+  }
 };
 
 /**
