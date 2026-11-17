@@ -273,10 +273,18 @@ export const buildSafeResponseDataset = async (form, options = {}) => {
   // Fetch bounded responses
   const parsedLimit = parseInt(maxResponses, 10);
   const limit = Math.min(500, Math.max(1, isNaN(parsedLimit) ? 500 : parsedLimit));
-  const responses = await Response.find(query).sort({ createdAt: -1 }).limit(limit).lean();
+  const [responses, totalMatching] = await Promise.all([
+    Response.find(query)
+      .sort({ createdAt: -1, _id: -1 })
+      .limit(limit)
+      .lean(),
+    typeof Response.countDocuments === 'function'
+      ? Response.countDocuments(query)
+      : Promise.resolve(0)
+  ]);
 
   if (responses.length === 0) {
-    return { dataset: null, total: 0 };
+    return { dataset: null, total: 0, totalMatching: 0, responses: [] };
   }
 
   // Fetch questions
@@ -320,12 +328,18 @@ export const buildSafeResponseDataset = async (form, options = {}) => {
     if (safeAnswers.length > 0) {
       dataset.push({
         index,
+        responseId: r._id.toString(),
         answers: safeAnswers
       });
     }
   });
 
-  return { dataset: dataset.length > 0 ? dataset : null, total: responses.length };
+  return {
+    dataset: dataset.length > 0 ? dataset : null,
+    total: responses.length,
+    totalMatching,
+    responses
+  };
 };
 
 /**
@@ -411,11 +425,17 @@ export const responseCategorizeHandler = async (req, res, next) => {
     }
 
     const filterOptions = { ...(req.query || {}), ...(req.body || {}) };
-    const { dataset } = await buildSafeResponseDataset(form, filterOptions);
+    const { dataset, total, totalMatching, responses } = await buildSafeResponseDataset(form, filterOptions);
     if (!dataset) {
-      return res
-        .status(200)
-        .json({ success: true, data: { categories: [], uncategorizedResponseIndexes: [] } });
+      return res.status(200).json({
+        success: true,
+        data: {
+          categories: [],
+          uncategorizedResponseIndexes: [],
+          uncategorizedResponseIds: [],
+          responseMap: {}
+        }
+      });
     }
 
     let { allowedCategories } = req.body;
@@ -423,21 +443,63 @@ export const responseCategorizeHandler = async (req, res, next) => {
       allowedCategories = allowedCategories.slice(0, 15).map((c) => c.slice(0, 50));
     }
 
-    const catResult = await AIService.categorizeResponses({ dataset, allowedCategories });
-
-    // Filter invalid indexes
-    const validIndexes = new Set(dataset.map((d) => d.index));
-    const safeCategories = catResult.categories.map((c) => ({
-      ...c,
-      responseIndexes: c.responseIndexes.filter((idx) => validIndexes.has(idx))
+    // Strip responseId from prompt to preserve exact prompt structure and token efficiency
+    const promptDataset = dataset.map((d) => ({
+      index: d.index,
+      answers: d.answers
     }));
-    const safeUncategorized = catResult.uncategorizedResponseIndexes.filter((idx) =>
+
+    const catResult = await AIService.categorizeResponses({
+      dataset: promptDataset,
+      allowedCategories
+    });
+
+    // Map indexes to response IDs and build response metadata lookup
+    const indexToId = new Map();
+    const responseMap = {};
+    const effectiveTotal = typeof totalMatching === 'number' && totalMatching > 0 ? totalMatching : total;
+
+    (responses || []).forEach((r, idx) => {
+      const idStr = r._id.toString();
+      const responseNumber = effectiveTotal - idx;
+      const meta = {
+        id: idStr,
+        index: idx,
+        number: responseNumber,
+        displayId: `#${responseNumber}`
+      };
+      responseMap[idStr] = meta;
+      responseMap[idx] = meta;
+      indexToId.set(idx, idStr);
+    });
+
+    // Filter invalid indexes and map to response IDs
+    const validIndexes = new Set(dataset.map((d) => d.index));
+    const safeCategories = (catResult.categories || []).map((c) => {
+      const validResponseIndexes = (c.responseIndexes || []).filter((idx) => validIndexes.has(idx));
+      const responseIds = validResponseIndexes.map((idx) => indexToId.get(idx)).filter(Boolean);
+      return {
+        ...c,
+        responseIndexes: validResponseIndexes,
+        responseIds
+      };
+    });
+
+    const safeUncategorizedIndexes = (catResult.uncategorizedResponseIndexes || []).filter((idx) =>
       validIndexes.has(idx)
     );
+    const safeUncategorizedIds = safeUncategorizedIndexes
+      .map((idx) => indexToId.get(idx))
+      .filter(Boolean);
 
     res.status(200).json({
       success: true,
-      data: { categories: safeCategories, uncategorizedResponseIndexes: safeUncategorized }
+      data: {
+        categories: safeCategories,
+        uncategorizedResponseIndexes: safeUncategorizedIndexes,
+        uncategorizedResponseIds: safeUncategorizedIds,
+        responseMap
+      }
     });
   } catch (error) {
     next(error);

@@ -23,6 +23,16 @@ const formatFileSize = (bytes) => {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 };
 
+export const getCategoryItems = (ids, indexes) => {
+  if (Array.isArray(ids) && ids.length > 0) {
+    return { items: ids, isId: true };
+  }
+  if (Array.isArray(indexes) && indexes.length > 0) {
+    return { items: indexes, isId: false };
+  }
+  return { items: [], isId: false };
+};
+
 const renderAnswerContent = (answer, response, formId) => {
   if (answer == null || answer.value == null) {
     return null;
@@ -113,15 +123,23 @@ const Responses = () => {
   const [categories, setCategories] = useState(null);
   const [generatingCategories, setGeneratingCategories] = useState(false);
   const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(10);
   const [totalPages, setTotalPages] = useState(1);
+  const [totalResponses, setTotalResponses] = useState(0);
   const [fetchError, setFetchError] = useState(null);
 
   const fetchResponses = async (pageNum) => {
     try {
-      const res = await api.get(`/api/responses/${id}?page=${pageNum}&limit=10`);
+      const res = await api.get(`/api/responses/${id}?page=${pageNum}&limit=${pageSize || 10}`);
       setResponses(res.data.data);
       setTotalPages(res.data.pagination.pages);
       setPage(res.data.pagination.page);
+      if (res.data.pagination?.limit) {
+        setPageSize(res.data.pagination.limit);
+      }
+      if (res.data.pagination?.total !== undefined) {
+        setTotalResponses(res.data.pagination.total);
+      }
     } catch (err) {
       console.error('Failed to load page', err);
     }
@@ -140,6 +158,15 @@ const Responses = () => {
       setForm(formRes.data.data.form);
       setResponses(responsesRes.data.data);
       setTotalPages(responsesRes.data.pagination.pages);
+      setPage(responsesRes.data.pagination.page || 1);
+      if (responsesRes.data.pagination?.limit) {
+        setPageSize(responsesRes.data.pagination.limit);
+      }
+      if (responsesRes.data.pagination?.total !== undefined) {
+        setTotalResponses(responsesRes.data.pagination.total);
+      } else if (analyticsRes.data.data?.totalResponses !== undefined) {
+        setTotalResponses(analyticsRes.data.data.totalResponses);
+      }
       setAnalytics(analyticsRes.data.data);
     } catch (err) {
       setFetchError(err.response?.data?.message || 'Failed to load responses');
@@ -223,6 +250,47 @@ const Responses = () => {
     } finally {
       setGeneratingCategories(false);
     }
+  };
+
+  const getResponseNumber = (response, index) => {
+    const effectiveTotal = totalResponses || analytics?.totalResponses || responses.length;
+    if (effectiveTotal > 0) {
+      const currentPage = page || 1;
+      const limit = pageSize || 10;
+      const globalOffset = (currentPage - 1) * limit;
+      const num = effectiveTotal - (globalOffset + index);
+      if (num > 0) return num;
+    }
+    return responses.length - index;
+  };
+
+  const getResponseDisplayLabel = (ref, isId = false) => {
+    if (categories?.responseMap) {
+      const entry = categories.responseMap[ref];
+      if (entry) {
+        return entry.displayId || `#${entry.number}`;
+      }
+    }
+
+    if (isId || (typeof ref === 'string' && ref.length > 10)) {
+      const idxOnPage = responses.findIndex((r) => (r._id || r.id) === ref);
+      if (idxOnPage !== -1) {
+        return `#${getResponseNumber(responses[idxOnPage], idxOnPage)}`;
+      }
+      return '#Unknown';
+    }
+
+    const numIdx = Number(ref);
+    if (!isNaN(numIdx)) {
+      if (page === 1 && responses[numIdx]) {
+        return `#${getResponseNumber(responses[numIdx], numIdx)}`;
+      }
+      if (responses[numIdx]) {
+        return `#${getResponseNumber(responses[numIdx], numIdx)}`;
+      }
+    }
+
+    return '#Unknown';
   };
 
   const renderChart = (analyticsItem) => {
@@ -511,48 +579,51 @@ const Responses = () => {
                   <div>
                     {categories.categories && categories.categories.length > 0 && (
                       <div className="space-y-4">
-                        {categories.categories.map((cat, idx) => (
-                          <div
-                            key={idx}
-                            className="p-5 bg-gray-50 dark:bg-surface-hover rounded-xl border border-gray-100 dark:border-border-default"
-                          >
-                            <h3 className="font-bold text-lg mb-2">
-                              {cat.name}{' '}
-                              <span className="opacity-70 font-normal text-sm ml-2 bg-white dark:bg-surface-card px-2 py-1 rounded-md shadow-sm">
-                                {(cat.responseIndexes || []).length} responses
-                              </span>
-                            </h3>
-                            <p className="text-sm opacity-90 mb-3">{cat.description}</p>
-                            {(cat.responseIndexes || []).length > 0 && (
-                              <p className="text-xs opacity-70">
-                                Includes Response IDs:{' '}
-                                {(cat.responseIndexes || [])
-                                  .map((i) => {
-                                    const r = responses[i];
-                                    return r ? `#${responses.length - i}` : `#Unknown`;
-                                  })
-                                  .join(', ')}
-                              </p>
-                            )}
-                          </div>
-                        ))}
+                        {categories.categories.map((cat, idx) => {
+                          const catItems = getCategoryItems(cat.responseIds, cat.responseIndexes);
+                          return (
+                            <div
+                              key={idx}
+                              className="p-5 bg-gray-50 dark:bg-surface-hover rounded-xl border border-gray-100 dark:border-border-default"
+                            >
+                              <h3 className="font-bold text-lg mb-2">
+                                {cat.name}{' '}
+                                <span className="opacity-70 font-normal text-sm ml-2 bg-white dark:bg-surface-card px-2 py-1 rounded-md shadow-sm">
+                                  {catItems.items.length} responses
+                                </span>
+                              </h3>
+                              <p className="text-sm opacity-90 mb-3">{cat.description}</p>
+                              {catItems.items.length > 0 && (
+                                <p className="text-xs opacity-70">
+                                  Includes Response IDs:{' '}
+                                  {catItems.items
+                                    .map((item) => getResponseDisplayLabel(item, catItems.isId))
+                                    .join(', ')}
+                                </p>
+                              )}
+                            </div>
+                          );
+                        })}
                       </div>
                     )}
-                    {categories.uncategorizedResponseIndexes &&
-                      categories.uncategorizedResponseIndexes.length > 0 && (
+                    {(() => {
+                      const uncatItems = getCategoryItems(
+                        categories.uncategorizedResponseIds,
+                        categories.uncategorizedResponseIndexes
+                      );
+                      if (uncatItems.items.length === 0) return null;
+                      return (
                         <div className="mt-4 p-5 bg-gray-50 dark:bg-surface-hover rounded-xl border border-gray-100 dark:border-border-default">
                           <h3 className="font-bold text-lg mb-2 opacity-70">Uncategorized</h3>
                           <p className="text-xs opacity-70">
                             Response IDs:{' '}
-                            {categories.uncategorizedResponseIndexes
-                              .map((i) => {
-                                const r = responses[i];
-                                return r ? `#${responses.length - i}` : `#Unknown`;
-                              })
+                            {uncatItems.items
+                              .map((item) => getResponseDisplayLabel(item, uncatItems.isId))
                               .join(', ')}
                           </p>
                         </div>
-                      )}
+                      );
+                    })()}
                   </div>
                 ) : (
                   <p className="opacity-50 italic">Categorize text responses automatically.</p>
@@ -578,7 +649,7 @@ const Responses = () => {
               {responses.map((response, index) => (
                 <div key={response._id} className={`card p-6`}>
                   <div className="flex justify-between items-center mb-4">
-                    <h3 className="font-bold">Response #{responses.length - index}</h3>
+                    <h3 className="font-bold">Response #{getResponseNumber(response, index)}</h3>
                     <span className="text-sm opacity-70">
                       {new Date(response.createdAt).toLocaleString()}
                     </span>

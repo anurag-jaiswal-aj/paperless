@@ -100,7 +100,8 @@ vi.mock('../models/response.js', () => ({
           ])
         })
       })
-    })
+    }),
+    countDocuments: vi.fn().mockResolvedValue(1)
   }
 }));
 
@@ -326,7 +327,7 @@ describe('AI Controller (Phase 6)', () => {
         expect(res.status).toBe(403);
       });
 
-      it('delegates to AIService and returns categories', async () => {
+      it('delegates to AIService and returns categories with responseIds, uncategorizedResponseIds, and responseMap', async () => {
         AIService.categorizeResponses.mockResolvedValue({
           categories: [{ name: 'Cat 1', responseIndexes: [0] }],
           uncategorizedResponseIndexes: []
@@ -335,6 +336,183 @@ describe('AI Controller (Phase 6)', () => {
         const res = await request(app).post(`/api/ai/responses/categorize/${FORM_1_ID}`);
         expect(res.status).toBe(200);
         expect(res.body.data.categories[0].name).toBe('Cat 1');
+        expect(res.body.data.categories[0].responseIndexes).toEqual([0]);
+        expect(res.body.data.categories[0].responseIds).toEqual(['res1']);
+        expect(res.body.data.uncategorizedResponseIndexes).toEqual([]);
+        expect(res.body.data.uncategorizedResponseIds).toEqual([]);
+        expect(res.body.data.responseMap['res1']).toEqual({
+          id: 'res1',
+          index: 0,
+          number: 1,
+          displayId: '#1'
+        });
+        expect(res.body.data.responseMap[0]).toEqual({
+          id: 'res1',
+          index: 0,
+          number: 1,
+          displayId: '#1'
+        });
+      });
+
+      it('maps across 25 responses exceeding page size, filters hallucinated indexes, and preserves response identity', async () => {
+        const mockResponses = Array.from({ length: 25 }, (_, i) => ({
+          _id: `res_${i}`,
+          formId: FORM_1_ID,
+          answers: [{ questionId: 'q1', value: `Answer ${i}` }],
+          createdAt: new Date(2026, 0, 25 - i)
+        }));
+
+        Response.countDocuments.mockResolvedValueOnce(25);
+        Response.find.mockReturnValueOnce({
+          sort: vi.fn().mockReturnValue({
+            limit: vi.fn().mockReturnValue({
+              lean: vi.fn().mockResolvedValue(mockResponses)
+            })
+          })
+        });
+
+        AIService.categorizeResponses.mockResolvedValueOnce({
+          categories: [
+            { name: 'Feature Requests', responseIndexes: [0, 15, 99] }
+          ],
+          uncategorizedResponseIndexes: [24, 100]
+        });
+
+        const res = await request(app).post(`/api/ai/responses/categorize/${FORM_1_ID}`);
+        expect(res.status).toBe(200);
+        const { categories, uncategorizedResponseIndexes, uncategorizedResponseIds, responseMap } =
+          res.body.data;
+
+        // Verify hallucinated indexes filtered out
+        expect(categories[0].responseIndexes).toEqual([0, 15]);
+        expect(categories[0].responseIds).toEqual(['res_0', 'res_15']);
+        expect(uncategorizedResponseIndexes).toEqual([24]);
+        expect(uncategorizedResponseIds).toEqual(['res_24']);
+
+        // Verify reverse-chronological global numbering
+        expect(responseMap['res_0'].number).toBe(25);
+        expect(responseMap['res_0'].displayId).toBe('#25');
+        expect(responseMap['res_15'].number).toBe(10);
+        expect(responseMap['res_15'].displayId).toBe('#10');
+        expect(responseMap['res_24'].number).toBe(1);
+        expect(responseMap['res_24'].displayId).toBe('#1');
+
+        // Verify prompt dataset sent to AIService does not leak internal responseId
+        const aiCallPayload = AIService.categorizeResponses.mock.calls[0][0];
+        expect(aiCallPayload.dataset[0]).toEqual({
+          index: 0,
+          answers: [{ question: 'Name', answer: 'Answer 0' }]
+        });
+        expect(aiCallPayload.dataset[0].responseId).toBeUndefined();
+      });
+
+      it('safely handles empty dataset when no responses exist', async () => {
+        Response.find.mockReturnValueOnce({
+          sort: vi.fn().mockReturnValue({
+            limit: vi.fn().mockReturnValue({
+              lean: vi.fn().mockResolvedValue([])
+            })
+          })
+        });
+
+        const res = await request(app).post(`/api/ai/responses/categorize/${FORM_1_ID}`);
+        expect(res.status).toBe(200);
+        expect(res.body.data).toEqual({
+          categories: [],
+          uncategorizedResponseIndexes: [],
+          uncategorizedResponseIds: [],
+          responseMap: {}
+        });
+      });
+
+      it('excludes non-semantic responses from valid categorization indexes while preserving global sequence numbering', async () => {
+        const mockResponses = [
+          {
+            _id: 'res_0',
+            formId: FORM_1_ID,
+            answers: [{ questionId: 'q1', value: 'First response' }],
+            createdAt: new Date(2026, 0, 3)
+          },
+          {
+            _id: 'res_1',
+            formId: FORM_1_ID,
+            answers: [{ questionId: 'unknown_q', value: 'Non-semantic' }],
+            createdAt: new Date(2026, 0, 2)
+          },
+          {
+            _id: 'res_2',
+            formId: FORM_1_ID,
+            answers: [{ questionId: 'q1', value: 'Third response' }],
+            createdAt: new Date(2026, 0, 1)
+          }
+        ];
+
+        Response.countDocuments.mockResolvedValueOnce(3);
+        Response.find.mockReturnValueOnce({
+          sort: vi.fn().mockReturnValue({
+            limit: vi.fn().mockReturnValue({
+              lean: vi.fn().mockResolvedValue(mockResponses)
+            })
+          })
+        });
+
+        // AIService attempts to categorize index 1 (which had no semantic answers)
+        AIService.categorizeResponses.mockResolvedValueOnce({
+          categories: [{ name: 'Group 1', responseIndexes: [0, 1] }],
+          uncategorizedResponseIndexes: [2]
+        });
+
+        const res = await request(app).post(`/api/ai/responses/categorize/${FORM_1_ID}`);
+        expect(res.status).toBe(200);
+        const { categories, uncategorizedResponseIndexes, uncategorizedResponseIds, responseMap } =
+          res.body.data;
+
+        // Index 1 was not in safe dataset, so it is filtered out from responseIndexes and responseIds
+        expect(categories[0].responseIndexes).toEqual([0]);
+        expect(categories[0].responseIds).toEqual(['res_0']);
+        expect(uncategorizedResponseIndexes).toEqual([2]);
+        expect(uncategorizedResponseIds).toEqual(['res_2']);
+
+        // All 3 responses are in responseMap with correct sequence numbering (total = 3)
+        expect(responseMap['res_0'].number).toBe(3);
+        expect(responseMap['res_1'].number).toBe(2);
+        expect(responseMap['res_2'].number).toBe(1);
+      });
+
+      it('correctly calculates global sequence numbering beyond 500 responses using totalMatching count', async () => {
+        const mock500Responses = Array.from({ length: 500 }, (_, i) => ({
+          _id: `res_${i}`,
+          formId: FORM_1_ID,
+          answers: [{ questionId: 'q1', value: `Answer ${i}` }],
+          createdAt: new Date(2026, 0, 500 - i)
+        }));
+
+        Response.countDocuments.mockResolvedValueOnce(600);
+        Response.find.mockReturnValueOnce({
+          sort: vi.fn().mockReturnValue({
+            limit: vi.fn().mockReturnValue({
+              lean: vi.fn().mockResolvedValue(mock500Responses)
+            })
+          })
+        });
+
+        AIService.categorizeResponses.mockResolvedValueOnce({
+          categories: [{ name: 'High Volume Feedback', responseIndexes: [0, 499] }],
+          uncategorizedResponseIndexes: []
+        });
+
+        const res = await request(app).post(`/api/ai/responses/categorize/${FORM_1_ID}`);
+        expect(res.status).toBe(200);
+
+        const { responseMap, categories } = res.body.data;
+        // Verify newest response receives #600 and 500th response receives #101
+        expect(responseMap['res_0'].number).toBe(600);
+        expect(responseMap['res_0'].displayId).toBe('#600');
+        expect(responseMap['res_499'].number).toBe(101);
+        expect(responseMap['res_499'].displayId).toBe('#101');
+        expect(responseMap[0].displayId).toBe('#600');
+        expect(responseMap[499].displayId).toBe('#101');
+        expect(categories[0].responseIds).toEqual(['res_0', 'res_499']);
       });
     });
   });
