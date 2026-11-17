@@ -46,9 +46,9 @@ const Navbar = () => {
               <span className="font-['Geist',sans-serif] text-[20px] leading-[28px] tracking-[-0.015em] font-medium text-stitch-primary">Paperless</span>
             </Link>
             <nav className="hidden md:flex items-center gap-[24px]">
-              <Link className="transition-colors text-stitch-primary font-medium" to="/#product">Product</Link>
+              <Link className="transition-colors text-stitch-primary font-medium" to="/#landing-workflow">Product</Link>
               <Link className="font-['Geist',sans-serif] text-[13px] leading-[20px] text-stitch-on-surface-variant hover:text-stitch-primary transition-colors" to="/#landing-overview">Workflow</Link>
-              <Link className="font-['Geist',sans-serif] text-[13px] leading-[20px] text-stitch-on-surface-variant hover:text-stitch-primary transition-colors" to="/#intelligence">Intelligence</Link>
+              <Link className="font-['Geist',sans-serif] text-[13px] leading-[20px] text-stitch-on-surface-variant hover:text-stitch-primary transition-colors" to="/#landing-creation">Intelligence</Link>
               <span className="font-['Geist',sans-serif] text-[13px] leading-[20px] text-stitch-on-surface-variant">Documentation</span>
             </nav>
           </div>
