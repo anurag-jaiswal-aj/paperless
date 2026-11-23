@@ -8,6 +8,7 @@ import {
   responseThemesHandler,
   responseCategorizeHandler
 } from '../controllers/aiController.js';
+import { withMutationScope } from '../middleware/quiescenceGate.js';
 import { protect } from '../middleware/authMiddleware.js';
 import { validateObjectId } from '../middleware/validateObjectId.js';
 import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
@@ -29,19 +30,19 @@ export const aiLimiter = rateLimit({
 // All AI routes require authentication and rate limiting
 router.use(protect, aiLimiter);
 
-router.post('/questions/generate', generateQuestionsHandler);
-router.post('/writing/improve', improveWritingHandler);
-router.post('/consultant/:formId', validateObjectId('formId'), consultantHandler);
+router.post('/questions/generate', withMutationScope(generateQuestionsHandler));
+router.post('/writing/improve', withMutationScope(improveWritingHandler));
+router.post('/consultant/:formId', validateObjectId('formId'), withMutationScope(consultantHandler));
 
 // Phase 7: Response Intelligence
-router.post('/responses/summary/:formId', validateObjectId('formId'), responseSummaryHandler);
-router.post('/responses/themes/:formId', validateObjectId('formId'), responseThemesHandler);
-router.post('/responses/categorize/:formId', validateObjectId('formId'), responseCategorizeHandler);
+router.post('/responses/summary/:formId', validateObjectId('formId'), withMutationScope(responseSummaryHandler));
+router.post('/responses/themes/:formId', validateObjectId('formId'), withMutationScope(responseThemesHandler));
+router.post('/responses/categorize/:formId', validateObjectId('formId'), withMutationScope(responseCategorizeHandler));
 
 // Phase 5 legacy for regression tests
-router.post('/summary/:formId', validateObjectId('formId'), summaryHandler);
+router.post('/summary/:formId', validateObjectId('formId'), withMutationScope(summaryHandler));
 // Map legacy paths if frontend still uses them during transition
-router.post('/suggest', generateQuestionsHandler);
-router.post('/improve', improveWritingHandler);
+router.post('/suggest', withMutationScope(generateQuestionsHandler));
+router.post('/improve', withMutationScope(improveWritingHandler));
 
 export default router;

@@ -6,8 +6,18 @@ import Question from '../models/question.js';
 import Response from '../models/response.js';
 import SubmissionReservation from '../models/submissionReservation.js';
 import DeletionCleanupJob from '../models/deletionCleanupJob.js';
+import InstanceLease, { InstanceLeaseSlot } from '../models/instanceLease.js';
 
-const CORE_MODELS = [User, Form, Question, Response, SubmissionReservation, DeletionCleanupJob];
+const CORE_MODELS = [
+  User,
+  Form,
+  Question,
+  Response,
+  SubmissionReservation,
+  DeletionCleanupJob,
+  InstanceLease,
+  InstanceLeaseSlot
+];
 
 /**
  * Starts a single-node MongoDB replica set via MongoMemoryReplSet, connects Mongoose,

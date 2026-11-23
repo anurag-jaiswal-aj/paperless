@@ -1,7 +1,7 @@
 services:
   mongo:
     image: mongo:7.0
-    command: ["mongod", "--replSet", "rs0", "--bind_ip_all"]
+    command: ["mongod", "--replSet", "rs0", "--bind_ip_all", "--setParameter", "transactionLifetimeLimitSeconds=15"]
     restart: unless-stopped
     volumes:
       - staging_mongo_data:/data/db
@@ -84,9 +84,13 @@ services:
       - staging-backend-network
 
   server:
+    container_name: paperless-server-staging
     build:
       context: ./server
     restart: unless-stopped
+    deploy:
+      mode: replicated
+      replicas: 1
     depends_on:
       mongo:
         condition: service_healthy
@@ -117,11 +121,19 @@ services:
       - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o-mini}
       - RESEND_API_KEY=${RESEND_API_KEY:-}
       - EMAIL_FROM=${EMAIL_FROM:-noreply@example.com}
+      - BACKUP_INTERNAL_TOKEN=${BACKUP_INTERNAL_TOKEN:-}
+      - INITIAL_LEASE_MS=${INITIAL_LEASE_MS:-60000}
+      - HEARTBEAT_INTERVAL_MS=${HEARTBEAT_INTERVAL_MS:-10000}
+      - HEARTBEAT_EXTEND_MS=${HEARTBEAT_EXTEND_MS:-30000}
+      - DRAIN_TIMEOUT_MS=${DRAIN_TIMEOUT_MS:-5000}
+      - MAX_WATCHDOG_LEASE_MS=${MAX_WATCHDOG_LEASE_MS:-180000}
     networks:
       staging-frontend-network:
         aliases:
           - server
       staging-backend-network:
+        aliases:
+          - server
 
   client:
     build:
@@ -141,9 +153,52 @@ services:
     networks:
       - staging-frontend-network
 
+  backup:
+    build:
+      context: ./backup
+    image: paperless-backup:latest
+    restart: unless-stopped
+    depends_on:
+      mongo:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    user: "10001:10001"
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777,size=128M
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 512M
+    environment:
+      - PAPERLESS_INGRESS_SECRET=${PAPERLESS_INGRESS_SECRET:-paperless_internal_ingress_secret_staging_default}
+      - BACKUP_INTERNAL_TOKEN=${BACKUP_INTERNAL_TOKEN:-}
+      - MONGO_URI=${MONGO_URI:-mongodb://mongo:27017/paperless_staging?replicaSet=rs0}
+      - S3_ENDPOINT=${S3_ENDPOINT:-http://minio:9000}
+      - S3_REGION=${S3_REGION:-us-east-1}
+      - S3_BUCKET=${S3_BUCKET:-paperless-staging}
+      - S3_ACCESS_KEY_ID=${S3_ACCESS_KEY_ID:-staging_minio_admin}
+      - S3_SECRET_ACCESS_KEY=${S3_SECRET_ACCESS_KEY:-staging_minio_password}
+      - INITIAL_LEASE_MS=${INITIAL_LEASE_MS:-60000}
+      - HEARTBEAT_INTERVAL_MS=${HEARTBEAT_INTERVAL_MS:-10000}
+      - HEARTBEAT_EXTEND_MS=${HEARTBEAT_EXTEND_MS:-30000}
+      - DRAIN_TIMEOUT_MS=${DRAIN_TIMEOUT_MS:-5000}
+      - MAX_WATCHDOG_LEASE_MS=${MAX_WATCHDOG_LEASE_MS:-180000}
+    volumes:
+      - staging_backup_spool:/backup/spool
+    networks:
+      - staging-backend-network
+
 volumes:
   staging_mongo_data:
   staging_minio_data:
+  staging_backup_spool:
 
 networks:
   staging-frontend-network:

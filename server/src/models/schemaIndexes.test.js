@@ -142,9 +142,9 @@ describe('Stage 4.3.1: Database Foundation, Connection Lifecycle & Critical Quer
         })
       );
 
-      // Verify socketTimeoutMS is omitted by default to protect long-running exports/analytics
+      // Verify socketTimeoutMS defaults to 15000 to bound half-open socket lifespans (BLK-05 remediation)
       const passedOptions = connectSpy.mock.calls[0][1];
-      expect(passedOptions.socketTimeoutMS).toBeUndefined();
+      expect(passedOptions.socketTimeoutMS).toBe(15000);
 
       process.env = origEnv;
     });

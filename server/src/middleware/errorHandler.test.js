@@ -143,6 +143,36 @@ describe('Error Handler and Not Found Middleware', () => {
       expect(res.body.message).toBe('email already exists');
     });
 
+    it('handles Mongoose duplicate key error (11000) with missing keyPattern', async () => {
+      app.get('/duplicate-error-missing-pattern', (req, res, next) => {
+        const error = new Error('Duplicate key');
+        error.code = 11000;
+        // Missing keyPattern
+        next(error);
+      });
+      app.use(errorHandler);
+
+      const res = await request(app).get('/duplicate-error-missing-pattern');
+      expect(res.status).toBe(400);
+      expect(res.body.success).toBe(false);
+      expect(res.body.message).toBe('Field already exists');
+    });
+
+    it('handles Mongoose duplicate key error (11000) with empty keyPattern', async () => {
+      app.get('/duplicate-error-empty-pattern', (req, res, next) => {
+        const error = new Error('Duplicate key');
+        error.code = 11000;
+        error.keyPattern = {};
+        next(error);
+      });
+      app.use(errorHandler);
+
+      const res = await request(app).get('/duplicate-error-empty-pattern');
+      expect(res.status).toBe(400);
+      expect(res.body.success).toBe(false);
+      expect(res.body.message).toBe('Field already exists');
+    });
+
     it('handles Mongoose CastError correctly', async () => {
       app.get('/cast-error', (req, res, next) => {
         const error = new Error('Cast failed');

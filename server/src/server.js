@@ -35,6 +35,7 @@ import authRoutes from './routes/authRoutes.js';
 import formRoutes from './routes/formRoutes.js';
 import responseRoutes from './routes/responseRoutes.js';
 import aiRoutes from './routes/aiRoutes.js';
+import quiescenceRoutes from './routes/quiescenceRoutes.js';
 
 // Import middleware
 import { errorHandler, notFound } from './middleware/errorHandler.js';
@@ -42,10 +43,12 @@ import { csrfProtection, isTrustedOrigin } from './middleware/csrfProtection.js'
 import { requestCorrelation } from './middleware/requestCorrelation.js';
 import { httpAccessLogger } from './middleware/httpAccessLogger.js';
 import { createIngressGate } from './middleware/ingressGate.js';
+import { quiescenceGate, closeMutationAdmission } from './middleware/quiescenceGate.js';
 import { logger } from './utils/logger.js';
 
 // Import services
 import storageService from './services/StorageService.js';
+import { closeWorkerAdmission } from './services/workerCoordinationService.js';
 
 // Import login protection utilities and lifecycle singletons
 import { parseHmacSecret } from './utils/loginProtectionCrypto.js';
@@ -123,14 +126,11 @@ const connectDB = async (mongoUri = process.env.MONGO_URI, exitOnError = true, o
     minPoolSize: parseInt(process.env.MONGODB_MIN_POOL_SIZE, 10) || 0,
     // Bounded timeouts justified to prevent request hangs during database outages
     serverSelectionTimeoutMS: parseInt(process.env.MONGODB_SERVER_SELECTION_TIMEOUT_MS, 10) || 5000,
-    connectTimeoutMS: parseInt(process.env.MONGODB_CONNECT_TIMEOUT_MS, 10) || 10000
+    connectTimeoutMS: parseInt(process.env.MONGODB_CONNECT_TIMEOUT_MS, 10) || 10000,
+    // Universal Top-Level CSOT: 10s ceiling on operation duration and driver retry loops
+    socketTimeoutMS: parseInt(process.env.MONGODB_SOCKET_TIMEOUT_MS, 10) || 15000,
+    timeoutMS: parseInt(process.env.MONGODB_TIMEOUT_MS, 10) || 10000
   };
-
-  // Only attach socketTimeoutMS if explicitly provided via env (driver default 0 = no timeout)
-  // to avoid prematurely aborting legitimate long-running CSV exports or aggregations
-  if (process.env.MONGODB_SOCKET_TIMEOUT_MS) {
-    defaultOptions.socketTimeoutMS = parseInt(process.env.MONGODB_SOCKET_TIMEOUT_MS, 10);
-  }
 
   const connectionOptions = { ...defaultOptions, ...options };
 
@@ -138,7 +138,7 @@ const connectDB = async (mongoUri = process.env.MONGO_URI, exitOnError = true, o
     const conn = await mongoose.connect(mongoUri, connectionOptions);
     let topologyInfo;
     try {
-      topologyInfo = await verifyReplicaSetTopology(conn.connection);
+      topologyInfo = await verifyReplicaSetTopology(conn.connection, { verifyParameters: true });
     } catch (topologyError) {
       if (conn?.connection && typeof conn.connection.close === 'function') {
         await conn.connection.close(false).catch(() => {});
@@ -351,6 +351,12 @@ const readinessHandler = async (req, res) => {
 
 app.get(['/health/ready', '/ready', '/api/health/ready', '/api/ready'], readinessHandler);
 
+// Admin quiescence management routes
+app.use('/api/admin/quiescence', quiescenceRoutes);
+
+// Quiescence write-rejection middleware (protects business routes during backup maintenance)
+app.use(quiescenceGate);
+
 // API Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/forms', formRoutes);
@@ -473,6 +479,7 @@ const createGracefulShutdown = (
   let periodicRecoveryTimer = null;
   let abortRecovery = null;
   let waitForLifecycleTasks = null;
+  let reconciliationScheduler = null;
 
   if (
     serverInstanceOrOptions &&
@@ -497,6 +504,9 @@ const createGracefulShutdown = (
     if (typeof opts.waitForLifecycleTasks === 'function') {
       waitForLifecycleTasks = opts.waitForLifecycleTasks;
     }
+    if (opts.reconciliationScheduler !== undefined) {
+      reconciliationScheduler = opts.reconciliationScheduler;
+    }
     exitFn = typeof opts.exitFn === 'function' ? opts.exitFn : process.exit;
     timeoutMs = typeof opts.timeoutMs === 'number' ? opts.timeoutMs : 10000;
   } else {
@@ -518,6 +528,9 @@ const createGracefulShutdown = (
       if (typeof extraOptions.waitForLifecycleTasks === 'function') {
         waitForLifecycleTasks = extraOptions.waitForLifecycleTasks;
       }
+      if (extraOptions.reconciliationScheduler !== undefined) {
+        reconciliationScheduler = extraOptions.reconciliationScheduler;
+      }
     } else if (typeof exitFnOrOptions === 'object' && exitFnOrOptions !== null) {
       const opts = exitFnOrOptions;
       exitFn = typeof opts.exitFn === 'function' ? opts.exitFn : process.exit;
@@ -535,6 +548,9 @@ const createGracefulShutdown = (
       }
       if (typeof opts.waitForLifecycleTasks === 'function') {
         waitForLifecycleTasks = opts.waitForLifecycleTasks;
+      }
+      if (opts.reconciliationScheduler !== undefined) {
+        reconciliationScheduler = opts.reconciliationScheduler;
       }
     }
   }
@@ -585,6 +601,9 @@ const createGracefulShutdown = (
 
     shutdownPromise = (async () => {
       setIsServerShuttingDown(true);
+      closeMutationAdmission('SHUTDOWN');
+      closeWorkerAdmission();
+
       if (periodicRecoveryTimer) {
         const timer =
           typeof periodicRecoveryTimer === 'function'
@@ -718,6 +737,31 @@ const createGracefulShutdown = (
           }
         }
 
+        // Step 5a: Reconciliation Scheduler drain & graceful release of AppWorker lease
+        let scheduler = reconciliationScheduler;
+        if (!scheduler) {
+          try {
+            const { getReconciliationScheduler } = await import('./services/reconciliationScheduler.js');
+            scheduler = getReconciliationScheduler();
+          } catch {
+            // Optional if not loaded
+          }
+        }
+
+        if (scheduler && typeof scheduler.stop === 'function') {
+          try {
+            await scheduler.stop({ timeoutMs: Math.min(timeoutMs, 5000) });
+            logger.info('✅ Step 5a: Autonomous Reconciliation Scheduler drained & AppWorker lease released.', {
+              event: 'shutdown.step5a_reconciliation_scheduler_stopped'
+            });
+          } catch (err) {
+            logger.error(`❌ Step 5a failed (Reconciliation scheduler stop): ${err.message}`, err, {
+              event: 'shutdown.step5a_failed'
+            });
+            errors.push(err);
+          }
+        }
+
         // Step 5b: Wait for active background recovery / deletion lifecycle tasks before closing DB/storage
         if (waitForLifecycleTasks) {
           try {
@@ -731,6 +775,32 @@ const createGracefulShutdown = (
             });
             errors.push(err);
           }
+        }
+
+        // Step 5c: Release single-instance deployment lease cleanly (only if no errors and not timed out)
+        if (errors.length === 0 && !isTimedOut && coordinatorQuiesced) {
+          try {
+            const { releaseInstanceLease } = await import('./services/instanceLeaseService.js');
+            await releaseInstanceLease();
+            logger.info('✅ Step 5c: Single-instance deployment lease released cleanly.', {
+              event: 'shutdown.step5c_instance_lease_released'
+            });
+          } catch (err) {
+            logger.error(`❌ Step 5c failed (Instance lease release): ${err.message}`, err, {
+              event: 'shutdown.step5c_failed'
+            });
+            errors.push(err);
+          }
+        } else {
+          logger.warn(
+            '⚠️ Step 5c skipped: Single-instance lease retained to expire by TTL (dirty shutdown or timeout detected)',
+            {
+              event: 'shutdown.step5c_skipped_dirty_exit',
+              errorCount: errors.length,
+              isTimedOut,
+              coordinatorQuiesced
+            }
+          );
         }
 
         // Step 6: Database connection close (HIGH-01: Protected against quiescence failure)
@@ -859,6 +929,20 @@ const startServer = async (options = {}) => {
     { event: 'startup.login_protection_status', enabled: config.isEnabled }
   );
 
+  // Log sanitized TTLMonitor recovery configuration (F4 / Invariant INV-7)
+  const isTtlMonitorSuppressed = Boolean(
+    env.PAPERLESS_DISABLE_TTL_MONITOR === '1' || env.PAPERLESS_DISABLE_TTL_MONITOR === 'true'
+  );
+  logger.info(
+    isTtlMonitorSuppressed
+      ? '🛑 MongoDB TTLMonitor startup enable: SUPPRESSED (PAPERLESS_DISABLE_TTL_MONITOR active)'
+      : '⏱️ MongoDB TTLMonitor startup enable: NORMAL',
+    {
+      event: 'startup.ttl_monitor_config',
+      ttlMonitorSuppressed: isTtlMonitorSuppressed
+    }
+  );
+
   // 2. Connect to database (pass exitOnError=false so startServer routes failures via exitFn / throwOnError)
   try {
     await connectDB(env.MONGO_URI, false);
@@ -871,7 +955,60 @@ const startServer = async (options = {}) => {
     return null;
   }
 
-  // 2b. Startup recovery for abandoned form deletions
+  // 2a. Enforce Single-Instance Mutual Exclusion Lease (must acquire exclusive ownership before any recovery writes)
+  if (!options.skipInstanceLease && (env.NODE_ENV !== 'test' || options.runInstanceLease)) {
+    try {
+      const { acquireInstanceLease } = await import('./services/instanceLeaseService.js');
+      const leaseResult = await acquireInstanceLease({
+        skipHeartbeat: options.skipHeartbeat,
+        leaseTtlMs: options.instanceLeaseTtlMs,
+        heartbeatIntervalMs: options.instanceHeartbeatIntervalMs
+      });
+      if (!leaseResult.success) {
+        logger.fatal(
+          `FATAL: Single-instance violation! ${leaseResult.message}. Server is exiting immediately.`,
+          { event: 'startup.single_instance_violation' }
+        );
+        if (options.throwOnError) throw new Error(leaseResult.message);
+        exitFn(1);
+        return null;
+      }
+    } catch (instanceLeaseErr) {
+      if (options.throwOnError) throw instanceLeaseErr;
+      logger.fatal(`FATAL: Single-instance check failed: ${instanceLeaseErr.message}`, {
+        event: 'startup.single_instance_failed',
+        error: instanceLeaseErr.message
+      });
+      exitFn(1);
+      return null;
+    }
+  }
+
+  // 2b. Distributed quiescence lease initialization & recovery sweep (Fail-Closed Remediation F3 / F4)
+  if (!options.skipRecovery && (env.NODE_ENV !== 'test' || options.runStartupRecovery || options.runQuiescenceInit)) {
+    try {
+      const { initialize: initializeQuiescence } = await import('./services/quiescenceService.js');
+      const initResult = await initializeQuiescence({ env });
+      if (initResult && initResult.status === 'RECOVERY_REQUIRED') {
+        logger.warn('Server startup entered RECOVERY_REQUIRED status; mutation admission closed', {
+          event: 'startup.quiescence_recovery_required',
+          reason: initResult.reason
+        });
+      }
+    } catch (quiescenceInitErr) {
+      logger.error('Startup quiescence initialization failed, failing closed', {
+        event: 'startup.quiescence_init_failed',
+        error: quiescenceInitErr.message
+      });
+      const { closeMutationAdmission } = await import('./middleware/quiescenceGate.js');
+      closeMutationAdmission('RECOVERY_REQUIRED');
+      if (options.throwOnError) throw quiescenceInitErr;
+      exitFn(1);
+      return null;
+    }
+  }
+
+  // 2c. Startup recovery for abandoned form deletions
   if (!options.skipRecovery && (env.NODE_ENV !== 'test' || options.runStartupRecovery)) {
     try {
       const { recoverAbandonedFormDeletions } = await import('./controllers/formController.js');
@@ -896,8 +1033,14 @@ const startServer = async (options = {}) => {
       logger.fatal(`FATAL ERROR: Failed to pre-warm bcrypt worker pool: ${err.message}`, err, {
         event: 'startup.worker_prewarm_failed'
       });
-      // Clean up partially initialized resources
+      // Clean up partially initialized resources including instance lease
       await resetLoginProtectionComponents();
+      try {
+        const { releaseInstanceLease } = await import('./services/instanceLeaseService.js');
+        await releaseInstanceLease();
+      } catch {
+        // ignore lease release error during emergency startup abort
+      }
       if (mongoose.connection && mongoose.connection.readyState !== 0) {
         try {
           await mongoose.connection.close(false);
@@ -908,6 +1051,37 @@ const startServer = async (options = {}) => {
       if (options.throwOnError) throw err;
       exitFn(1);
       return null;
+    }
+  }
+
+  // 3a. Autonomous Storage Reconciliation Scheduler (Role: storage_reconciliation)
+  let reconciliationScheduler = null;
+  if (!options.skipScheduler && (env.NODE_ENV !== 'test' || options.runReconciliationScheduler)) {
+    try {
+      const { getReconciliationScheduler } = await import('./services/reconciliationScheduler.js');
+      reconciliationScheduler = getReconciliationScheduler();
+      const schedResult = await reconciliationScheduler.start({
+        intervalMs:
+          options.reconciliationIntervalMs ||
+          parseInt(env.RECONCILIATION_INTERVAL_MS, 10) ||
+          30000,
+        leaseTtlMs: options.reconciliationLeaseTtlMs || 30000,
+        heartbeatIntervalMs: options.reconciliationHeartbeatIntervalMs || 10000,
+        limit: options.reconciliationBatchLimit || 50,
+        throwOnError: options.throwOnError
+      });
+      if (schedResult?.success) {
+        logger.info('🔄 Autonomous Storage Reconciliation Scheduler started successfully', {
+          event: 'startup.reconciliation_scheduler_started',
+          workerId: schedResult.workerId
+        });
+      }
+    } catch (schedErr) {
+      logger.error('Failed to start Autonomous Storage Reconciliation Scheduler', schedErr, {
+        event: 'startup.reconciliation_scheduler_failed',
+        error: schedErr.message
+      });
+      if (options.throwOnError) throw schedErr;
     }
   }
 
@@ -923,6 +1097,7 @@ const startServer = async (options = {}) => {
     coordinator: config.isEnabled ? getLoginCoordinator() : null,
     workerPool: config.isEnabled ? getLoginWorkerPool() : null,
     storageService,
+    reconciliationScheduler,
     periodicRecoveryTimer: () => periodicRecoveryTimer,
     abortRecovery: () => recoveryAbortController.abort(),
     waitForLifecycleTasks: async (waitBudgetMs) => {
@@ -935,6 +1110,15 @@ const startServer = async (options = {}) => {
         ]);
       }
       try {
+        const { drainInFlight } = await import('./middleware/quiescenceGate.js');
+        if (typeof drainInFlight === 'function') {
+          const rem = Math.max(0, deadline - Date.now());
+          await drainInFlight(rem);
+        }
+      } catch {
+        // Fallback to separate drains if quiescenceGate unavailable
+      }
+      try {
         const { waitForActiveDeletionTasks } = await import('./controllers/formController.js');
         if (typeof waitForActiveDeletionTasks === 'function') {
           const rem = Math.max(0, deadline - Date.now());
@@ -942,6 +1126,15 @@ const startServer = async (options = {}) => {
         }
       } catch {
         // Ignore if controller could not be queried during teardown
+      }
+      try {
+        const { waitForActiveWorkerTasks } = await import('./services/workerCoordinationService.js');
+        if (typeof waitForActiveWorkerTasks === 'function') {
+          const rem = Math.max(0, deadline - Date.now());
+          await waitForActiveWorkerTasks(rem);
+        }
+      } catch {
+        // Ignore if service could not be queried during teardown
       }
     },
     exitFn
@@ -953,6 +1146,9 @@ const startServer = async (options = {}) => {
     if (periodicRecoveryTimer) {
       clearInterval(periodicRecoveryTimer);
       periodicRecoveryTimer = null;
+    }
+    if (reconciliationScheduler && typeof reconciliationScheduler.stop === 'function') {
+      reconciliationScheduler.stop({ timeoutMs: 1000 }).catch(() => {});
     }
     recoveryAbortController.abort();
   };
@@ -1020,8 +1216,11 @@ const startServer = async (options = {}) => {
       }
       activeRecoveryPromise = (async () => {
         try {
-          const { recoverAbandonedFormDeletions } = await import('./controllers/formController.js');
-          await recoverAbandonedFormDeletions({ signal: recoveryAbortController.signal });
+          const { registerWorkerTask } = await import('./services/workerCoordinationService.js');
+          await registerWorkerTask('periodicRecovery', async () => {
+            const { recoverAbandonedFormDeletions } = await import('./controllers/formController.js');
+            await recoverAbandonedFormDeletions({ signal: recoveryAbortController.signal });
+          });
         } catch (err) {
           logger.warn('Non-fatal: Periodic deletion recovery encountered error', {
             event: 'periodic.deletion_recovery_warning',

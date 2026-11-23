@@ -17,6 +17,7 @@ import LoginAccount from '../models/LoginAccount.js';
 import LoginProtectionService from '../services/LoginProtectionService.js';
 import securityAuditService from '../services/SecurityAuditService.js';
 import { logger } from '../utils/logger.js';
+import { withRequiredTransaction } from '../utils/dbTransaction.js';
 
 const emailService = new EmailService();
 
@@ -314,11 +315,29 @@ export const register = async (req, res, next) => {
     const salt = await bcrypt.genSalt(10);
     const hashedPassword = await bcrypt.hash(password, salt);
 
-    const user = await User.create({
-      name,
-      email: normalizedEmail,
-      password: hashedPassword
-    });
+    const user = await withRequiredTransaction(
+      async (session) => {
+        const existingInTx = await User.findOne({ email: normalizedEmail }).session(session);
+        if (existingInTx) {
+          const conflictError = new Error('User already exists with this email');
+          conflictError.statusCode = 400;
+          throw conflictError;
+        }
+
+        const [createdUser] = await User.create(
+          [
+            {
+              name,
+              email: normalizedEmail,
+              password: hashedPassword
+            }
+          ],
+          { session }
+        );
+        return createdUser;
+      },
+      { partitionKey: normalizedEmail }
+    );
 
     await sendTokenResponse(user, 201, res, 'User registered successfully');
   } catch (error) {
@@ -946,15 +965,20 @@ export const forgotPassword = async (req, res, next) => {
     const generatedTokenHash = user.resetPasswordToken;
     const expireDate = user.resetPasswordExpire;
 
-    const updatedUser = await User.findByIdAndUpdate(
-      user._id,
-      {
-        $set: {
-          resetPasswordToken: generatedTokenHash,
-          resetPasswordExpire: expireDate
-        }
+    const updatedUser = await withRequiredTransaction(
+      async (session) => {
+        return User.findByIdAndUpdate(
+          user._id,
+          {
+            $set: {
+              resetPasswordToken: generatedTokenHash,
+              resetPasswordExpire: expireDate
+            }
+          },
+          { new: true, session }
+        );
       },
-      { new: true }
+      { partitionKey: user._id.toString() }
     );
 
     if (!updatedUser) {
@@ -1051,27 +1075,33 @@ export const resetPassword = async (req, res, next) => {
     const hashedPassword = await bcrypt.hash(password, salt);
 
     // Atomically invalidate token and update password in one single-operation write to prevent TOCTOU reuse
-    const user = await User.findOneAndUpdate(
-      {
-        resetPasswordToken,
-        resetPasswordExpire: { $gt: Date.now() }
+    const user = await withRequiredTransaction(
+      async (session) => {
+        return User.findOneAndUpdate(
+          {
+            resetPasswordToken,
+            resetPasswordExpire: { $gt: Date.now() }
+          },
+          {
+            $set: {
+              password: hashedPassword,
+              refreshTokens: [],
+              rotatedTokens: [],
+              lastLogoutAt: new Date()
+            },
+            $unset: {
+              resetPasswordToken: 1,
+              resetPasswordExpire: 1
+            }
+          },
+          {
+            new: true,
+            select: '-password',
+            session
+          }
+        );
       },
-      {
-        $set: {
-          password: hashedPassword,
-          refreshTokens: [],
-          rotatedTokens: [],
-          lastLogoutAt: new Date()
-        },
-        $unset: {
-          resetPasswordToken: 1,
-          resetPasswordExpire: 1
-        }
-      },
-      {
-        new: true,
-        select: '-password'
-      }
+      { partitionKey: resetPasswordToken }
     );
 
     if (!user) {

@@ -230,7 +230,34 @@ For the frontend, create a `.env` file in the `client` directory:
 VITE_BACKEND_URL=http://localhost:5001
 ```
 
-### 3. Development
+### 3. Production MongoDB Configuration & Operational Privileges
+
+#### Replica Set Requirement
+Paperless requires a MongoDB replica set (MongoDB 7.0+) to support multi-document ACID transactions with WiredTiger storage engine write fencing. Standalone `mongod` instances are rejected by the connection verifier.
+
+#### Operational Privilege Prerequisite (Domain 9 Quiescence Drain)
+In production environments (`NODE_ENV=production` or `strict: true`), Paperless executes administrative transaction inspection via `{ currentOp: 1, activeTransaction: true }` against the `admin` database during Domain 9 datastore drain verification. This cluster-wide check guarantees that no in-flight multi-document transactions are actively mutating the datastore before quiescence can be reported.
+
+Standard application accounts restricted to `readWrite` on the `paperless` application database lack permission to execute `currentOp` on `admin`. Without administrative visibility, the MongoDB engine returns `Unauthorized` (Code 13), and Paperless **fails closed**:
+- Quiescence datastore drain returns `isDrained: false`
+- Drain reason is recorded as `TRANSACTION_DRAIN_UNVERIFIED`
+- Physical backup authorization remains strictly `false`
+
+**Least-Privilege Role Recommendation:**  
+To satisfy this operational prerequisite without granting excessive database administration rights, grant the built-in `clusterMonitor` role on the `admin` database to the Paperless database user:
+
+```javascript
+// Connect to the primary replica set member via mongosh as an administrator:
+use admin;
+db.grantRolesToUser("<paperless_db_user>", [
+  { role: "clusterMonitor", db: "admin" }
+]);
+```
+
+*Why `clusterMonitor` instead of `clusterAdmin`?*  
+`clusterMonitor` provides read-only monitoring and engine inspection privileges (including `currentOp`, `serverStatus`, and connection pool diagnostics) without granting cluster reconfiguration, user modification, or datastore mutation privileges. This permission is an operational deployment prerequisite and is required for fail-closed quiescence verification.
+
+### 4. Development
 You can run the development servers concurrently from the root directory, or in separate terminal windows:
 
 ```bash

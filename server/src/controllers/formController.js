@@ -10,6 +10,10 @@ import { logger } from '../utils/logger.js';
 import { isValidObjectId } from '../middleware/validateObjectId.js';
 import { withRequiredTransaction } from '../utils/dbTransaction.js';
 import { SubmissionReservationManager } from '../utils/submissionReservationManager.js';
+import {
+  registerWorkerTask,
+  shouldPauseWorker
+} from '../services/workerCoordinationService.js';
 
 export const DELETION_LEASE_TTL_MS = parseInt(process.env.DELETION_LEASE_TTL_MS, 10) || 30000;
 export const DELETION_CLEANUP_GRACE_MS =
@@ -32,13 +36,16 @@ export const calculateNextSweepDelay = (passes = 0) => {
 
 const activeDeletionTasks = new Set();
 
-export const trackDeletionTask = (promise) => {
+export const trackDeletionTask = (promiseOrFn) => {
+  const promise = typeof promiseOrFn === 'function' ? promiseOrFn() : promiseOrFn;
   activeDeletionTasks.add(promise);
-  promise
-    .finally(() => {
-      activeDeletionTasks.delete(promise);
-    })
-    .catch(() => {});
+  if (promise && typeof promise.finally === 'function') {
+    promise
+      .finally(() => {
+        activeDeletionTasks.delete(promise);
+      })
+      .catch(() => {});
+  }
   return promise;
 };
 
@@ -231,12 +238,20 @@ export const createForm = async (req, res, next) => {
       });
     }
 
-    const form = await Form.create({
-      ownerId: req.user.id,
-      title,
-      description: description || '',
-      status: status || 'draft'
-    });
+    const form = await withRequiredTransaction(async (session) => {
+      const [createdForm] = await Form.create(
+        [
+          {
+            ownerId: req.user.id,
+            title,
+            description: description || '',
+            status: status || 'draft'
+          }
+        ],
+        { session }
+      );
+      return createdForm;
+    }, { partitionKey: req.user.id });
 
     res.status(201).json({
       success: true,
@@ -420,46 +435,57 @@ export const updateForm = async (req, res, next) => {
       $inc: { version: 1 }
     };
 
-    const updatedForm = await Form.findOneAndUpdate(query, updateDoc, {
-      new: true,
-      runValidators: true
-    });
-
-    if (!updatedForm) {
-      const existingForm = await Form.findOne({
-        _id: req.params.id,
-        ownerId: req.user.id
+    const result = await withRequiredTransaction(async (session) => {
+      const updatedForm = await Form.findOneAndUpdate(query, updateDoc, {
+        new: true,
+        runValidators: true,
+        session
       });
 
-      if (!existingForm) {
-        return res.status(404).json({
-          success: false,
-          message: 'Form not found'
-        });
-      }
+      if (!updatedForm) {
+        const existingForm = await Form.findOne({
+          _id: req.params.id,
+          ownerId: req.user.id
+        }).session(session);
 
-      if (['deleting', 'delete_failed'].includes(existingForm.status)) {
-        return res.status(409).json({
-          success: false,
-          message:
-            existingForm.status === 'deleting'
-              ? 'Form is currently being deleted'
-              : 'Form deletion previously failed',
+        if (!existingForm) {
+          return { statusCode: 404, message: 'Form not found' };
+        }
+
+        if (['deleting', 'delete_failed'].includes(existingForm.status)) {
+          return {
+            statusCode: 409,
+            message:
+              existingForm.status === 'deleting'
+                ? 'Form is currently being deleted'
+                : 'Form deletion previously failed',
+            data: existingForm
+          };
+        }
+
+        return {
+          statusCode: 409,
+          message: 'Conflict: Form has been modified by another update',
           data: existingForm
-        });
+        };
       }
 
-      return res.status(409).json({
+      return { statusCode: 200, updatedForm };
+    }, { partitionKey: req.params.id });
+
+    if (result.statusCode !== 200) {
+      const payload = {
         success: false,
-        message: 'Conflict: Form has been modified by another update',
-        data: existingForm
-      });
+        message: result.message
+      };
+      if (result.data !== undefined) payload.data = result.data;
+      return res.status(result.statusCode).json(payload);
     }
 
     res.status(200).json({
       success: true,
       message: 'Form updated successfully',
-      data: updatedForm
+      data: result.updatedForm
     });
   } catch (error) {
     next(error);
@@ -650,16 +676,19 @@ export const releaseDeletionLease = async (
   if (errorMessage) {
     updateSet['deletionProgress.error'] = errorMessage;
   }
-  const res = await Form.updateOne(
-    {
-      _id: formId,
-      status: 'deleting',
-      'deletionProgress.leaseId': leaseId,
-      'deletionProgress.epoch': epoch
-    },
-    { $set: updateSet }
-  );
-  return { released: res.matchedCount > 0 };
+  return await withRequiredTransaction(async (session) => {
+    const res = await Form.updateOne(
+      {
+        _id: formId,
+        status: 'deleting',
+        'deletionProgress.leaseId': leaseId,
+        'deletionProgress.epoch': epoch
+      },
+      { $set: updateSet },
+      { session }
+    );
+    return { released: res.matchedCount > 0 };
+  }, { partitionKey: formId.toString() });
 };
 
 /**
@@ -676,7 +705,14 @@ export const releaseDeletionLease = async (
  */
 export const executeFormDeletion = async (formId, options = {}) =>
   trackDeletionTask(
-    (async () => {
+    registerWorkerTask('executeFormDeletion', async () => {
+      if (await shouldPauseWorker()) {
+        return {
+          success: false,
+          statusCode: 503,
+          message: 'System is undergoing scheduled maintenance/backup'
+        };
+      }
       const { userId, isSystemRecovery = false, drainWaitMs = 0 } = options;
 
       // 1. Optional polite drain window BEFORE transactional claim if requested
@@ -871,7 +907,7 @@ export const executeFormDeletion = async (formId, options = {}) =>
           leaseId,
           epoch: claimedForm.deletionProgress?.epoch || 1
         };
-      });
+      }, { partitionKey: formId.toString() });
 
       if (!claimResult.claimed) {
         const resObj = {
@@ -899,20 +935,23 @@ export const executeFormDeletion = async (formId, options = {}) =>
           }
           heartbeatInFlight = (async () => {
             try {
-              const res = await Form.updateOne(
-                {
-                  _id: claimedForm._id,
-                  status: 'deleting',
-                  'deletionProgress.leaseId': leaseId,
-                  'deletionProgress.epoch': epoch
-                },
-                {
-                  $set: {
-                    'deletionProgress.leaseExpiresAt': new Date(Date.now() + DELETION_LEASE_TTL_MS),
-                    'deletionProgress.updatedAt': new Date()
-                  }
-                }
-              );
+              const res = await withRequiredTransaction(async (session) => {
+                return await Form.updateOne(
+                  {
+                    _id: claimedForm._id,
+                    status: 'deleting',
+                    'deletionProgress.leaseId': leaseId,
+                    'deletionProgress.epoch': epoch
+                  },
+                  {
+                    $set: {
+                      'deletionProgress.leaseExpiresAt': new Date(Date.now() + DELETION_LEASE_TTL_MS),
+                      'deletionProgress.updatedAt': new Date()
+                    }
+                  },
+                  { session }
+                );
+              }, { partitionKey: claimedForm._id.toString() });
               if (res.matchedCount === 0) {
                 leaseLost = true;
                 if (heartbeatTimer) {
@@ -988,26 +1027,29 @@ export const executeFormDeletion = async (formId, options = {}) =>
               unresolvedKeys: unresolvedList
             });
 
-            const unresolvedUpdate = await Form.updateOne(
-              {
-                _id: claimedForm._id,
-                status: 'deleting',
-                'deletionProgress.leaseId': leaseId,
-                'deletionProgress.epoch': epoch
-              },
-              {
-                $set: {
-                  status: 'delete_failed',
-                  'deletionProgress.stage': 'failed',
-                  'deletionProgress.unresolvedKeys': unresolvedList,
-                  'deletionProgress.error':
-                    'Unresolved legacy storage keys detected; MongoDB cascade blocked to prevent orphaned files',
-                  'deletionProgress.leaseId': null,
-                  'deletionProgress.leaseExpiresAt': null,
-                  'deletionProgress.updatedAt': new Date()
-                }
-              }
-            );
+            const unresolvedUpdate = await withRequiredTransaction(async (session) => {
+              return await Form.updateOne(
+                {
+                  _id: claimedForm._id,
+                  status: 'deleting',
+                  'deletionProgress.leaseId': leaseId,
+                  'deletionProgress.epoch': epoch
+                },
+                {
+                  $set: {
+                    status: 'delete_failed',
+                    'deletionProgress.stage': 'failed',
+                    'deletionProgress.unresolvedKeys': unresolvedList,
+                    'deletionProgress.error':
+                      'Unresolved legacy storage keys detected; MongoDB cascade blocked to prevent orphaned files',
+                    'deletionProgress.leaseId': null,
+                    'deletionProgress.leaseExpiresAt': null,
+                    'deletionProgress.updatedAt': new Date()
+                  }
+                },
+                { session }
+              );
+            }, { partitionKey: claimedForm._id.toString() });
 
             if (unresolvedUpdate.matchedCount === 0) {
               return {
@@ -1063,6 +1105,14 @@ export const executeFormDeletion = async (formId, options = {}) =>
               };
             }
 
+            if (await shouldPauseWorker()) {
+              logger.info('form.deletion_saga_paused_before_s3_batch_quiescence', {
+                formId: claimedForm._id,
+                leaseId
+              });
+              return { success: false, statusCode: 503, message: 'Maintenance pause' };
+            }
+
             let batchResult;
             try {
               batchResult = await storageService.deleteFiles(s3KeysToDelete);
@@ -1097,26 +1147,29 @@ export const executeFormDeletion = async (formId, options = {}) =>
                 .map((f) => (typeof f === 'string' ? f : f?.key))
                 .filter((k) => classifyStorageKey(k, formIdStr).category === 'A');
 
-              const failUpdate = await Form.updateOne(
-                {
-                  _id: claimedForm._id,
-                  status: 'deleting',
-                  'deletionProgress.leaseId': leaseId,
-                  'deletionProgress.epoch': epoch
-                },
-                {
-                  $set: {
-                    status: 'delete_failed',
-                    'deletionProgress.stage': 'failed',
-                    'deletionProgress.failedKeys': failedKeyList,
-                    'deletionProgress.deletedFiles': (batchResult.deletedKeys || []).length,
-                    'deletionProgress.error': 'Failed to delete some storage files',
-                    'deletionProgress.leaseId': null,
-                    'deletionProgress.leaseExpiresAt': null,
-                    'deletionProgress.updatedAt': new Date()
-                  }
-                }
-              );
+              const failUpdate = await withRequiredTransaction(async (session) => {
+                return await Form.updateOne(
+                  {
+                    _id: claimedForm._id,
+                    status: 'deleting',
+                    'deletionProgress.leaseId': leaseId,
+                    'deletionProgress.epoch': epoch
+                  },
+                  {
+                    $set: {
+                      status: 'delete_failed',
+                      'deletionProgress.stage': 'failed',
+                      'deletionProgress.failedKeys': failedKeyList,
+                      'deletionProgress.deletedFiles': (batchResult.deletedKeys || []).length,
+                      'deletionProgress.error': 'Failed to delete some storage files',
+                      'deletionProgress.leaseId': null,
+                      'deletionProgress.leaseExpiresAt': null,
+                      'deletionProgress.updatedAt': new Date()
+                    }
+                  },
+                  { session }
+                );
+              }, { partitionKey: claimedForm._id.toString() });
 
               if (failUpdate.matchedCount === 0) {
                 return {
@@ -1154,23 +1207,26 @@ export const executeFormDeletion = async (formId, options = {}) =>
             };
           }
 
-          const advanceResult = await Form.updateOne(
-            {
-              _id: claimedForm._id,
-              status: 'deleting',
-              'deletionProgress.leaseId': leaseId,
-              'deletionProgress.epoch': epoch,
-              'deletionProgress.leaseExpiresAt': { $gt: new Date() }
-            },
-            {
-              $set: {
-                'deletionProgress.stage': 'mongo_cleanup',
-                'deletionProgress.failedKeys': [],
-                'deletionProgress.leaseExpiresAt': new Date(Date.now() + DELETION_LEASE_TTL_MS),
-                'deletionProgress.updatedAt': new Date()
-              }
-            }
-          );
+          const advanceResult = await withRequiredTransaction(async (session) => {
+            return await Form.updateOne(
+              {
+                _id: claimedForm._id,
+                status: 'deleting',
+                'deletionProgress.leaseId': leaseId,
+                'deletionProgress.epoch': epoch,
+                'deletionProgress.leaseExpiresAt': { $gt: new Date() }
+              },
+              {
+                $set: {
+                  'deletionProgress.stage': 'mongo_cleanup',
+                  'deletionProgress.failedKeys': [],
+                  'deletionProgress.leaseExpiresAt': new Date(Date.now() + DELETION_LEASE_TTL_MS),
+                  'deletionProgress.updatedAt': new Date()
+                }
+              },
+              { session }
+            );
+          }, { partitionKey: claimedForm._id.toString() });
 
           if (advanceResult.matchedCount === 0) {
             logger.warn('form.deletion_lease_lost_before_mongo_cleanup', {
@@ -1265,13 +1321,13 @@ export const executeFormDeletion = async (formId, options = {}) =>
             leaseLostErr.code = 'LEASE_LOST';
             throw leaseLostErr;
           }
-        });
+        }, { partitionKey: claimedForm._id.toString() });
 
         // Trigger immediate non-blocking sweep of the DeletionCleanupJob outside transaction
         if (options.awaitCleanup) {
           await processDeletionCleanupJob(claimedForm._id);
         } else if (!options.skipImmediateCleanup) {
-          processDeletionCleanupJob(claimedForm._id).catch((err) => {
+          trackDeletionTask(processDeletionCleanupJob(claimedForm._id)).catch((err) => {
             logger.warn('form.post_del_cleanup_job_sweep_failed', {
               formId: claimedForm._id,
               error: err.message
@@ -1316,7 +1372,7 @@ export const executeFormDeletion = async (formId, options = {}) =>
           await heartbeatInFlight.catch(() => {});
         }
       }
-    })()
+    })
   );
 
 /**
@@ -1412,20 +1468,23 @@ export class CleanupLeaseHeartbeat {
     this.inFlightPromise = (async () => {
       try {
         const now = Date.now();
-        const updateResult = await DeletionCleanupJob.updateOne(
-          {
-            _id: this.jobId,
-            status: 'cleaning',
-            leaseId: this.leaseId,
-            epoch: this.epoch
-          },
-          {
-            $set: {
-              leaseExpiresAt: new Date(now + this.leaseDurationMs),
-              updatedAt: new Date(now)
-            }
-          }
-        );
+        const updateResult = await withRequiredTransaction(async (session) => {
+          return await DeletionCleanupJob.updateOne(
+            {
+              _id: this.jobId,
+              status: 'cleaning',
+              leaseId: this.leaseId,
+              epoch: this.epoch
+            },
+            {
+              $set: {
+                leaseExpiresAt: new Date(now + this.leaseDurationMs),
+                updatedAt: new Date(now)
+              }
+            },
+            { session }
+          );
+        }, { partitionKey: this.jobId.toString() });
         if (updateResult.matchedCount === 0) {
           // Ownership fencing: lease was reclaimed by another worker, epoch bumped, or status changed
           this.leaseLost = true;
@@ -1508,8 +1567,12 @@ export class CleanupLeaseHeartbeat {
  * @param {number} [options.leaseTtlMs=30000]
  * @returns {Promise<{ processed: boolean, status: string, deletedCount: number, error?: string }>}
  */
-export const processDeletionCleanupJob = async (jobOrFormId, options = {}) => {
-  const { leaseTtlMs = 30000, leaseDurationMs = leaseTtlMs } = options;
+export const processDeletionCleanupJob = async (jobOrFormId, options = {}) =>
+  registerWorkerTask('processDeletionCleanupJob', async () => {
+    if (await shouldPauseWorker()) {
+      return { processed: false, status: 'quiesced', reason: 'BACKUP_QUIESCENCE_ACTIVE' };
+    }
+    const { leaseTtlMs = 30000, leaseDurationMs = leaseTtlMs } = options;
   const now = new Date();
   const leaseId = crypto.randomUUID();
   const leaseExpiresAt = new Date(now.getTime() + leaseDurationMs);
@@ -1643,7 +1706,13 @@ export const processDeletionCleanupJob = async (jobOrFormId, options = {}) => {
       let continuationToken = undefined;
       let pageCount = 0;
       do {
-        if (effectiveSignal.aborted || heartbeat.leaseLost || heartbeat.hasError || heartbeat.isExpired())
+        if (
+          effectiveSignal.aborted ||
+          heartbeat.leaseLost ||
+          heartbeat.hasError ||
+          heartbeat.isExpired() ||
+          (await shouldPauseWorker())
+        )
           break;
         pageCount++;
         if (pageCount > 1) {
@@ -1687,6 +1756,18 @@ export const processDeletionCleanupJob = async (jobOrFormId, options = {}) => {
     let deleteErrorMsg = null;
 
     if (uniqueKeys.length > 0) {
+      if (await shouldPauseWorker()) {
+        await DeletionCleanupJob.updateOne(
+          { _id: claimed._id, leaseId, epoch },
+          { $set: { status: 'pending', leaseId: null, leaseExpiresAt: null, updatedAt: new Date() } }
+        );
+        return {
+          processed: false,
+          status: 'quiesced',
+          reason: 'BACKUP_QUIESCENCE_ACTIVE',
+          deletedCount: 0
+        };
+      }
       const deleteResult = await storageService.deleteFiles(uniqueKeys, { signal: effectiveSignal });
       totalDeleted = (deleteResult?.deletedKeys || []).length;
       if (!deleteResult?.success || (deleteResult?.failedKeys || []).length > 0) {
@@ -1896,7 +1977,9 @@ export const processDeletionCleanupJob = async (jobOrFormId, options = {}) => {
     }
     await heartbeat.stop();
   }
-};
+  });
+
+export const executeDeletionCleanupJob = processDeletionCleanupJob;
 
 /**
  * Startup & background recovery hook: sweeps abandoned deletions, orphaned responses
@@ -1909,25 +1992,32 @@ export const processDeletionCleanupJob = async (jobOrFormId, options = {}) => {
  * @param {AbortSignal} [options.signal]
  * @returns {Promise<{ recoveredCount: number, failedCount: number, sweptOrphanResponses: number, sweptOrphanReservations: number, sweptOrphanQuestions: number }>}
  */
+const defaultRecoverySummary = {
+  recoveredCount: 0,
+  failedCount: 0,
+  sweptOrphanResponses: 0,
+  sweptOrphanReservations: 0,
+  sweptOrphanQuestions: 0,
+  completedCleanupJobs: 0,
+  purgedStorageFiles: 0
+};
+
 export const recoverAbandonedFormDeletions = async (options = {}) =>
   trackDeletionTask(
-    (async () => {
-      const resultSummary = {
-        recoveredCount: 0,
-        failedCount: 0,
-        sweptOrphanResponses: 0,
-        sweptOrphanReservations: 0,
-        sweptOrphanQuestions: 0,
-        completedCleanupJobs: 0,
-        purgedStorageFiles: 0
-      };
+    registerWorkerTask(
+      'recoverAbandonedFormDeletions',
+      async () => {
+        const resultSummary = { ...defaultRecoverySummary };
 
       if (!mongoose.connection || mongoose.connection.readyState !== 1) {
         return resultSummary;
       }
 
       const { signal } = options;
-      if (signal?.aborted) {
+      if (signal?.aborted || (await shouldPauseWorker())) {
+        logger.info('Skipping recoverAbandonedFormDeletions: backup quiescence is active', {
+          event: 'deletion.recovery_skipped_quiescence'
+        });
         return resultSummary;
       }
 
@@ -1955,7 +2045,7 @@ export const recoverAbandonedFormDeletions = async (options = {}) =>
         }
 
         for (const form of abandonedForms) {
-          if (signal?.aborted) break;
+          if (signal?.aborted || (await shouldPauseWorker())) break;
           try {
             const result = await executeFormDeletion(form._id, { isSystemRecovery: true });
             if (result.success) {
@@ -1985,7 +2075,7 @@ export const recoverAbandonedFormDeletions = async (options = {}) =>
         logger.warn('Failed to query abandoned deleting forms', { error: abandonedErr.message });
       }
 
-      if (signal?.aborted) {
+      if (signal?.aborted || (await shouldPauseWorker())) {
         return resultSummary;
       }
 
@@ -1998,7 +2088,7 @@ export const recoverAbandonedFormDeletions = async (options = {}) =>
           const deadFormIds = orphanedFormIds.filter((id) => id && !existingSet.has(id.toString()));
 
           for (const deadId of deadFormIds) {
-            if (signal?.aborted) break;
+            if (signal?.aborted || (await shouldPauseWorker())) break;
             try {
               const deadIdStr = deadId.toString();
               const orphanResponses = await Response.find({ formId: deadId }, 'answers').lean();
@@ -2055,7 +2145,7 @@ export const recoverAbandonedFormDeletions = async (options = {}) =>
         logger.warn('Failed to sweep orphaned responses', { error: orphanErr.message });
       }
 
-      if (signal?.aborted) {
+      if (signal?.aborted || (await shouldPauseWorker())) {
         return resultSummary;
       }
 
@@ -2070,11 +2160,11 @@ export const recoverAbandonedFormDeletions = async (options = {}) =>
           );
 
           for (const deadId of deadFormIds) {
-            if (signal?.aborted) break;
+            if (signal?.aborted || (await shouldPauseWorker())) break;
             const deadIdStr = deadId.toString();
             const deadReservations = await SubmissionReservation.find({ formId: deadId }).lean();
             for (const resItem of deadReservations) {
-              if (signal?.aborted) break;
+              if (signal?.aborted || (await shouldPauseWorker())) break;
               try {
                 const failedStagedKeys = [];
                 const failedPromotedKeys = [];
@@ -2192,7 +2282,7 @@ export const recoverAbandonedFormDeletions = async (options = {}) =>
         logger.warn('Failed to sweep orphaned reservations', { error: resErr.message });
       }
 
-      if (signal?.aborted) {
+      if (signal?.aborted || (await shouldPauseWorker())) {
         return resultSummary;
       }
 
@@ -2210,7 +2300,7 @@ export const recoverAbandonedFormDeletions = async (options = {}) =>
         });
       }
 
-      if (signal?.aborted) {
+      if (signal?.aborted || (await shouldPauseWorker())) {
         return resultSummary;
       }
 
@@ -2230,7 +2320,7 @@ export const recoverAbandonedFormDeletions = async (options = {}) =>
         });
       }
 
-      if (signal?.aborted) {
+      if (signal?.aborted || (await shouldPauseWorker())) {
         return resultSummary;
       }
 
@@ -2245,7 +2335,7 @@ export const recoverAbandonedFormDeletions = async (options = {}) =>
           );
 
           for (const deadId of deadQFormIds) {
-            if (signal?.aborted) break;
+            if (signal?.aborted || (await shouldPauseWorker())) break;
             try {
               const hasPendingResponses = await Response.exists({ formId: deadId });
               if (hasPendingResponses) {
@@ -2291,7 +2381,7 @@ export const recoverAbandonedFormDeletions = async (options = {}) =>
           .lean();
 
         for (const job of pendingJobs) {
-          if (signal?.aborted) break;
+          if (signal?.aborted || (await shouldPauseWorker())) break;
           const procResult = await processDeletionCleanupJob(job, { signal });
           if (procResult?.status === 'completed' || procResult?.status === 'reconciled') {
             resultSummary.completedCleanupJobs = (resultSummary.completedCleanupJobs || 0) + 1;
@@ -2306,7 +2396,7 @@ export const recoverAbandonedFormDeletions = async (options = {}) =>
       }
 
       return resultSummary;
-    })()
+    }, { fallbackResult: defaultRecoverySummary })
   );
 
 const buildNoActiveDeletionLeaseFilter = (now) => ({
@@ -2422,7 +2512,7 @@ export const addQuestion = async (req, res, next) => {
       );
 
       return { statusCode: 201, question };
-    });
+    }, { partitionKey: req.params.id });
 
     if (result.statusCode !== 201) {
       return res.status(result.statusCode).json({
@@ -2565,7 +2655,7 @@ export const updateQuestion = async (req, res, next) => {
       }
 
       return { statusCode: 200, updatedQuestion };
-    });
+    }, { partitionKey: req.params.formId });
 
     if (result.statusCode !== 200) {
       const payload = {
@@ -2660,7 +2750,7 @@ export const deleteQuestion = async (req, res, next) => {
       await Question.deleteOne({ _id: question._id }, { session });
 
       return { statusCode: 200 };
-    });
+    }, { partitionKey: req.params.formId });
 
     if (result.statusCode !== 200) {
       return res.status(result.statusCode).json({
@@ -2869,7 +2959,7 @@ export const reorderQuestions = async (req, res, next) => {
 
       await Question.bulkWrite(bulkOps, { session, ordered: true });
       return { statusCode: 200 };
-    });
+    }, { partitionKey: req.params.formId });
 
     if (result.statusCode !== 200) {
       const payload = {

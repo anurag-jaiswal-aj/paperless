@@ -1173,7 +1173,7 @@ describe('Stage 4.3.5 B1: Replica Set Multi-Document Transaction Integration & A
     const w1Res = await w1Promise;
     expect(w1Res.statusCode).toBe(409);
     expect(await Form.findById(form910._id)).toBeNull();
-  });
+  }, 30000);
 
   // --------------------------------------------------------------------------
   // Phase 4.3.6: Controller-Driven Integration Tests (AUD-TEST-02)

@@ -17,11 +17,16 @@ import { cleanupRequestTempFiles } from '../utils/fileCleanup.js';
 import { escapeHtml } from '../utils/helpers.js';
 import { logger } from '../utils/logger.js';
 import { withRequiredTransaction } from '../utils/dbTransaction.js';
+import { trackMutationOperation } from '../middleware/quiescenceGate.js';
 import { classifyStorageKey, trackDeletionTask } from './formController.js';
 import {
   SubmissionReservationManager,
   HEARTBEAT_INTERVAL_MS
 } from '../utils/submissionReservationManager.js';
+import StorageJournal, {
+  STORAGE_JOURNAL_STATUS,
+  STORAGE_OPERATION_TYPE
+} from '../models/storageJournal.js';
 
 const verifyCommittedIdempotentResponse = async (existingResponse) => {
   if (!existingResponse || existingResponse.commitStatus === 'pending') {
@@ -509,9 +514,13 @@ export const submitResponse = async (req, res, next) => {
     }
 
     // Acquire durable, independently tracked submission reservation
-    const reservationResult = await SubmissionReservationManager.acquire(req.params.formId, {
-      submittedBy: req.ip || 'anonymous'
-    });
+    const reservationResult = await trackMutationOperation(
+      () =>
+        SubmissionReservationManager.acquire(req.params.formId, {
+          submittedBy: req.ip || 'anonymous'
+        }),
+      { req }
+    );
 
     if (!reservationResult.success) {
       return res.status(reservationResult.statusCode || 409).json({
@@ -558,7 +567,8 @@ export const submitResponse = async (req, res, next) => {
     // Upload files and persist response atomically
     let response;
     try {
-      const stagedFiles = [];
+      response = await trackMutationOperation(async () => {
+        const stagedFiles = [];
       for (const item of filesToUpload) {
         if (uploadAbortController.signal.aborted) {
           const abortErr = new Error('Form is currently being deleted');
@@ -583,6 +593,8 @@ export const submitResponse = async (req, res, next) => {
           throw conflictErr;
         }
         await storageService.uploadFile(fileStream, stagingKey, item.canonicalMime, {
+          formId: form._id,
+          reservationLeaseId: leaseId,
           abortSignal: uploadAbortController.signal
         });
 
@@ -626,6 +638,8 @@ export const submitResponse = async (req, res, next) => {
         uploadedKeys.push(staged.finalKey);
 
         await storageService.copyFile(staged.stagingKey, staged.finalKey, {
+          formId: form._id,
+          reservationLeaseId: leaseId,
           contentType: staged.item.canonicalMime,
           abortSignal: uploadAbortController.signal
         });
@@ -752,11 +766,28 @@ export const submitResponse = async (req, res, next) => {
           throw conflictErr;
         }
 
-        return created;
-      });
+        // Step 5: Atomically transition promoted files to COMMITTED inside replica-set transaction session
+        if (stagedFiles.length > 0) {
+          const promotedFinalKeys = stagedFiles.map((s) => s.finalKey);
+          await StorageJournal.updateMany(
+            {
+              destinationKey: { $in: promotedFinalKeys },
+              type: STORAGE_OPERATION_TYPE.COPY_OBJECT,
+              status: STORAGE_JOURNAL_STATUS.CONFIRMED
+            },
+            {
+              $set: {
+                status: STORAGE_JOURNAL_STATUS.COMMITTED,
+                responseId: created._id,
+                updatedAt: txNow
+              }
+            },
+            { session }
+          );
+        }
 
-      persistenceCommitted = true;
-      hasSubmissionReservation = false;
+        return created;
+      }, { partitionKey: String(req.params.formId) });
 
       // Durable post-commit staging cleanup: tracked task with CAS leasing
       if (stagedFiles.length > 0) {
@@ -772,6 +803,12 @@ export const submitResponse = async (req, res, next) => {
           });
         }
       }
+
+      return response;
+    }, { req });
+
+    persistenceCommitted = true;
+    hasSubmissionReservation = false;
     } catch (uploadOrDbError) {
       if (heartbeatTimer) {
         clearInterval(heartbeatTimer);
@@ -781,11 +818,15 @@ export const submitResponse = async (req, res, next) => {
       // Rollback S3 uploads & reservation ONLY if persistence did not commit
       if (!persistenceCommitted && hasSubmissionReservation) {
         hasSubmissionReservation = false;
-        await SubmissionReservationManager.release(
-          leaseId,
-          fenceToken,
-          uploadedKeys,
-          targetFormId
+        await trackMutationOperation(
+          () =>
+            SubmissionReservationManager.release(
+              leaseId,
+              fenceToken,
+              uploadedKeys,
+              targetFormId
+            ),
+          { req }
         ).catch(() => {});
       }
 
@@ -878,12 +919,18 @@ export const submitResponse = async (req, res, next) => {
       heartbeatTimer = null;
     }
     if (hasSubmissionReservation && !persistenceCommitted) {
-      await SubmissionReservationManager.release(
+      const releasePromise = SubmissionReservationManager.release(
         leaseId,
         fenceToken,
         uploadedKeys,
         targetFormId
       ).catch(() => {});
+
+      const track = req?.trackMutationOperation || trackMutationOperation;
+      if (typeof track === 'function') {
+        track(releasePromise, { req, operationType: 'storage', description: 'reservation_release_cleanup' });
+      }
+      await releasePromise;
     }
     // Clean up temporary files from disk
     cleanupRequestTempFiles(req);
@@ -1049,29 +1096,43 @@ export const getAnalytics = async (req, res, next) => {
 
     // Parallel bounded aggregations avoiding any unbounded values: { $push: '$answers.value' }
     const [totalAnswersAgg, choiceAgg, numberAgg, ratingAgg] = await Promise.all([
-      // 1. Total answer count per question (zero answer values retrieved, filters null/empty values)
+      // 1. Total answer count per question (pre-filtered in-memory on answers array before unwind)
       Response.aggregate([
         { $match: matchCriteria },
-        { $unwind: '$answers' },
         {
-          $match: {
-            'answers.questionId': { $ne: null },
-            'answers.value': { $exists: true, $ne: null },
-            $expr: {
-              $and: [
-                { $ne: ['$answers.value', ''] },
-                { $ne: ['$answers.value', []] },
-                {
+          $project: {
+            _id: 0,
+            answers: {
+              $filter: {
+                input: {
                   $cond: {
-                    if: { $eq: [{ $type: '$answers.value' }, 'string'] },
-                    then: { $gt: [{ $strLenCP: { $trim: { input: '$answers.value' } } }, 0] },
-                    else: true
+                    if: { $isArray: '$answers' },
+                    then: '$answers',
+                    else: []
                   }
+                },
+                as: 'ans',
+                cond: {
+                  $and: [
+                    { $ne: ['$$ans.questionId', null] },
+                    { $ne: [{ $type: '$$ans.value' }, 'missing'] },
+                    { $ne: ['$$ans.value', null] },
+                    { $ne: ['$$ans.value', ''] },
+                    { $ne: ['$$ans.value', []] },
+                    {
+                      $cond: {
+                        if: { $eq: [{ $type: '$$ans.value' }, 'string'] },
+                        then: { $gt: [{ $strLenCP: { $trim: { input: '$$ans.value' } } }, 0] },
+                        else: true
+                      }
+                    }
+                  ]
                 }
-              ]
+              }
             }
           }
         },
+        { $unwind: '$answers' },
         {
           $group: {
             _id: '$answers.questionId',
@@ -1081,72 +1142,93 @@ export const getAnalytics = async (req, res, next) => {
       ]),
       // 2. Top-N Option frequency counts for choice/checkbox questions directly inside MongoDB
       choiceQuestionIds.length > 0
-        ? Response.aggregate([
-            {
-              $match: {
-                ...matchCriteria,
-                'answers.questionId': { $in: choiceQuestionIds }
-              }
-            },
-            { $unwind: '$answers' },
-            {
-              $match: {
-                'answers.questionId': { $in: choiceQuestionIds },
-                'answers.value': { $exists: true, $ne: null }
-              }
-            },
-            {
-              $project: {
-                questionId: '$answers.questionId',
-                value: {
-                  $cond: {
-                    if: { $isArray: '$answers.value' },
-                    then: '$answers.value',
-                    else: ['$answers.value']
+        ? Response.aggregate(
+            [
+              {
+                $match: {
+                  ...matchCriteria,
+                  'answers.questionId': { $in: choiceQuestionIds }
+                }
+              },
+              {
+                $project: {
+                  _id: 0,
+                  answers: {
+                    $filter: {
+                      input: {
+                        $cond: {
+                          if: { $isArray: '$answers' },
+                          then: '$answers',
+                          else: []
+                        }
+                      },
+                      as: 'ans',
+                      cond: {
+                        $and: [
+                          { $in: ['$$ans.questionId', choiceQuestionIds] },
+                          { $ne: [{ $type: '$$ans.value' }, 'missing'] },
+                          { $ne: ['$$ans.value', null] }
+                        ]
+                      }
+                    }
                   }
                 }
-              }
-            },
-            { $unwind: '$value' },
-            {
-              $match: {
-                $expr: {
-                  $and: [
-                    { $in: [{ $type: '$value' }, ['string', 'int', 'long', 'double', 'decimal']] },
-                    { $ne: [{ $trim: { input: { $toString: '$value' } } }, ''] }
-                  ]
+              },
+              { $unwind: '$answers' },
+              {
+                $project: {
+                  questionId: '$answers.questionId',
+                  value: {
+                    $cond: {
+                      if: { $isArray: '$answers.value' },
+                      then: '$answers.value',
+                      else: ['$answers.value']
+                    }
+                  }
                 }
-              }
-            },
-            // Stage 1: Group by questionId and exact trimmed option string
-            {
-              $group: {
-                _id: {
-                  questionId: '$questionId',
-                  option: { $trim: { input: { $toString: '$value' } } }
-                },
-                count: { $sum: 1 }
-              }
-            },
-            // Stage 2: Rank top 20 candidates per question directly inside MongoDB
-            {
-              $group: {
-                _id: '$_id.questionId',
-                totalSelections: { $sum: '$count' },
-                totalCategories: { $sum: 1 },
-                topOptions: {
-                  $topN: {
-                    n: 20,
-                    sortBy: { count: -1, option: 1 },
-                    output: {
-                      option: '$_id.option',
-                      count: '$count'
+              },
+              { $unwind: '$value' },
+              {
+                $match: {
+                  $expr: {
+                    $and: [
+                      { $in: [{ $type: '$value' }, ['string', 'int', 'long', 'double', 'decimal']] },
+                      { $ne: [{ $trim: { input: { $toString: '$value' } } }, ''] }
+                    ]
+                  }
+                }
+              },
+              // Stage 1: Group by questionId and exact trimmed option string
+              {
+                $group: {
+                  _id: {
+                    questionId: '$questionId',
+                    option: { $trim: { input: { $toString: '$value' } } }
+                  },
+                  count: { $sum: 1 }
+                }
+              },
+              // Stage 2: Rank top 20 candidates per question directly inside MongoDB
+              {
+                $group: {
+                  _id: '$_id.questionId',
+                  totalSelections: { $sum: '$count' },
+                  totalCategories: { $sum: 1 },
+                  topOptions: {
+                    $topN: {
+                      n: 20,
+                      sortBy: { count: -1, '_id.option': 1 },
+                      output: {
+                        option: '$_id.option',
+                        count: '$count'
+                      }
                     }
                   }
                 }
               }
-            }
-          ])
+            ],
+            { allowDiskUse: true }
+          )
         : [],
       // 3. Numeric min, max, sum, and count (computed entirely within database)
       numberQuestionIds.length > 0
@@ -1157,13 +1239,31 @@ export const getAnalytics = async (req, res, next) => {
                 'answers.questionId': { $in: numberQuestionIds }
               }
             },
-            { $unwind: '$answers' },
             {
-              $match: {
-                'answers.questionId': { $in: numberQuestionIds },
-                'answers.value': { $exists: true, $ne: null }
+              $project: {
+                _id: 0,
+                answers: {
+                  $filter: {
+                    input: {
+                      $cond: {
+                        if: { $isArray: '$answers' },
+                        then: '$answers',
+                        else: []
+                      }
+                    },
+                    as: 'ans',
+                    cond: {
+                      $and: [
+                        { $in: ['$$ans.questionId', numberQuestionIds] },
+                        { $ne: [{ $type: '$$ans.value' }, 'missing'] },
+                        { $ne: ['$$ans.value', null] }
+                      ]
+                    }
+                  }
+                }
               }
             },
+            { $unwind: '$answers' },
             {
               $project: {
                 questionId: '$answers.questionId',
@@ -1206,13 +1306,31 @@ export const getAnalytics = async (req, res, next) => {
                 'answers.questionId': { $in: ratingQuestionIds }
               }
             },
-            { $unwind: '$answers' },
             {
-              $match: {
-                'answers.questionId': { $in: ratingQuestionIds },
-                'answers.value': { $exists: true, $ne: null }
+              $project: {
+                _id: 0,
+                answers: {
+                  $filter: {
+                    input: {
+                      $cond: {
+                        if: { $isArray: '$answers' },
+                        then: '$answers',
+                        else: []
+                      }
+                    },
+                    as: 'ans',
+                    cond: {
+                      $and: [
+                        { $in: ['$$ans.questionId', ratingQuestionIds] },
+                        { $ne: [{ $type: '$$ans.value' }, 'missing'] },
+                        { $ne: ['$$ans.value', null] }
+                      ]
+                    }
+                  }
+                }
               }
             },
+            { $unwind: '$answers' },
             {
               $project: {
                 questionId: '$answers.questionId',
@@ -1604,83 +1722,83 @@ export const exportResponses = async (req, res, next) => {
       }
     }
 
-    if (format === 'csv') {
-      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-      res.setHeader(
-        'Content-Disposition',
-        `attachment; filename="responses-${req.params.formId}.csv"`
-      );
-      res.setHeader('X-Content-Type-Options', 'nosniff');
+    let cursor = null;
+    let clientAborted = false;
 
-      const headers = ['Timestamp', ...questions.map((q) => q.label)];
-      const headerLine = headers.map((h) => escapeCsvCell(sanitizeCsvCell(h))).join(',');
-
-      let cursor = null;
-      let clientAborted = false;
-
-      const safeDestroyCursor = () => {
-        if (cursor && !cursor.destroyed) {
-          try {
-            const destroyResult = cursor.destroy();
-            if (destroyResult && typeof destroyResult.catch === 'function') {
-              destroyResult.catch((err) => {
-                logger.error('export.cursor_destroy_failed', err, {
-                  formId: req.params.formId
-                });
+    const safeDestroyCursor = () => {
+      if (cursor && !cursor.destroyed) {
+        try {
+          const destroyResult = cursor.destroy();
+          if (destroyResult && typeof destroyResult.catch === 'function') {
+            destroyResult.catch((err) => {
+              logger.error('export.cursor_destroy_failed', err, {
+                formId: req.params.formId
               });
-            }
-          } catch (destroyError) {
-            logger.error('export.cursor_destroy_failed', destroyError, {
-              formId: req.params.formId
             });
           }
+        } catch (destroyError) {
+          logger.error('export.cursor_destroy_failed', destroyError, {
+            formId: req.params.formId
+          });
         }
-      };
+      }
+    };
 
-      const handleClientDisconnect = () => {
-        if (!res.writableEnded) {
-          clientAborted = true;
-          safeDestroyCursor();
-        }
-      };
+    const handleClientDisconnect = () => {
+      if (!res.writableEnded) {
+        clientAborted = true;
+        safeDestroyCursor();
+      }
+    };
 
-      res.on('close', handleClientDisconnect);
+    res.on('close', handleClientDisconnect);
 
-      const writeChunk = (chunk) => {
-        if (clientAborted || res.destroyed || res.writableEnded) {
-          return Promise.resolve(false);
-        }
-        if (res.write(chunk)) {
-          return Promise.resolve(true);
-        }
-        if (clientAborted || res.destroyed || res.writableEnded) {
-          return Promise.resolve(false);
-        }
-        return new Promise((resolve, reject) => {
-          const cleanupListeners = () => {
-            res.off('drain', onDrain);
-            res.off('close', onClose);
-            res.off('error', onError);
-          };
-          const onDrain = () => {
-            cleanupListeners();
-            resolve(true);
-          };
-          const onClose = () => {
-            cleanupListeners();
-            resolve(false);
-          };
-          const onError = (err) => {
-            cleanupListeners();
-            reject(err);
-          };
-          res.once('drain', onDrain);
-          res.once('close', onClose);
-          res.once('error', onError);
-        });
-      };
+    const writeChunk = (chunk) => {
+      if (clientAborted || res.destroyed || res.writableEnded) {
+        return Promise.resolve(false);
+      }
+      if (res.write(chunk)) {
+        return Promise.resolve(true);
+      }
+      if (clientAborted || res.destroyed || res.writableEnded) {
+        return Promise.resolve(false);
+      }
+      return new Promise((resolve, reject) => {
+        const cleanupListeners = () => {
+          res.off('drain', onDrain);
+          res.off('close', onClose);
+          res.off('error', onError);
+        };
+        const onDrain = () => {
+          cleanupListeners();
+          resolve(true);
+        };
+        const onClose = () => {
+          cleanupListeners();
+          resolve(false);
+        };
+        const onError = (err) => {
+          cleanupListeners();
+          reject(err);
+        };
+        res.once('drain', onDrain);
+        res.once('close', onClose);
+        res.once('error', onError);
+      });
+    };
 
-      try {
+    try {
+      if (format === 'csv') {
+        res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+        res.setHeader(
+          'Content-Disposition',
+          `attachment; filename="responses-${req.params.formId}.csv"`
+        );
+        res.setHeader('X-Content-Type-Options', 'nosniff');
+
+        const headers = ['Timestamp', ...questions.map((q) => q.label)];
+        const headerLine = headers.map((h) => escapeCsvCell(sanitizeCsvCell(h))).join(',');
+
         const headerWritten = await writeChunk(headerLine);
         if (!headerWritten || clientAborted) {
           return;
@@ -1736,57 +1854,114 @@ export const exportResponses = async (req, res, next) => {
             formId: req.params.formId
           });
         }
-      } catch (streamError) {
-        if (!res.headersSent) {
-          return next(streamError);
-        }
-        const isClientAbort =
-          clientAborted ||
-          res.destroyed ||
-          res.writableEnded ||
-          streamError.message?.includes('closed cursor') ||
-          streamError.name === 'MongoExpiredSessionError';
-        if (isClientAbort) {
-          logger.info('export.csv_streaming_aborted_by_client', {
-            formId: req.params.formId
-          });
-        } else {
-          logger.error('export.csv_streaming_failed', streamError, {
-            formId: req.params.formId
-          });
-        }
-        if (!res.destroyed && typeof res.destroy === 'function') {
-          res.destroy(streamError);
-        }
-      } finally {
-        res.off('close', handleClientDisconnect);
-        safeDestroyCursor();
-      }
-    } else {
-      // Return JSON
-      const responses = await Response.find(query).sort({ createdAt: 1, _id: 1 }).lean();
-      const exportData = {
-        form: {
-          id: form._id,
-          title: form.title,
-          description: form.description
-        },
-        questions: questions.map((q) => ({
-          id: q._id,
-          label: q.label,
-          type: q.type
-        })),
-        responses: responses.map((r) => ({
-          id: r._id,
-          submittedAt: r.createdAt,
-          answers: r.answers
-        }))
-      };
+      } else {
+        // Return JSON streaming (PERF-01)
+        res.setHeader('Content-Type', 'application/json; charset=utf-8');
+        res.setHeader(
+          'Content-Disposition',
+          `attachment; filename="responses-${req.params.formId}.json"`
+        );
+        res.setHeader('X-Content-Type-Options', 'nosniff');
 
-      res.status(200).json({
-        success: true,
-        data: exportData
-      });
+        const prefix =
+          '{"success":true,"data":{"form":' +
+          JSON.stringify({
+            id: form._id,
+            title: form.title,
+            description: form.description
+          }) +
+          ',"questions":' +
+          JSON.stringify(
+            questions.map((q) => ({
+              id: q._id,
+              label: q.label,
+              type: q.type
+            }))
+          ) +
+          ',"responses":[';
+
+        const prefixWritten = await writeChunk(prefix);
+        if (!prefixWritten || clientAborted) {
+          return;
+        }
+
+        cursor = Response.find(query)
+          .sort({ createdAt: 1, _id: 1 })
+          .lean()
+          .cursor({ batchSize: 500 });
+
+        if (cursor && typeof cursor.on === 'function') {
+          cursor.on('error', (cursorErr) => {
+            logger.debug(`[ResponseController] JSON cursor error: ${cursorErr.message}`);
+          });
+        }
+
+        let isFirst = true;
+        for await (const response of cursor) {
+          if (clientAborted || res.destroyed || res.writableEnded) {
+            break;
+          }
+
+          const responseItem = {
+            id: response._id,
+            submittedAt: response.createdAt,
+            answers: response.answers
+          };
+
+          const chunk = (isFirst ? '' : ',') + JSON.stringify(responseItem);
+          isFirst = false;
+
+          const chunkWritten = await writeChunk(chunk);
+          if (!chunkWritten) {
+            break;
+          }
+        }
+
+        if (!clientAborted && !res.writableEnded && !res.destroyed) {
+          await writeChunk(']}}');
+          res.end();
+        } else if (clientAborted) {
+          logger.info('export.json_streaming_aborted_by_client', {
+            formId: req.params.formId
+          });
+        }
+      }
+    } catch (streamError) {
+      if (!res.headersSent) {
+        return next(streamError);
+      }
+      const isClientAbort =
+        clientAborted ||
+        res.destroyed ||
+        res.writableEnded ||
+        streamError.message?.includes('closed cursor') ||
+        streamError.name === 'MongoExpiredSessionError';
+      if (isClientAbort) {
+        logger.info(
+          format === 'csv'
+            ? 'export.csv_streaming_aborted_by_client'
+            : 'export.json_streaming_aborted_by_client',
+          {
+            formId: req.params.formId
+          }
+        );
+      } else {
+        logger.error(
+          format === 'csv'
+            ? 'export.csv_streaming_failed'
+            : 'export.json_streaming_failed',
+          streamError,
+          {
+            formId: req.params.formId
+          }
+        );
+      }
+      if (!res.destroyed && typeof res.destroy === 'function') {
+        res.destroy(streamError);
+      }
+    } finally {
+      res.off('close', handleClientDisconnect);
+      safeDestroyCursor();
     }
   } catch (error) {
     next(error);
@@ -1842,8 +2017,52 @@ export const deleteResponse = async (req, res, next) => {
         return { statusCode: 404, message: 'Response not found' };
       }
 
-      return { statusCode: 200, deletedResponse };
-    });
+      // Filter Category A safe storage keys
+      const answers = Array.isArray(deletedResponse.answers) ? deletedResponse.answers : [];
+      const keysToDelete = [];
+      for (const answer of answers) {
+        if (answer?.value?.key) {
+          const classification = classifyStorageKey(answer.value.key, req.params.formId);
+          if (classification.category === 'A') {
+            keysToDelete.push(classification.key);
+          } else {
+            logger.warn('storage.response_file_delete_skipped_unsafe_key', {
+              key: answer.value.key,
+              category: classification.category,
+              reason: classification.reason,
+              responseId: deletedResponse._id
+            });
+          }
+        }
+      }
+
+      // Persist durable StorageJournal deletion intents inside transaction session
+      const pendingDeleteOps = [];
+      if (keysToDelete.length > 0) {
+        const journalEntries = keysToDelete.map((key) => {
+          const operationId = crypto.randomUUID();
+          pendingDeleteOps.push({ operationId, key });
+          return {
+            operationId,
+            type: STORAGE_OPERATION_TYPE.DELETE_OBJECT,
+            bucket: process.env.S3_BUCKET || 'paperless',
+            destinationKey: key,
+            sourceKey: null,
+            formId: req.params.formId,
+            responseId: deletedResponse._id,
+            status: STORAGE_JOURNAL_STATUS.PENDING,
+            quarantinedUntil: null,
+            vacuumAt: null,
+            createdAt: now,
+            updatedAt: now
+          };
+        });
+
+        await StorageJournal.create(journalEntries, { session });
+      }
+
+      return { statusCode: 200, deletedResponse, pendingDeleteOps };
+    }, { partitionKey: String(req.params.formId) });
 
     if (txResult.statusCode !== 200) {
       return res.status(txResult.statusCode).json({
@@ -1852,31 +2071,20 @@ export const deleteResponse = async (req, res, next) => {
       });
     }
 
-    // Outside transaction: delete confirmed Category A S3 keys attached to deleted response
-    const answers = Array.isArray(txResult.deletedResponse.answers)
-      ? txResult.deletedResponse.answers
-      : [];
-    for (const answer of answers) {
-      if (answer?.value?.key) {
-        const classification = classifyStorageKey(answer.value.key, req.params.formId);
-        if (classification.category !== 'A') {
-          logger.warn('storage.response_file_delete_skipped_unsafe_key', {
-            key: answer.value.key,
-            category: classification.category,
-            reason: classification.reason,
-            responseId: txResult.deletedResponse._id
-          });
-          continue;
-        }
-        try {
-          await storageService.deleteFile(classification.key);
-        } catch (err) {
-          logger.warn('storage.response_file_delete_failed', err, {
-            key: classification.key,
-            responseId: txResult.deletedResponse._id
-          });
-          // Continue deleting response record even if S3 file deletion fails transiently
-        }
+    // Outside transaction: dispatch remote S3 file deletions
+    const pendingDeleteOps = txResult.pendingDeleteOps || [];
+    for (const op of pendingDeleteOps) {
+      try {
+        await storageService.deleteFile(op.key, {
+          operationId: op.operationId,
+          formId: req.params.formId
+        });
+      } catch (err) {
+        logger.warn('storage.response_file_delete_failed', err, {
+          key: op.key,
+          operationId: op.operationId,
+          responseId: txResult.deletedResponse._id
+        });
       }
     }
 

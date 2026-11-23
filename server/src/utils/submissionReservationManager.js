@@ -5,6 +5,10 @@ import SubmissionReservation from '../models/submissionReservation.js';
 import storageService from '../services/StorageService.js';
 import { logger } from './logger.js';
 import { withRequiredTransaction } from './dbTransaction.js';
+import {
+  registerWorkerTask,
+  shouldPauseWorker
+} from '../services/workerCoordinationService.js';
 
 export const SUBMISSION_LEASE_TTL_MS = 30000;
 export const HEARTBEAT_INTERVAL_MS = 10000;
@@ -129,7 +133,7 @@ export class SubmissionReservationManager {
         expiresAt,
         form: updatedForm
       };
-    });
+    }, { partitionKey: String(formId) });
   }
 
   /**
@@ -193,7 +197,7 @@ export class SubmissionReservationManager {
       }
 
       return true;
-    });
+    }, { partitionKey: String(formId || leaseId) });
   }
 
   /**
@@ -553,7 +557,7 @@ export class SubmissionReservationManager {
    * @param {string[]} [keysToPurge=[]]
    * @param {string|mongoose.Types.ObjectId} [formId]
    */
-  static async release(leaseId, fenceToken, keysToPurge = [], formId = null) {
+  static async release(leaseId, fenceToken, keysToPurge = [], formId = null, options = {}) {
     const now = new Date();
     const allKeysToPurge = new Set(Array.isArray(keysToPurge) ? keysToPurge : []);
 
@@ -650,9 +654,10 @@ export class SubmissionReservationManager {
     // SOURCE INVALIDATION BARRIER: Deleting staging keys prevents any future S3 CopyObject from starting.
     // NEVER delete canonical keys immediately in release(), because an S3 CopyObject may still be in flight!
     const failedStaging = [];
+    const deleteOptions = options?.signal ? { signal: options.signal } : {};
     for (const key of stagingKeysToPurge) {
       try {
-        await storageService.deleteFile(key);
+        await storageService.deleteFile(key, deleteOptions);
       } catch (err) {
         logger.warn('storage.reservation_release_s3_failed', { key, error: err.message });
         failedStaging.push(key);
@@ -776,28 +781,29 @@ export class SubmissionReservationManager {
    * @returns {Promise<{ sweptExpired: number, purgedAbandoned: number, failedKeysCount: number }>}
    */
   static async sweepAbandonedReservations(options = {}) {
-    const { batchSize = 50, graceMs = 5000, signal } = options;
-    const quarantineMs =
-      options.quarantineMs !== undefined ? options.quarantineMs : PROMOTION_QUARANTINE_MS;
-    const summary = { sweptExpired: 0, purgedAbandoned: 0, failedKeysCount: 0 };
+    return registerWorkerTask('sweepAbandonedReservations', async () => {
+      const { batchSize = 50, graceMs = 5000, signal } = options;
+      const quarantineMs =
+        options.quarantineMs !== undefined ? options.quarantineMs : PROMOTION_QUARANTINE_MS;
+      const summary = { sweptExpired: 0, purgedAbandoned: 0, failedKeysCount: 0 };
 
-    if (signal?.aborted) {
-      return summary;
-    }
+      if (signal?.aborted || (await shouldPauseWorker())) {
+        return summary;
+      }
 
-    const now = new Date();
-    const staleCutoff = new Date(now.getTime() - graceMs);
+      const now = new Date();
+      const staleCutoff = new Date(now.getTime() - graceMs);
 
-    // 1. Transition expired active/committing reservations on non-deleting forms to abandoned
-    const expiredDocs = await SubmissionReservation.find({
-      status: { $in: ['active', 'committing'] },
-      expiresAt: { $lte: staleCutoff }
-    })
-      .limit(batchSize)
-      .lean();
+      // 1. Transition expired active/committing reservations on non-deleting forms to abandoned
+      const expiredDocs = await SubmissionReservation.find({
+        status: { $in: ['active', 'committing'] },
+        expiresAt: { $lte: staleCutoff }
+      })
+        .limit(batchSize)
+        .lean();
 
-    for (const doc of expiredDocs) {
-      if (signal?.aborted) break;
+      for (const doc of expiredDocs) {
+        if (signal?.aborted || (await shouldPauseWorker())) break;
       try {
         const form = await Form.findById(doc.formId)
           .select('status deletionProgress.leaseExpiresAt')
@@ -844,6 +850,10 @@ export class SubmissionReservationManager {
       }
     }
 
+    if (signal?.aborted || (await shouldPauseWorker())) {
+      return summary;
+    }
+
     // 2. Clean up abandoned reservations with durable quarantine and affirmative canonical sweeps
     const abandonedDocs = await SubmissionReservation.find({
       status: 'abandoned',
@@ -854,7 +864,7 @@ export class SubmissionReservationManager {
       .lean();
 
     for (const doc of abandonedDocs) {
-      if (signal?.aborted) break;
+      if (signal?.aborted || (await shouldPauseWorker())) break;
       try {
         let promotedKeys = Array.isArray(doc.promotedKeys) ? doc.promotedKeys : [];
 
@@ -1168,6 +1178,7 @@ export class SubmissionReservationManager {
     }
 
     return summary;
+    });
   }
 
   /**
@@ -1183,12 +1194,15 @@ export class SubmissionReservationManager {
    * @returns {Promise<{ success: boolean, completed: boolean, purgedCount?: number, failedKeysCount?: number }>}
    */
   static async performStagingCleanup(leaseId, formId = null, options = {}) {
-    const { signal, leaseTtlMs = 30000 } = options;
-    if (signal?.aborted) {
-      return { success: false, completed: false, reason: 'aborted' };
-    }
+    return registerWorkerTask(
+      'performStagingCleanup',
+      async () => {
+        const { signal, leaseTtlMs = 30000 } = options;
+        if (signal?.aborted || (await shouldPauseWorker())) {
+          return { success: false, completed: false, reason: 'quiesced' };
+        }
 
-    const now = new Date();
+        const now = new Date();
     const leaseExpiresAt = new Date(now.getTime() + leaseTtlMs);
     const workerLeaseToken = crypto.randomUUID();
 
@@ -1259,7 +1273,7 @@ export class SubmissionReservationManager {
     let lastError = null;
 
     for (const key of keysToPurge) {
-      if (signal?.aborted) {
+      if (signal?.aborted || (await shouldPauseWorker())) {
         failedKeys.push(key);
         continue;
       }
@@ -1350,7 +1364,13 @@ export class SubmissionReservationManager {
         failedKeysCount: failedKeys.length
       };
     }
+  },
+  {
+    fallbackResult: { success: false, completed: false, reason: 'quiesced' },
+    signal: options.signal
   }
+);
+}
 
   /**
    * Alias for performStagingCleanup.
@@ -1368,14 +1388,15 @@ export class SubmissionReservationManager {
    * @returns {Promise<{ completedCount: number, purgedCount: number, failedCount: number }>}
    */
   static async sweepFinalizedStagingCleanups(options = {}) {
-    const { batchSize = 50, signal } = options;
-    const summary = { completedCount: 0, purgedCount: 0, failedCount: 0 };
+    return registerWorkerTask('sweepFinalizedStagingCleanups', async () => {
+      const { batchSize = 50, signal } = options;
+      const summary = { completedCount: 0, purgedCount: 0, failedCount: 0 };
 
-    if (signal?.aborted) {
-      return summary;
-    }
+      if (signal?.aborted || (await shouldPauseWorker())) {
+        return summary;
+      }
 
-    const now = new Date();
+      const now = new Date();
     const pendingJobs = await SubmissionReservation.find({
       status: 'finalized',
       stagingCleanupStatus: { $in: ['pending', 'cleaning', 'failed'] },
@@ -1385,7 +1406,7 @@ export class SubmissionReservationManager {
       .lean();
 
     for (const job of pendingJobs) {
-      if (signal?.aborted) break;
+      if (signal?.aborted || (await shouldPauseWorker())) break;
       try {
         const res = await this.performStagingCleanup(job.leaseId, job.formId, { signal });
         if (res.completed) {
@@ -1404,6 +1425,7 @@ export class SubmissionReservationManager {
     }
 
     return summary;
+    });
   }
 
   /**

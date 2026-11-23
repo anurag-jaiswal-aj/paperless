@@ -6,7 +6,10 @@ import {
   GetObjectCommand,
   HeadBucketCommand,
   ListObjectsV2Command,
-  CopyObjectCommand
+  CopyObjectCommand,
+  HeadObjectCommand,
+  ListMultipartUploadsCommand,
+  AbortMultipartUploadCommand
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { Readable } from 'stream';
@@ -73,12 +76,14 @@ class S3StorageProvider {
     const isProductionOrStaging = env === 'production' || env === 'staging';
 
     if (hasCredentials) {
+      const maxAttempts = parseInt(process.env.S3_MAX_ATTEMPTS, 10) || 1;
       this.client = new S3Client({
         region: this.region,
         credentials: {
           accessKeyId: this.accessKeyId,
           secretAccessKey: this.secretAccessKey
         },
+        maxAttempts,
         ...(this.endpoint ? { endpoint: this.endpoint, forcePathStyle: true } : {})
       });
       this.isMock = false;
@@ -102,6 +107,20 @@ class S3StorageProvider {
     }
   }
 
+  /**
+   * Upload a file buffer to S3 storage with bounded acquisition timeout and metadata tracking.
+   *
+   * @param {Buffer|Readable} fileBuffer - File buffer or stream
+   * @param {string} path - S3 object key
+   * @param {string} mimeType - MIME type
+   * @param {object} [options]
+   * @param {number} [options.timeoutMs]
+   * @param {AbortSignal} [options.abortSignal]
+   * @param {AbortSignal} [options.signal]
+   * @param {Record<string, string>} [options.metadata] - Custom S3 user metadata
+   * @param {boolean} [options.returnMetadata] - Whether to return full metadata object
+   * @returns {Promise<string|{ key: string, etag: string }>}
+   */
   async uploadFile(fileBuffer, path, mimeType, options = {}) {
     if (!this.client) {
       if (this.isMock) {
@@ -109,7 +128,10 @@ class S3StorageProvider {
         if (fileBuffer && typeof fileBuffer.destroy === 'function') {
           fileBuffer.destroy();
         }
-        return `mock-s3-url/${path}`;
+        const mockEtag = '"mock-etag-' + Date.now() + '"';
+        return options.returnMetadata
+          ? { key: path, etag: mockEtag }
+          : `mock-s3-url/${path}`;
       }
       throw this.initError || new Error('S3 storage client is not configured');
     }
@@ -123,15 +145,40 @@ class S3StorageProvider {
         Bucket: this.bucket,
         Key: path,
         Body: fileBuffer,
-        ContentType: mimeType
+        ContentType: mimeType,
+        ...(options.metadata ? { Metadata: options.metadata } : {})
       });
 
-      await this.client.send(command, { abortSignal: signal });
-      // Return key, we don't expose public URLs directly.
-      return path;
+      const response = await this.client.send(command, { abortSignal: signal });
+      return options.returnMetadata
+        ? { key: path, etag: response?.ETag }
+        : path;
     } finally {
       cleanup();
     }
+  }
+
+  /**
+   * Conformance API: uploadBuffer(key, buffer, mimeType, options)
+   * Uploads an in-memory buffer to S3/MinIO. Supports (key, buffer, mimeType) or (buffer, key, mimeType).
+   *
+   * @param {string|Buffer} keyOrBuffer
+   * @param {Buffer|string} bufferOrKey
+   * @param {string} mimeType
+   * @param {object} [options]
+   * @returns {Promise<string|{ key: string, etag: string }>}
+   */
+  async uploadBuffer(keyOrBuffer, bufferOrKey, mimeType, options = {}) {
+    let key;
+    let buffer;
+    if (typeof keyOrBuffer === 'string') {
+      key = keyOrBuffer;
+      buffer = bufferOrKey;
+    } else {
+      buffer = keyOrBuffer;
+      key = bufferOrKey;
+    }
+    return this.uploadFile(buffer, key, mimeType, options);
   }
 
   async deleteFile(path, options = {}) {
@@ -157,6 +204,18 @@ class S3StorageProvider {
     } finally {
       cleanup();
     }
+  }
+
+  /**
+   * Conformance API: deleteObject(key, options)
+   * Deletes a single object from S3/MinIO by key.
+   *
+   * @param {string} key - S3 object key
+   * @param {object} [options]
+   * @returns {Promise<void>}
+   */
+  async deleteObject(key, options = {}) {
+    return this.deleteFile(key, options);
   }
 
   /**
@@ -281,7 +340,6 @@ class S3StorageProvider {
           });
         }
 
-        // Safeguard against unacknowledged keys in the chunk
         for (const key of chunk) {
           if (!chunkDeleted.has(key) && !chunkFailed.has(key)) {
             failedKeys.push({
@@ -313,7 +371,6 @@ class S3StorageProvider {
           });
         }
 
-        // If parent signal was aborted, do not proceed to subsequent chunks
         if (parentSignal?.aborted) {
           const remainingKeys = sanitizedKeys.slice(i + CHUNK_SIZE);
           for (const key of remainingKeys) {
@@ -338,7 +395,7 @@ class S3StorageProvider {
     };
   }
 
-  async getPresignedUrl(path, expiresIn = 3600) {
+  async getPresignedUrl(path, expiresIn = 900) {
     if (!this.client) {
       if (this.isMock) {
         return `http://localhost:5000/mock-download/${path}`;
@@ -388,6 +445,59 @@ class S3StorageProvider {
         contentType: response.ContentType,
         contentLength: response.ContentLength
       };
+    } finally {
+      cleanup();
+    }
+  }
+
+  /**
+   * Retrieves object metadata (contentLength, ETag, metadata) via HeadObject.
+   * Returns null if object does not exist (404 / NotFound).
+   */
+  async headObject(path, options = {}) {
+    if (!this.client) {
+      if (this.isMock) {
+        return {
+          contentLength: 1024,
+          etag: '"mock-etag"',
+          contentType: 'application/octet-stream',
+          lastModified: new Date(),
+          metadata: {}
+        };
+      }
+      throw this.initError || new Error('S3 storage client is not configured');
+    }
+
+    const timeoutMs = options.timeoutMs || S3_DEFAULT_TIMEOUTS.GET_TIMEOUT_MS;
+    const parentSignal = options.abortSignal || options.signal;
+    const { signal, cleanup } = createCancelableTimeoutSignal(timeoutMs, parentSignal);
+
+    try {
+      const command = new HeadObjectCommand({
+        Bucket: this.bucket,
+        Key: path
+      });
+
+      const response = await this.client.send(command, { abortSignal: signal });
+      return {
+        contentLength: response.ContentLength,
+        etag: response.ETag,
+        contentType: response.ContentType,
+        lastModified: response.LastModified,
+        metadata: response.Metadata || {},
+        exists: true
+      };
+    } catch (err) {
+      if (
+        err.name === 'NotFound' ||
+        err.name === 'NoSuchKey' ||
+        err.$metadata?.httpStatusCode === 404 ||
+        err.statusCode === 404 ||
+        err.code === 'NotFound'
+      ) {
+        return null;
+      }
+      throw err;
     } finally {
       cleanup();
     }
@@ -446,6 +556,149 @@ class S3StorageProvider {
   }
 
   /**
+   * Conformance API: listObjects(prefix, continuationToken, maxKeys, options)
+   * Supports both positional arguments and options object.
+   *
+   * @param {string} prefix - S3 key prefix to query
+   * @param {string|object} [continuationToken] - Continuation token or options object
+   * @param {number} [maxKeys] - Max keys per page
+   * @param {object} [options] - Additional options
+   * @returns {Promise<{ keys: string[], isTruncated: boolean, nextContinuationToken?: string, keyCount: number }>}
+   */
+  async listObjects(prefix, continuationToken, maxKeys, options = {}) {
+    let opts = {};
+    if (typeof continuationToken === 'object' && continuationToken !== null) {
+      opts = { ...continuationToken };
+    } else {
+      if (continuationToken) opts.continuationToken = continuationToken;
+      if (maxKeys !== undefined) opts.maxKeys = maxKeys;
+      if (options && typeof options === 'object') Object.assign(opts, options);
+    }
+    return this.listObjectsByPrefix(prefix, opts);
+  }
+
+  /**
+   * Lists in-progress multipart uploads matching an optional prefix.
+   * Conformance API: accepts string prefix or options object:
+   * listMultipartUploads(prefix) or listMultipartUploads(options).
+   *
+   * @param {string|object} [prefixOrOptions] - S3 prefix string or options object
+   * @param {object} [options] - Additional options when prefix string is provided
+   * @returns {Promise<{ uploads: Array<{ key: string, uploadId: string, initiated?: Date }>, isTruncated: boolean, nextKeyMarker?: string, nextUploadIdMarker?: string }>}
+   */
+  async listMultipartUploads(prefixOrOptions = {}, options = {}) {
+    let opts = {};
+    if (typeof prefixOrOptions === 'string') {
+      opts = { prefix: prefixOrOptions, ...options };
+    } else if (prefixOrOptions && typeof prefixOrOptions === 'object') {
+      opts = { ...prefixOrOptions };
+    }
+
+    if (!this.client) {
+      if (this.isMock) {
+        logger.debug('storage.s3_mock_list_multipart_uploads', opts);
+        return { uploads: [], isTruncated: false };
+      }
+      throw this.initError || new Error('S3 storage client is not configured');
+    }
+
+    const timeoutMs = opts.timeoutMs || S3_DEFAULT_TIMEOUTS.GET_TIMEOUT_MS;
+    const parentSignal = opts.abortSignal || opts.signal;
+    const { signal, cleanup } = createCancelableTimeoutSignal(timeoutMs, parentSignal);
+
+    try {
+      const command = new ListMultipartUploadsCommand({
+        Bucket: this.bucket,
+        Prefix: opts.prefix || undefined,
+        MaxUploads: opts.maxUploads || 1000,
+        KeyMarker: opts.keyMarker,
+        UploadIdMarker: opts.uploadIdMarker
+      });
+
+      const response = await this.client.send(command, { abortSignal: signal });
+      let uploads = (response.Uploads || []).map((u) => ({
+        key: u.Key,
+        uploadId: u.UploadId,
+        initiated: u.Initiated
+      }));
+
+      // MinIO Compatibility Workaround:
+      // In some MinIO releases, directory-style prefixes (e.g. 'staging/') in ListMultipartUploads
+      // return 0 results. If a prefix was specified and 0 results returned, query without prefix
+      // and filter client-side.
+      if (opts.prefix && uploads.length === 0) {
+        const fallbackCommand = new ListMultipartUploadsCommand({
+          Bucket: this.bucket,
+          MaxUploads: opts.maxUploads || 1000,
+          KeyMarker: opts.keyMarker,
+          UploadIdMarker: opts.uploadIdMarker
+        });
+        const fallbackRes = await this.client.send(fallbackCommand, { abortSignal: signal });
+        const fallbackUploads = (fallbackRes.Uploads || []).map((u) => ({
+          key: u.Key,
+          uploadId: u.UploadId,
+          initiated: u.Initiated
+        }));
+        uploads = fallbackUploads.filter((u) => u.key && u.key.startsWith(opts.prefix));
+      }
+
+      return {
+        uploads,
+        isTruncated: Boolean(response.IsTruncated),
+        nextKeyMarker: response.NextKeyMarker,
+        nextUploadIdMarker: response.NextUploadIdMarker
+      };
+    } finally {
+      cleanup();
+    }
+  }
+
+  /**
+   * Aborts an in-progress multipart upload, reclaiming allocated storage parts.
+   *
+   * @param {string} key - S3 object key
+   * @param {string} uploadId - Multipart upload identifier
+   * @param {object} [options]
+   * @returns {Promise<boolean>} - True if aborted or not found
+   */
+  async abortMultipartUpload(key, uploadId, options = {}) {
+    if (!this.client) {
+      if (this.isMock) {
+        logger.debug('storage.s3_mock_abort_multipart_upload', { key, uploadId });
+        return true;
+      }
+      throw this.initError || new Error('S3 storage client is not configured');
+    }
+
+    const timeoutMs = options.timeoutMs || S3_DEFAULT_TIMEOUTS.DELETE_TIMEOUT_MS;
+    const parentSignal = options.abortSignal || options.signal;
+    const { signal, cleanup } = createCancelableTimeoutSignal(timeoutMs, parentSignal);
+
+    try {
+      const command = new AbortMultipartUploadCommand({
+        Bucket: this.bucket,
+        Key: key,
+        UploadId: uploadId
+      });
+
+      await this.client.send(command, { abortSignal: signal });
+      return true;
+    } catch (err) {
+      if (
+        err.name === 'NoSuchUpload' ||
+        err.name === 'NotFound' ||
+        err.statusCode === 404 ||
+        err.$metadata?.httpStatusCode === 404
+      ) {
+        return true; // Already aborted or completed
+      }
+      throw err;
+    } finally {
+      cleanup();
+    }
+  }
+
+  /**
    * Copies an S3 object from sourceKey to destinationKey within the configured bucket.
    *
    * @param {string} sourceKey - Source S3 object key
@@ -455,13 +708,17 @@ class S3StorageProvider {
    * @param {number} [options.timeoutMs]
    * @param {AbortSignal} [options.abortSignal]
    * @param {AbortSignal} [options.signal]
-   * @returns {Promise<string>} - Returns the destinationKey
+   * @param {Record<string, string>} [options.metadata]
+   * @param {boolean} [options.returnMetadata]
+   * @returns {Promise<string|{ key: string, etag: string }>} - Returns the destinationKey or metadata
    */
   async copyFile(sourceKey, destinationKey, options = {}) {
     if (!this.client) {
       if (this.isMock) {
         logger.debug('storage.s3_mock_copy_file', { sourceKey, destinationKey });
-        return destinationKey;
+        return options.returnMetadata
+          ? { key: destinationKey, etag: '"mock-etag-copy"' }
+          : destinationKey;
       }
       throw this.initError || new Error('S3 storage client is not configured');
     }
@@ -482,11 +739,14 @@ class S3StorageProvider {
         Bucket: this.bucket,
         CopySource: copySource,
         Key: destinationKey,
-        ...(options.contentType ? { ContentType: options.contentType } : {})
+        ...(options.contentType ? { ContentType: options.contentType } : {}),
+        ...(options.metadata ? { Metadata: options.metadata, MetadataDirective: 'REPLACE' } : {})
       });
 
-      await this.client.send(command, { abortSignal: signal });
-      return destinationKey;
+      const response = await this.client.send(command, { abortSignal: signal });
+      return options.returnMetadata
+        ? { key: destinationKey, etag: response?.CopyObjectResult?.ETag }
+        : destinationKey;
     } finally {
       cleanup();
     }

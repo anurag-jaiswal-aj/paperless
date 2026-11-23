@@ -22,14 +22,19 @@ describe('StorageService and S3StorageProvider', () => {
         'test/path',
         'text/plain'
       );
-      expect(spy).toHaveBeenCalledWith(expect.any(Buffer), 'test/path', 'text/plain');
+      expect(spy).toHaveBeenCalledWith(
+        expect.any(Buffer),
+        'test/path',
+        'text/plain',
+        expect.any(Object)
+      );
       expect(result).toBe('uploaded-key');
     });
 
     it('delegates deleteFile to s3Provider', async () => {
       const spy = vi.spyOn(s3Provider, 'deleteFile').mockResolvedValueOnce();
       await storageService.deleteFile('test/path');
-      expect(spy).toHaveBeenCalledWith('test/path');
+      expect(spy).toHaveBeenCalledWith('test/path', expect.anything());
     });
 
     it('delegates getPresignedUrl to s3Provider', async () => {
@@ -49,7 +54,7 @@ describe('StorageService and S3StorageProvider', () => {
       };
       const spy = vi.spyOn(s3Provider, 'getFileStream').mockResolvedValueOnce(mockResult);
       const result = await storageService.getFileStream('test/path');
-      expect(spy).toHaveBeenCalledWith('test/path');
+      expect(spy).toHaveBeenCalledWith('test/path', expect.anything());
       expect(result).toBe(mockResult);
     });
 
@@ -57,14 +62,18 @@ describe('StorageService and S3StorageProvider', () => {
       const mockResult = { keys: ['test/file1.pdf'], isTruncated: false, keyCount: 1 };
       const spy = vi.spyOn(s3Provider, 'listObjectsByPrefix').mockResolvedValueOnce(mockResult);
       const result = await storageService.listObjectsByPrefix('test/');
-      expect(spy).toHaveBeenCalledWith('test/');
+      expect(spy).toHaveBeenCalledWith('test/', expect.anything());
       expect(result).toBe(mockResult);
     });
 
     it('delegates copyFile to s3Provider', async () => {
       const spy = vi.spyOn(s3Provider, 'copyFile').mockResolvedValueOnce('dest/path.pdf');
       const result = await storageService.copyFile('source/path.pdf', 'dest/path.pdf');
-      expect(spy).toHaveBeenCalledWith('source/path.pdf', 'dest/path.pdf');
+      expect(spy).toHaveBeenCalledWith(
+        'source/path.pdf',
+        'dest/path.pdf',
+        expect.any(Object)
+      );
       expect(result).toBe('dest/path.pdf');
     });
 
@@ -567,7 +576,7 @@ describe('StorageService and S3StorageProvider', () => {
       const spy = vi.spyOn(s3Provider, 'deleteFiles').mockResolvedValueOnce(mockResult);
 
       const res = await storageService.deleteFiles(['k1']);
-      expect(spy).toHaveBeenCalledWith(['k1']);
+      expect(spy).toHaveBeenCalledWith(['k1'], expect.anything());
       expect(res).toBe(mockResult);
     });
   });

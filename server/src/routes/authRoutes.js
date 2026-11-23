@@ -8,6 +8,7 @@ import {
   forgotPassword,
   resetPassword
 } from '../controllers/authController.js';
+import { withMutationScope } from '../middleware/quiescenceGate.js';
 import { protect } from '../middleware/authMiddleware.js';
 
 // Rate Limiting (we'll implement this properly later, but importing express-rate-limit if needed)
@@ -31,17 +32,17 @@ const router = express.Router();
 router.use(authLimiter);
 
 // Public routes
-router.post('/register', register);
+router.post('/register', withMutationScope(register));
 // Progressive login protection is strictly encapsulated inside login controller (scoped exclusively to POST /login)
-router.post('/login', login);
-router.post('/refresh', refreshToken);
-router.post('/logout', logout);
+router.post('/login', withMutationScope(login));
+router.post('/refresh', withMutationScope(refreshToken));
+router.post('/logout', withMutationScope(logout));
 
 // Password reset routes
-router.post('/forgotpassword', passwordLimiter, forgotPassword);
-router.post('/resetpassword', passwordLimiter, resetPassword);
-router.put('/resetpassword', passwordLimiter, resetPassword);
-router.put('/resetpassword/:resettoken', passwordLimiter, resetPassword);
+router.post('/forgotpassword', passwordLimiter, withMutationScope(forgotPassword));
+router.post('/resetpassword', passwordLimiter, withMutationScope(resetPassword));
+router.put('/resetpassword', passwordLimiter, withMutationScope(resetPassword));
+router.put('/resetpassword/:resettoken', passwordLimiter, withMutationScope(resetPassword));
 
 // Protected routes
 router.get('/me', protect, getMe);

@@ -11,6 +11,7 @@ import {
   deleteQuestion,
   reorderQuestions
 } from '../controllers/formController.js';
+import { withMutationScope } from '../middleware/quiescenceGate.js';
 import { protect, optionalAuth } from '../middleware/authMiddleware.js';
 import { validateObjectId } from '../middleware/validateObjectId.js';
 
@@ -141,33 +142,33 @@ export const userFormReadLimiter = rateLimit({
 
 // Form routes
 router.get('/', protect, userFormReadLimiter, getForms);
-router.post('/', protect, formCreationLimiter, createForm);
+router.post('/', protect, formCreationLimiter, withMutationScope(createForm));
 router.get('/:id', validateObjectId('id'), publicFormFetchLimiter, optionalAuth, getForm);
-router.put('/:id', protect, validateObjectId('id'), formMutationLimiter, updateForm);
-router.delete('/:id', protect, validateObjectId('id'), formDeletionLimiter, deleteForm);
+router.put('/:id', protect, validateObjectId('id'), formMutationLimiter, withMutationScope(updateForm));
+router.delete('/:id', protect, validateObjectId('id'), formDeletionLimiter, withMutationScope(deleteForm));
 
 // Question routes
-router.post('/:id/questions', protect, validateObjectId('id'), formMutationLimiter, addQuestion);
+router.post('/:id/questions', protect, validateObjectId('id'), formMutationLimiter, withMutationScope(addQuestion));
 router.put(
   '/:formId/questions/reorder',
   protect,
   validateObjectId('formId'),
   formMutationLimiter,
-  reorderQuestions
+  withMutationScope(reorderQuestions)
 );
 router.put(
   '/:formId/questions/:questionId',
   protect,
   validateObjectId('formId', 'questionId'),
   formMutationLimiter,
-  updateQuestion
+  withMutationScope(updateQuestion)
 );
 router.delete(
   '/:formId/questions/:questionId',
   protect,
   validateObjectId('formId', 'questionId'),
   formMutationLimiter,
-  deleteQuestion
+  withMutationScope(deleteQuestion)
 );
 
 export default router;

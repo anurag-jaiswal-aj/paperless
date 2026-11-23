@@ -1,12 +1,11 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
 import request from 'supertest';
 import express from 'express';
-import mongoose from 'mongoose';
 import cookieParser from 'cookie-parser';
 import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
-import { MongoMemoryServer } from 'mongodb-memory-server';
+import { startReplSet, stopReplSet } from '../testUtils/replSetHelper.js';
 import authRoutes, { passwordLimiter } from '../routes/authRoutes';
 import User from '../models/user';
 import EmailService from '../services/EmailService';
@@ -38,16 +37,27 @@ vi.mock('../services/EmailService', () => {
   };
 });
 
-let mongoServer;
+let mongoReplSet;
 const app = express();
 app.set('trust proxy', ['loopback', 'linklocal', 'uniquelocal']);
 app.use(express.json());
 app.use(cookieParser());
 app.use('/api/auth', authRoutes);
 
+beforeAll(async () => {
+  mongoReplSet = await startReplSet([LoginPair, LoginAccount]);
+  process.env.JWT_SECRET = 'testsecret';
+  process.env.JWT_REFRESH_SECRET = 'testrefreshsecret';
+});
+
+afterAll(async () => {
+  await stopReplSet(mongoReplSet);
+});
+
 beforeEach(async () => {
-  mongoServer = await MongoMemoryServer.create();
-  await mongoose.connect(mongoServer.getUri());
+  await User.deleteMany({});
+  await LoginPair.deleteMany({});
+  await LoginAccount.deleteMany({});
   // Reset test env vars
   process.env.JWT_SECRET = 'testsecret';
   process.env.JWT_REFRESH_SECRET = 'testrefreshsecret';
@@ -57,8 +67,6 @@ afterEach(async () => {
   await resetLoginProtectionComponents();
   delete process.env.PROGRESSIVE_LOGIN_PROTECTION_ENABLED;
   delete process.env.LOGIN_PROTECTION_HMAC_SECRET;
-  await mongoose.disconnect();
-  await mongoServer.stop();
   vi.clearAllMocks();
   if (passwordLimiter && typeof passwordLimiter.resetKey === 'function') {
     passwordLimiter.resetKey('127.0.0.1');

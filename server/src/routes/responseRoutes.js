@@ -10,6 +10,7 @@ import {
   deleteResponse,
   downloadResponseFile
 } from '../controllers/responseController.js';
+import { withMutationScope } from '../middleware/quiescenceGate.js';
 import { protect } from '../middleware/authMiddleware.js';
 import { validateObjectId } from '../middleware/validateObjectId.js';
 import { logger } from '../utils/logger.js';
@@ -421,7 +422,7 @@ router.post(
   submissionLimiter,
   preValidateSubmissionForm,
   handleMultipartUpload,
-  submitResponse
+  withMutationScope(submitResponse)
 );
 
 // Protected routes - view/manage responses
@@ -454,7 +455,7 @@ router.delete(
   protect,
   validateObjectId('formId', 'responseId'),
   responseDeletionLimiter,
-  deleteResponse
+  withMutationScope(deleteResponse)
 );
 
 export default router;

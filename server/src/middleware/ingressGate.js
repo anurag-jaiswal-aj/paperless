@@ -25,6 +25,10 @@ export const isHealthCheckPath = (path = '') => {
   );
 };
 
+export const isDirectInternalAdminPath = (path = '') => {
+  return path === '/api/admin/quiescence' || path.startsWith('/api/admin/quiescence/');
+};
+
 /**
  * Creates ingress gate middleware that validates that incoming requests
  * originated from the authorized reverse proxy (Nginx).
@@ -65,6 +69,24 @@ export const createIngressGate = (options = {}) => {
     // Health check routes always bypass the ingress secret requirement
     // to allow container runtime / orchestrator probes directly to port 5000.
     if (isHealthCheckPath(req.path)) {
+      return next();
+    }
+
+    // Direct internal admin quiescence routes bypass the Nginx ingress secret requirement
+    // because they are reached directly by the backup container on the isolated backend network
+    // and are strictly authenticated by their own Bearer BACKUP_INTERNAL_TOKEN.
+    if (isDirectInternalAdminPath(req.path)) {
+      // Strip forwarded headers so internal admin endpoints use true socket IP for rate limiting
+      delete req.headers['x-forwarded-for'];
+      delete req.headers['x-forwarded-proto'];
+      delete req.headers['x-forwarded-host'];
+
+      const socketIp = req.socket?.remoteAddress || req.connection?.remoteAddress || '';
+      Object.defineProperty(req, 'ip', {
+        configurable: true,
+        enumerable: true,
+        get: () => socketIp
+      });
       return next();
     }
 

@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import mongoose from 'mongoose';
 import { logger } from './logger.js';
 
@@ -56,7 +57,7 @@ export const assertTransactionsSupported = (conn = mongoose.connection) => {
  * @param {import('mongoose').Connection} [conn=mongoose.connection]
  * @returns {Promise<{ topologyType: string, setName: string|null, isWritablePrimary: boolean }>}
  */
-export const verifyReplicaSetTopology = async (conn = mongoose.connection) => {
+export const verifyReplicaSetTopology = async (conn = mongoose.connection, options = {}) => {
   const topologyType = assertTransactionsSupported(conn);
 
   if (!conn?.db || typeof conn.db.admin !== 'function') {
@@ -90,11 +91,63 @@ export const verifyReplicaSetTopology = async (conn = mongoose.connection) => {
     );
   }
 
+  // BLK-04/Option B Verification: Ensure MongoDB transaction lifetime is bounded (<= 15 seconds) during startup
+  if (options.verifyParameters) {
+    try {
+      const paramRes = await admin.command({ getParameter: 1, transactionLifetimeLimitSeconds: 1 });
+      if (paramRes?.ok === 1 && typeof paramRes.transactionLifetimeLimitSeconds === 'number') {
+        if (paramRes.transactionLifetimeLimitSeconds > 15) {
+          try {
+            await admin.command({ setParameter: 1, transactionLifetimeLimitSeconds: 15 });
+            logger.info('db.transaction_lifetime_limit_configured', {
+              previous: paramRes.transactionLifetimeLimitSeconds,
+              configured: 15
+            });
+          } catch {
+            logger.warn('db.transaction_lifetime_limit_exceeds_threshold', {
+              current: paramRes.transactionLifetimeLimitSeconds,
+              recommended: 15
+            });
+          }
+        }
+      }
+    } catch {
+      // Non-fatal if command is unsupported by mock or user lacks clusterAdmin privilege
+    }
+  }
+
   return {
     topologyType,
     setName: hello?.setName || null,
     isWritablePrimary
   };
+};
+
+/**
+ * Deterministically computes the designated 16-slot OCC lease slot ID for a logical key.
+ *
+ * @param {string|number} key
+ * @returns {string} e.g. 'slot_0' through 'slot_15'
+ */
+let inFlightTransactionCount = 0;
+
+/**
+ * Returns the number of currently active in-flight MongoDB transactions on this Node process.
+ * Used by quiescence drain checks to supplement or corroborate currentOp observations.
+ *
+ * @returns {number}
+ */
+export const getInFlightTransactionCount = () => inFlightTransactionCount;
+
+export const computeDesignatedSlotId = (key) => {
+  const logicalTxId = String(key || '');
+  let hash = 0;
+  for (let i = 0; i < logicalTxId.length; i++) {
+    hash = (hash << 5) - hash + logicalTxId.charCodeAt(i);
+    hash |= 0;
+  }
+  const designatedSlotIndex = Math.abs(hash) % 16;
+  return `slot_${designatedSlotIndex}`;
 };
 
 /**
@@ -108,6 +161,40 @@ export const verifyReplicaSetTopology = async (conn = mongoose.connection) => {
  */
 export const withRequiredTransaction = async (operation, txOptions = {}) => {
   assertTransactionsSupported();
+
+  // Fencing Point 1: Pre-Execution Leadership Check (requires >= 2000ms remaining lease TTL)
+  let assertLeader = null;
+  try {
+    const leaseService = await import('../services/instanceLeaseService.js');
+    assertLeader = leaseService.assertInstanceLeader;
+  } catch (err) {
+    if (process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging') {
+      const leaderErr = new Error(`Critical failure loading instance lease service: ${err.message}`);
+      leaderErr.name = 'InstanceFencedError';
+      leaderErr.code = 'INSTANCE_FENCED';
+      leaderErr.statusCode = 503;
+      throw leaderErr;
+    }
+  }
+
+  if (typeof assertLeader === 'function') {
+    assertLeader({
+      minRemainingMs: 2000,
+      message: 'Instance lease near expiration before transaction start'
+    });
+  } else if (process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging') {
+    const leaderErr = new Error('Critical failure: assertInstanceLeader is unavailable');
+    leaderErr.name = 'InstanceFencedError';
+    leaderErr.code = 'INSTANCE_FENCED';
+    leaderErr.statusCode = 503;
+    throw leaderErr;
+  }
+
+  // Derive stable partition slot ID once before entering transaction retry callback
+  const logicalTxId = String(
+    txOptions.partitionKey || txOptions.requestId || crypto.randomUUID()
+  );
+  const designatedSlotId = computeDesignatedSlotId(logicalTxId);
 
   let session = null;
   try {
@@ -128,16 +215,59 @@ export const withRequiredTransaction = async (operation, txOptions = {}) => {
     readConcern: { level: 'snapshot' },
     writeConcern: { w: 'majority' },
     readPreference: 'primary',
+    maxCommitTimeMS: 10000,
+    timeoutMS: 10000,
     ...txOptions
   };
 
+  inFlightTransactionCount++;
   try {
     let result;
     await session.withTransaction(async () => {
       result = await operation(session);
+
+      // Fencing Point 2: Pre-Commit Leadership Check
+      // Guarantees transaction abort if lease expired during callback execution
+      if (typeof assertLeader === 'function') {
+        assertLeader({
+          minRemainingMs: 0,
+          message: 'Instance lease expired during transaction execution'
+        });
+      }
+
+      // Fencing Point 3: Datastore-Enforced Transactional Boundary Fence
+      let verifyFence = null;
+      try {
+        const leaseMod = await import('../services/instanceLeaseService.js');
+        verifyFence = leaseMod.verifyTransactionalFence;
+      } catch (importErr) {
+        if (process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging') {
+          const failErr = new Error(
+            `Critical failure loading instance lease service: ${importErr.message}`
+          );
+          failErr.name = 'InstanceFencedError';
+          failErr.code = 'INSTANCE_FENCED';
+          failErr.statusCode = 503;
+          throw failErr;
+        }
+      }
+
+      if (typeof verifyFence === 'function') {
+        await verifyFence(session, {
+          useSlots: true,
+          slotId: designatedSlotId
+        });
+      } else if (process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging') {
+        const failErr = new Error('Critical failure: verifyTransactionalFence is unavailable');
+        failErr.name = 'InstanceFencedError';
+        failErr.code = 'INSTANCE_FENCED';
+        failErr.statusCode = 503;
+        throw failErr;
+      }
     }, resolvedOptions);
     return result;
   } finally {
+    inFlightTransactionCount = Math.max(0, inFlightTransactionCount - 1);
     await session.endSession().catch(() => {});
   }
 };

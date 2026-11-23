@@ -56,8 +56,8 @@ const responseSchema = new mongoose.Schema({
   }
 });
 
-// Index for form responses with timestamp
-responseSchema.index({ formId: 1, createdAt: -1 });
+// Index for form responses with stable pagination
+responseSchema.index({ formId: 1, createdAt: -1, _id: -1 });
 responseSchema.index(
   { formId: 1, idempotencyKey: 1 },
   { unique: true, partialFilterExpression: { idempotencyKey: { $type: 'string' } } }
