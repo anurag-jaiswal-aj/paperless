@@ -317,6 +317,27 @@ export const ensureInstanceSingletonExists = async () => {
     { upsert: true }
   );
   await ensureSlotsExist();
+
+  // Ensure BackupLease singleton exists so conditional coordination write in acquireInstanceLease succeeds
+  const BackupLease =
+    mongoose.models.BackupLease ||
+    (mongoose.modelNames().includes('BackupLease') ? mongoose.model('BackupLease') : null);
+  if (BackupLease) {
+    await BackupLease.updateOne(
+      { _id: 'singleton' },
+      {
+        $setOnInsert: {
+          _id: 'singleton',
+          status: 'NORMAL',
+          version: 0,
+          admissionEpoch: 0,
+          activeInstanceId: null,
+          lastInstanceAdmissionAt: null
+        }
+      },
+      { upsert: true }
+    );
+  }
 };
 
 /**
@@ -395,19 +416,36 @@ export const acquireInstanceLease = async (options = {}) => {
     await takeoverSession.withTransaction(
       async () => {
         // Invariant INV-8: Quiescence mutual exclusion guard (F5 remediation)
-        // Ensure no new instance can register and enter service while system is actively DRAINING or QUIESCED
+        // Shared Coordination Barrier (Finding F5 Atomicity Closure):
+        // Materialize write conflict on BackupLease by atomically updating the singleton document.
+        // Requires status to be strictly NORMAL. If DRAINING, QUIESCED, or RECOVERY_REQUIRED, fails closed.
         const BackupLease =
           mongoose.models.BackupLease ||
           (mongoose.modelNames().includes('BackupLease') ? mongoose.model('BackupLease') : null);
 
         if (BackupLease) {
-          const backupLeaseDoc = await BackupLease.findById('singleton')
-            .session(takeoverSession)
-            .lean();
-          if (
-            backupLeaseDoc &&
-            (backupLeaseDoc.status === 'DRAINING' || backupLeaseDoc.status === 'QUIESCED')
-          ) {
+          const backupLeaseRes = await BackupLease.findOneAndUpdate(
+            {
+              _id: 'singleton',
+              status: 'NORMAL'
+            },
+            {
+              $inc: { version: 1, admissionEpoch: 1 },
+              $set: {
+                lastInstanceAdmissionAt: now,
+                activeInstanceId: instanceId
+              }
+            },
+            { session: takeoverSession, new: true }
+          );
+
+          if (!backupLeaseRes) {
+            const currentBackup = await BackupLease.findById('singleton')
+              .session(takeoverSession)
+              .lean();
+            if (currentBackup?.status === 'RECOVERY_REQUIRED') {
+              throw new Error('SYSTEM_RECOVERY_REQUIRED');
+            }
             throw new Error('SYSTEM_QUIESCENCE_ACTIVE');
           }
         }
@@ -464,6 +502,16 @@ export const acquireInstanceLease = async (options = {}) => {
         success: false,
         reason: 'SYSTEM_QUIESCENCE_ACTIVE',
         message: 'Cannot register application instance while system is actively in quiescence or draining'
+      };
+    } else if (txErr.message === 'SYSTEM_RECOVERY_REQUIRED') {
+      logger.warn('Instance registration rejected: system is in RECOVERY_REQUIRED status', {
+        event: 'instance_lease.rejected_recovery_required',
+        instanceId
+      });
+      return {
+        success: false,
+        reason: 'SYSTEM_RECOVERY_REQUIRED',
+        message: 'Cannot register application instance while system is in RECOVERY_REQUIRED status'
       };
     } else {
       // Condition E-2: Log error and return failure object instead of throwing unhandled error to caller

@@ -385,6 +385,9 @@ export const ensureSingletonExists = async () => {
         tEndTime: null,
         lastKnownHealthyState: null,
         recoveryActionRequired: null,
+        activeInstanceId: null,
+        lastInstanceAdmissionAt: null,
+        admissionEpoch: 0,
         version: 0
       }
     },
@@ -511,6 +514,12 @@ export const acquire = async (options = {}) => {
     ]
   };
 
+  // Shared Coordination Barrier (Finding F5 Atomicity Closure):
+  // Check observed version to serialize against concurrent instance registration transactions.
+  if (typeof currentLeaseDoc?.version === 'number') {
+    query.version = currentLeaseDoc.version;
+  }
+
   const update = {
     $set: {
       status: targetStatus,
@@ -529,7 +538,10 @@ export const acquire = async (options = {}) => {
     $inc: { version: 1 }
   };
 
-  const acquired = await BackupLease.findOneAndUpdate(query, update, { new: true });
+  const acquired = await BackupLease.findOneAndUpdate(query, update, {
+    new: true,
+    session: options.session || undefined
+  });
 
   if (!acquired) {
     const currentLease = await BackupLease.findById(BACKUP_LEASE_SINGLETON_ID).lean();

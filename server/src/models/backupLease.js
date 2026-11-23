@@ -145,6 +145,18 @@ const backupLeaseSchema = new mongoose.Schema(
       type: Number,
       default: 0
     },
+    activeInstanceId: {
+      type: String,
+      default: null
+    },
+    lastInstanceAdmissionAt: {
+      type: Date,
+      default: null
+    },
+    admissionEpoch: {
+      type: Number,
+      default: 0
+    },
     version: {
       type: Number,
       default: 0
