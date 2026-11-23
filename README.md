@@ -243,7 +243,7 @@ Standard application accounts restricted to `readWrite` on the `paperless` appli
 - Drain reason is recorded as `TRANSACTION_DRAIN_UNVERIFIED`
 - Physical backup authorization remains strictly `false`
 
-**Least-Privilege Role Recommendation:**  
+**Least-Privilege Role Recommendation:**
 To satisfy this operational prerequisite without granting excessive database administration rights, grant the built-in `clusterMonitor` role on the `admin` database to the Paperless database user:
 
 ```javascript
@@ -254,7 +254,7 @@ db.grantRolesToUser("<paperless_db_user>", [
 ]);
 ```
 
-*Why `clusterMonitor` instead of `clusterAdmin`?*  
+*Why `clusterMonitor` instead of `clusterAdmin`?*
 `clusterMonitor` provides read-only monitoring and engine inspection privileges (including `currentOp`, `serverStatus`, and connection pool diagnostics) without granting cluster reconfiguration, user modification, or datastore mutation privileges. This permission is an operational deployment prerequisite and is required for fail-closed quiescence verification.
 
 ### 4. Development
