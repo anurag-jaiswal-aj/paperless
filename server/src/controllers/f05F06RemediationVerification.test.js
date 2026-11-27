@@ -785,7 +785,7 @@ describe('Phase 2D.1K.11: F-05 & F-06 Remediation & Closure Verification Suite',
 
         // Check drain while transaction is actively executing
         drainResultDuringTx = await quiescenceService.checkDurableDatastoreDrain({ strict: true });
-      });
+      }, { partitionKey: 'test-f05-drain' });
 
       expect(drainResultDuringTx.isDrained).toBe(false);
       expect(drainResultDuringTx.reason).toBe('DRAIN_PENDING');

@@ -50,6 +50,23 @@ const submissionReservationSchema = new mongoose.Schema(
       type: Date,
       required: true
     },
+    barrierGeneration: {
+      type: Number,
+      default: 0,
+      required: true
+    },
+    ambiguousCommitAt: {
+      type: Date,
+      default: null
+    },
+    fencedBy: {
+      type: String,
+      default: null
+    },
+    fencedAt: {
+      type: Date,
+      default: null
+    },
     vacuumAt: {
       type: Date,
       default: null

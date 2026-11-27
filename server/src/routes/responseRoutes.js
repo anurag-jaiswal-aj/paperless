@@ -14,6 +14,13 @@ import { withMutationScope } from '../middleware/quiescenceGate.js';
 import { protect } from '../middleware/authMiddleware.js';
 import { validateObjectId } from '../middleware/validateObjectId.js';
 import { logger } from '../utils/logger.js';
+import {
+  uploadAdmissionService,
+  AdmissionQueueFullError,
+  AdmissionTimeoutError,
+  AdmissionAbortedError,
+  AdmissionDrainingError
+} from '../services/uploadAdmissionService.js';
 
 const router = express.Router();
 
@@ -415,12 +422,93 @@ export const preValidateSubmissionForm = async (req, res, next) => {
   }
 };
 
+/**
+ * Ingress admission gate for multipart uploads.
+ * Restricts concurrent multipart ingestion to protect disk and memory
+ * before Multer spools payload to temporary disk files.
+ */
+export const uploadAdmissionGate = async (req, res, next) => {
+  const contentType = req.headers['content-type'] || '';
+  if (!contentType.toLowerCase().includes('multipart/form-data')) {
+    return next();
+  }
+
+  // Handle client disconnection in Express 4 where req.signal is undefined
+  const abortController = new AbortController();
+  const onClientDisconnect = () => {
+    // Only abort if the client connection terminated before the request body completed
+    if (!req.complete) {
+      abortController.abort(new Error('Client disconnected before upload admission'));
+    }
+  };
+  req.on('close', onClientDisconnect);
+
+  try {
+    const permit = await uploadAdmissionService.acquire({
+      signal: req.signal || abortController.signal,
+      timeoutMs: 30000,
+      metadata: { formId: req.params?.formId, ip: req.ip }
+    });
+
+    req.removeListener('close', onClientDisconnect);
+    req.uploadPermit = permit;
+
+    let released = false;
+    const releaseOnce = () => {
+      if (!released) {
+        released = true;
+        permit.release();
+      }
+    };
+
+    res.on('finish', releaseOnce);
+    res.on('close', releaseOnce);
+
+    next();
+  } catch (err) {
+    req.removeListener('close', onClientDisconnect);
+    if (err instanceof AdmissionQueueFullError || err.code === 'ERR_UPLOAD_ADMISSION_QUEUE_FULL') {
+      res.setHeader('Retry-After', '5');
+      return res.status(429).json({
+        success: false,
+        code: 'ERR_UPLOAD_ADMISSION_QUEUE_FULL',
+        message: 'Upload concurrency limit reached. Please retry in a few moments.'
+      });
+    }
+    if (err instanceof AdmissionTimeoutError || err.code === 'ERR_UPLOAD_ADMISSION_TIMEOUT') {
+      res.setHeader('Retry-After', '5');
+      return res.status(504).json({
+        success: false,
+        code: 'ERR_UPLOAD_ADMISSION_TIMEOUT',
+        message: 'Server timed out waiting for upload capacity.'
+      });
+    }
+    if (err instanceof AdmissionDrainingError || err.code === 'ERR_UPLOAD_ADMISSION_DRAINING') {
+      res.setHeader('Retry-After', '15');
+      return res.status(503).json({
+        success: false,
+        code: 'ERR_UPLOAD_ADMISSION_DRAINING',
+        message: 'Server is currently undergoing maintenance. Please retry shortly.'
+      });
+    }
+    if (err instanceof AdmissionAbortedError || err.code === 'ERR_UPLOAD_ADMISSION_ABORTED') {
+      return res.status(499).json({
+        success: false,
+        code: 'ERR_UPLOAD_ADMISSION_ABORTED',
+        message: 'Upload admission canceled by client.'
+      });
+    }
+    return next(err);
+  }
+};
+
 // Public route - submit response
 router.post(
   '/:formId',
   validateObjectId('formId'),
   submissionLimiter,
   preValidateSubmissionForm,
+  uploadAdmissionGate,
   handleMultipartUpload,
   withMutationScope(submitResponse)
 );

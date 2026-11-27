@@ -15,6 +15,8 @@ import StorageJournal, {
 import Response from '../models/response.js';
 import SubmissionReservation from '../models/submissionReservation.js';
 import s3Provider from './S3StorageProvider.js';
+import { assertStorageMutationAllowed } from './StorageService.js';
+import { trackStorageOperation } from '../middleware/quiescenceGate.js';
 import { logger } from '../utils/logger.js';
 
 export class StorageReconciliationService {
@@ -147,6 +149,16 @@ export class StorageReconciliationService {
     const destinationKey = op.destinationKey;
     const effectiveWorkerId = options.workerContext?.workerId || options.workerId || this.workerId;
 
+    const readQueryOptions = {
+      readPreference: 'primary',
+      readConcern: { level: 'majority' }
+    };
+    if (options.session) {
+      readQueryOptions.session = options.session;
+    } else if (options.barrierContext?.session) {
+      readQueryOptions.session = options.barrierContext.session;
+    }
+
     // Dual-HEAD Probe 1
     let head1;
     try {
@@ -194,7 +206,7 @@ export class StorageReconciliationService {
         status: STORAGE_JOURNAL_STATUS.RECONCILING,
         epoch: op.epoch,
         lockedBy: effectiveWorkerId
-      });
+      }).setOptions(readQueryOptions);
       if (!stillOwned) {
         return { action: 'STALE_EPOCH_CONFLICT', operationId: op.operationId };
       }
@@ -206,7 +218,7 @@ export class StorageReconciliationService {
       }
       const compRes = await StorageJournal.markCompensated(op.operationId, op.epoch, {
         errorDetails: 'Remote object never materialized (404 NotFound after quarantine)',
-        vacuumHours: 0,
+        vacuumHours: null,
         lockedBy: effectiveWorkerId
       });
       if (!compRes) {
@@ -298,8 +310,11 @@ export class StorageReconciliationService {
     const remoteHash = metadata['payload-hash'] || metadata.payloadHash;
 
     if (
-      (remoteOpId && remoteOpId !== op.operationId) &&
-      (remoteHash && op.payloadHash && remoteHash !== op.payloadHash)
+      remoteOpId &&
+      remoteOpId !== op.operationId &&
+      remoteHash &&
+      op.payloadHash &&
+      remoteHash !== op.payloadHash
     ) {
       // Key collision with distinct operation payload; must not delete!
       const abRes = await StorageJournal.markAbandoned(op.operationId, op.epoch, {
@@ -312,12 +327,11 @@ export class StorageReconciliationService {
       return { action: 'ABANDONED_COLLISION', operationId: op.operationId };
     }
 
-    // Two-Tier Database Reference Check
     // Tier 1: Check if committed Response exists referencing this key
     const isCommitted = await Response.exists({
       'answers.value.key': destinationKey,
       commitStatus: 'committed'
-    });
+    }).setOptions(readQueryOptions);
 
     if (isCommitted) {
       // Response was successfully committed! File must be preserved!
@@ -331,17 +345,25 @@ export class StorageReconciliationService {
       return { action: 'CONFIRMED', operationId: op.operationId };
     }
 
-    // Tier 2: Check if active user submission reservation exists (globally across leaseId or staged/promoted keys)
+    // Tier 2: Check if active or quarantined user submission reservation exists (globally across leaseId or staged/promoted keys)
     const leaseId = op.reservationLeaseId;
     const activeReservation = await SubmissionReservation.findOne({
-      $or: [
-        ...(leaseId ? [{ leaseId }] : []),
-        { stagedKeys: destinationKey },
-        { promotedKeys: destinationKey }
-      ],
-      status: { $in: ['active', 'committing'] },
-      expiresAt: { $gt: now }
-    });
+      $and: [
+        {
+          $or: [
+            ...(leaseId ? [{ leaseId }] : []),
+            { stagedKeys: destinationKey },
+            { promotedKeys: destinationKey }
+          ]
+        },
+        {
+          $or: [
+            { status: { $in: ['active', 'committing'] }, expiresAt: { $gt: now } },
+            { quarantinedUntil: { $gt: now } }
+          ]
+        }
+      ]
+    }).setOptions(readQueryOptions);
 
     if (activeReservation) {
       // User session is actively in-progress! Extend quarantine past reservation expiry
@@ -382,18 +404,41 @@ export class StorageReconciliationService {
       status: STORAGE_JOURNAL_STATUS.RECONCILING,
       epoch: op.epoch,
       lockedBy: effectiveWorkerId
-    });
+    }).setOptions(readQueryOptions);
     if (!stillOwned) {
       return { action: 'STALE_EPOCH_CONFLICT', operationId: op.operationId };
     }
 
+    let deleteSucceeded = false;
     try {
-      await this.storageAdapter.deleteFile(destinationKey, options);
+      await assertStorageMutationAllowed(options);
+      await trackStorageOperation(async () => {
+        await this.storageAdapter.deleteFile(destinationKey, options);
+      });
+      deleteSucceeded = true;
     } catch (delErr) {
       logger.warn('storage_reconciliation.delete_orphan_failed', {
         destinationKey,
         error: delErr.message
       });
+    }
+
+    if (!deleteSucceeded) {
+      // Do NOT mark compensated if remote delete failed! Reset to AMBIGUOUS with quarantine
+      await StorageJournal.updateOne(
+        { operationId: op.operationId, epoch: op.epoch, lockedBy: effectiveWorkerId },
+        {
+          $set: {
+            status: STORAGE_JOURNAL_STATUS.AMBIGUOUS,
+            quarantinedUntil: new Date(Date.now() + 30000),
+            lockedUntil: null,
+            lockedBy: null,
+            errorDetails: 'Remote S3 deletion failed during orphan compensation; re-quarantined'
+          },
+          $inc: { epoch: 1 }
+        }
+      );
+      return { action: 'DELETE_FAILED_REQUARANTINED', operationId: op.operationId };
     }
 
     const compRes = await StorageJournal.markCompensated(op.operationId, op.epoch, {
@@ -434,10 +479,20 @@ export class StorageReconciliationService {
     }
 
     // Object still exists in S3; check if Response still exists
+    const readQueryOptions = {
+      readPreference: 'primary',
+      readConcern: { level: 'majority' }
+    };
+    if (options.session) {
+      readQueryOptions.session = options.session;
+    } else if (options.barrierContext?.session) {
+      readQueryOptions.session = options.barrierContext.session;
+    }
+
     const responseStillExists = await Response.exists({
       'answers.value.key': destinationKey,
       commitStatus: 'committed'
-    });
+    }).setOptions(readQueryOptions);
 
     if (responseStillExists) {
       // Response document was NOT deleted; abandon deletion operation to protect user data
@@ -463,7 +518,7 @@ export class StorageReconciliationService {
       status: STORAGE_JOURNAL_STATUS.RECONCILING,
       epoch: op.epoch,
       lockedBy: effectiveWorkerId
-    });
+    }).setOptions(readQueryOptions);
     if (!stillOwned) {
       return { action: 'STALE_EPOCH_CONFLICT', operationId: op.operationId };
     }
@@ -486,7 +541,10 @@ export class StorageReconciliationService {
     const effectiveWorkerId = options.workerContext?.workerId || options.workerId || this.workerId;
     const effectiveOptions = { ...options, workerId: effectiveWorkerId };
 
-    if (effectiveOptions.workerContext?.isLeaseValid && !effectiveOptions.workerContext.isLeaseValid()) {
+    if (
+      effectiveOptions.workerContext?.isLeaseValid &&
+      !effectiveOptions.workerContext.isLeaseValid()
+    ) {
       return {
         processedCount: 0,
         skipped: true,
@@ -498,6 +556,16 @@ export class StorageReconciliationService {
     const now = new Date();
     const limit = effectiveOptions.limit || 50;
 
+    const readOpts = {
+      readPreference: 'primary',
+      readConcern: { level: 'majority' }
+    };
+    if (effectiveOptions.session) {
+      readOpts.session = effectiveOptions.session;
+    } else if (effectiveOptions.barrierContext?.session) {
+      readOpts.session = effectiveOptions.barrierContext.session;
+    }
+
     const records = await StorageJournal.find({
       status: {
         $in: [
@@ -508,26 +576,26 @@ export class StorageReconciliationService {
           STORAGE_JOURNAL_STATUS.RECONCILING
         ]
       },
-      $or: [
-        { quarantinedUntil: null },
-        { quarantinedUntil: { $lte: now } }
-      ],
+      $or: [{ quarantinedUntil: null }, { quarantinedUntil: { $lte: now } }],
       $and: [
         {
-          $or: [
-            { lockedUntil: null },
-            { lockedUntil: { $lt: now } }
-          ]
+          $or: [{ lockedUntil: null }, { lockedUntil: { $lt: now } }]
         }
       ]
-    }).limit(limit);
+    }).setOptions(readOpts).limit(limit);
 
     const results = [];
     for (const record of records) {
-      if (typeof effectiveOptions.shouldPause === 'function' && (await effectiveOptions.shouldPause())) {
+      if (
+        typeof effectiveOptions.shouldPause === 'function' &&
+        (await effectiveOptions.shouldPause())
+      ) {
         break;
       }
-      if (effectiveOptions.workerContext?.isLeaseValid && !effectiveOptions.workerContext.isLeaseValid()) {
+      if (
+        effectiveOptions.workerContext?.isLeaseValid &&
+        !effectiveOptions.workerContext.isLeaseValid()
+      ) {
         break;
       }
       const result = await this.reconcileRecord(record, effectiveOptions);

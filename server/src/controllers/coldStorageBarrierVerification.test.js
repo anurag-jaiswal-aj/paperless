@@ -19,6 +19,7 @@ import { StorageReconciliationService } from '../services/storageReconciliationS
 import { PrefixSweepService } from '../services/prefixSweepService.js';
 import * as quiescenceService from '../services/quiescenceService.js';
 import * as workerCoordinationService from '../services/workerCoordinationService.js';
+import { openMutationAdmission } from '../middleware/quiescenceGate.js';
 
 describe('Phase 4.4 Workstream 2D.1K.8: Phase K-E Cold-Storage Barrier, Staging Quarantine & Late-Object Recovery Verification Suite', () => {
   let mongod;
@@ -46,6 +47,7 @@ describe('Phase 4.4 Workstream 2D.1K.8: Phase K-E Cold-Storage Barrier, Staging 
   afterEach(async () => {
     delete process.env.STRICT_TTL_SUPPRESSION_REQUIRED;
     workerCoordinationService.resetWorkerTasks();
+    openMutationAdmission();
     await mongoose.disconnect();
     await mongod.stop();
     vi.restoreAllMocks();
@@ -150,6 +152,8 @@ describe('Phase 4.4 Workstream 2D.1K.8: Phase K-E Cold-Storage Barrier, Staging 
 
     const leaseDoc = await BackupLease.findById(BACKUP_LEASE_SINGLETON_ID).lean();
     expect(leaseDoc.status).toBe(BACKUP_LEASE_STATUS.DRAINING);
+
+    await quiescenceService.releaseLease(acquireRes.leaseId);
   });
 
   it('KE-BARRIER-06: Restart during active drain re-queries persistent datastore directly', async () => {
@@ -185,7 +189,9 @@ describe('Phase 4.4 Workstream 2D.1K.8: Phase K-E Cold-Storage Barrier, Staging 
     });
 
     const sweeper = new PrefixSweepService({ minOrphanAgeMs: 0 });
-    const classification = await sweeper.classifyCandidate(key, { lastModified: new Date(Date.now() - 100000) });
+    const classification = await sweeper.classifyCandidate(key, {
+      lastModified: new Date(Date.now() - 100000)
+    });
     expect(classification.isOrphan).toBe(false);
     expect(classification.reason).toBe('COMMITTED_RESPONSE_REFERENCE');
   });
@@ -202,7 +208,9 @@ describe('Phase 4.4 Workstream 2D.1K.8: Phase K-E Cold-Storage Barrier, Staging 
     });
 
     const sweeper = new PrefixSweepService({ minOrphanAgeMs: 0 });
-    const classification = await sweeper.classifyCandidate(stagedKey, { lastModified: new Date(Date.now() - 100000) });
+    const classification = await sweeper.classifyCandidate(stagedKey, {
+      lastModified: new Date(Date.now() - 100000)
+    });
     expect(classification.isOrphan).toBe(false);
     expect(classification.reason).toBe('ACTIVE_SUBMISSION_RESERVATION');
   });

@@ -113,6 +113,7 @@ export class SubmissionReservationManager {
             formId,
             leaseId,
             fenceToken,
+            barrierGeneration: 0,
             status: 'active',
             expiresAt,
             vacuumAt: null,
@@ -130,6 +131,7 @@ export class SubmissionReservationManager {
         success: true,
         leaseId,
         fenceToken,
+        barrierGeneration: 0,
         expiresAt,
         form: updatedForm
       };
@@ -442,7 +444,8 @@ export class SubmissionReservationManager {
     leaseId,
     fenceToken,
     session = null,
-    ttlMs = SUBMISSION_LEASE_TTL_MS
+    ttlMs = SUBMISSION_LEASE_TTL_MS,
+    expectedGeneration = null
   ) {
     const now = new Date();
     const newExpiresAt = new Date(now.getTime() + ttlMs);
@@ -453,11 +456,17 @@ export class SubmissionReservationManager {
       status: 'active',
       expiresAt: { $gt: now }
     };
+    if (expectedGeneration !== null && expectedGeneration !== undefined) {
+      query.barrierGeneration = expectedGeneration;
+    }
     const update = {
       $set: {
         status: 'committing',
         expiresAt: newExpiresAt,
         updatedAt: now
+      },
+      $inc: {
+        barrierGeneration: 1
       }
     };
     const options = session ? { session, new: true } : { new: true };
@@ -592,6 +601,9 @@ export class SubmissionReservationManager {
             counterReleased: true,
             vacuumAt: null,
             updatedAt: now
+          },
+          $inc: {
+            barrierGeneration: 1
           }
         },
         { new: false }
@@ -771,6 +783,52 @@ export class SubmissionReservationManager {
   }
 
   /**
+   * Arms a non-destructive quarantine on a reservation following an ambiguous commit outcome.
+   * Preserves all S3 keys, extends reservation TTL, leaves vacuumAt null, and protects against sweepers.
+   *
+   * @param {string} leaseId
+   * @param {string} fenceToken
+   * @param {string|mongoose.Types.ObjectId} [formId]
+   * @param {object} [options]
+   */
+  static async armAmbiguousCommitQuarantine(leaseId, fenceToken, formId = null, options = {}) {
+    const now = new Date();
+    const quarantineMs = options.quarantineMs || PROMOTION_QUARANTINE_MS; // 40,000ms
+    const quarantinedUntil = new Date(now.getTime() + quarantineMs);
+    const extendedExpiry = new Date(now.getTime() + quarantineMs + 10000);
+
+    const filter = {
+      leaseId,
+      fenceToken,
+      status: { $in: ['active', 'committing'] }
+    };
+    if (formId) {
+      filter.formId = formId;
+    }
+
+    const updated = await SubmissionReservation.findOneAndUpdate(
+      filter,
+      {
+        $set: {
+          status: 'committing',
+          quarantinedUntil,
+          expiresAt: extendedExpiry,
+          ambiguousCommitAt: now,
+          stagingCleanupStatus: 'pending',
+          vacuumAt: null,
+          updatedAt: now
+        },
+        $inc: {
+          barrierGeneration: 1
+        }
+      },
+      { new: true }
+    );
+
+    return updated;
+  }
+
+  /**
    * Sweep expired active/committing reservations and abandoned reservations on live forms,
    * releasing leaked activeSubmissions counters once and cleaning staged S3 keys outside tx.
    *
@@ -797,7 +855,8 @@ export class SubmissionReservationManager {
       // 1. Transition expired active/committing reservations on non-deleting forms to abandoned
       const expiredDocs = await SubmissionReservation.find({
         status: { $in: ['active', 'committing'] },
-        expiresAt: { $lte: staleCutoff }
+        expiresAt: { $lte: staleCutoff },
+        $or: [{ quarantinedUntil: null }, { quarantinedUntil: { $lte: now } }]
       })
         .limit(batchSize)
         .lean();
@@ -820,7 +879,8 @@ export class SubmissionReservationManager {
           {
             _id: doc._id,
             status: { $in: ['active', 'committing'] },
-            expiresAt: { $lte: staleCutoff }
+            expiresAt: { $lte: staleCutoff },
+            $or: [{ quarantinedUntil: null }, { quarantinedUntil: { $lte: now } }]
           },
           {
             $set: {
@@ -828,6 +888,9 @@ export class SubmissionReservationManager {
               counterReleased: true,
               vacuumAt: null,
               updatedAt: new Date()
+            },
+            $inc: {
+              barrierGeneration: 1
             }
           },
           { new: false }
@@ -876,7 +939,7 @@ export class SubmissionReservationManager {
               formId: doc.formId,
               'answers.value.key': key,
               commitStatus: 'committed'
-            });
+            }).setOptions({ readPreference: 'primary', readConcern: { level: 'majority' } });
             if (!isCommitted) {
               uncommittedKeys.push(key);
             }
@@ -992,7 +1055,7 @@ export class SubmissionReservationManager {
               formId: claimed.formId,
               'answers.value.key': key,
               commitStatus: 'committed'
-            });
+            }).setOptions({ readPreference: 'primary', readConcern: { level: 'majority' } });
             if (!isCommitted) {
               uncommittedPromoted.push(key);
             }
@@ -1306,6 +1369,32 @@ export class SubmissionReservationManager {
 
     // 3. Update reservation status based on outcome
     const postCleanupNow = new Date();
+
+    // Arm TTL vacuum on original PutObject staging journal records
+    if (deletedKeys.length > 0) {
+      try {
+        const StorageJournal = (await import('../models/storageJournal.js')).default;
+        const { STORAGE_OPERATION_TYPE, STORAGE_JOURNAL_STATUS } = await import('../models/storageJournal.js');
+        await StorageJournal.updateMany(
+          {
+            destinationKey: { $in: deletedKeys },
+            type: STORAGE_OPERATION_TYPE.PUT_OBJECT,
+            status: STORAGE_JOURNAL_STATUS.CONFIRMED,
+            vacuumAt: null
+          },
+          {
+            $set: {
+              vacuumAt: new Date(postCleanupNow.getTime() + 7 * 24 * 3600 * 1000),
+              updatedAt: postCleanupNow
+            },
+            $inc: { epoch: 1 }
+          }
+        );
+      } catch (jErr) {
+        logger.warn('storage.staging_journal_ttl_arm_failed', { error: jErr.message });
+      }
+    }
+
     if (failedKeys.length === 0) {
       const updateRes = await SubmissionReservation.updateOne(
         {

@@ -1,4 +1,3 @@
-import crypto from 'crypto';
 import mongoose from 'mongoose';
 import { logger } from './logger.js';
 
@@ -10,6 +9,81 @@ export class ReplicaSetRequiredError extends Error {
     this.statusCode = 503;
   }
 }
+
+export class PartitionKeyRequiredError extends TypeError {
+  constructor(
+    message = 'A valid, non-empty partitionKey (string, number, or ObjectId) is required for withRequiredTransaction'
+  ) {
+    super(message);
+    this.name = 'PartitionKeyRequiredError';
+    this.code = 'PARTITION_KEY_REQUIRED';
+    this.statusCode = 400;
+  }
+}
+
+/**
+ * Predicate to determine if an error during commitTransaction represents an
+ * unknown commit outcome requiring non-destructive quarantine rather than compensation.
+ *
+ * @param {Error|any} error
+ * @returns {boolean}
+ */
+export const isUnknownTransactionCommitResult = (error) => {
+  if (!error) return false;
+  // 1. Direct label check on error or cause
+  if (typeof error.hasErrorLabel === 'function' && error.hasErrorLabel('UnknownTransactionCommitResult')) {
+    return true;
+  }
+  if (error.cause && typeof error.cause.hasErrorLabel === 'function' && error.cause.hasErrorLabel('UnknownTransactionCommitResult')) {
+    return true;
+  }
+  if (Array.isArray(error.errorLabels) && error.errorLabels.includes('UnknownTransactionCommitResult')) {
+    return true;
+  }
+  if (Array.isArray(error.cause?.errorLabels) && error.cause.errorLabels.includes('UnknownTransactionCommitResult')) {
+    return true;
+  }
+
+  // 2. Specific Mongo error classes/names (including CSOT MongoOperationTimeoutError)
+  const errName = error.name || '';
+  const causeName = error.cause?.name || '';
+  if (
+    errName === 'MongoOperationTimeoutError' ||
+    causeName === 'MongoOperationTimeoutError' ||
+    errName === 'MongoNetworkTimeoutError' ||
+    causeName === 'MongoNetworkTimeoutError' ||
+    errName === 'MongoWriteConcernError' ||
+    causeName === 'MongoWriteConcernError'
+  ) {
+    return true;
+  }
+
+  // 3. Error codes: 64 = WriteConcernFailed / wtimeout, network socket codes
+  const code = error.code || error.cause?.code;
+  if (code === 64 || code === 'WriteConcernFailed') {
+    return true;
+  }
+  const socketCodes = ['ECONNRESET', 'ETIMEDOUT', 'EPIPE', 'ESOCKETTIMEDOUT', 'ECONNABORTED'];
+  if (socketCodes.includes(code)) {
+    return true;
+  }
+
+  // 4. Message inspection for commit ambiguity signatures
+  const msg = `${error.message || ''} ${error.cause?.message || ''}`;
+  if (
+    /UnknownTransactionCommitResult/i.test(msg) ||
+    /timed out waiting for write concern/i.test(msg) ||
+    /operation.*timed out/i.test(msg) ||
+    /timeoutms/i.test(msg) ||
+    /wtimeout/i.test(msg) ||
+    /connection.*closed/i.test(msg) ||
+    /socket hang up/i.test(msg)
+  ) {
+    return true;
+  }
+
+  return false;
+};
 
 /**
  * Returns the current MongoDB driver SDAM topology description type.
@@ -190,11 +264,50 @@ export const withRequiredTransaction = async (operation, txOptions = {}) => {
     throw leaderErr;
   }
 
+  // 1. Strict partitionKey Validation (Pre-Session Allocation)
+  const rawKey = txOptions?.partitionKey;
+  if (rawKey === undefined || rawKey === null) {
+    throw new PartitionKeyRequiredError(
+      'partitionKey is required in txOptions for withRequiredTransaction'
+    );
+  }
+
+  let normalizedKey;
+  if (typeof rawKey === 'string') {
+    normalizedKey = rawKey.trim();
+    if (normalizedKey.length === 0) {
+      throw new PartitionKeyRequiredError(
+        'partitionKey must be a non-empty string'
+      );
+    }
+  } else if (typeof rawKey === 'number') {
+    if (Number.isNaN(rawKey)) {
+      throw new PartitionKeyRequiredError('partitionKey cannot be NaN');
+    }
+    normalizedKey = String(rawKey);
+  } else if (typeof rawKey === 'object' && rawKey !== null) {
+    if (typeof rawKey.toHexString === 'function') {
+      normalizedKey = rawKey.toHexString();
+    } else if (typeof rawKey.toString === 'function' && rawKey.toString() !== '[object Object]') {
+      normalizedKey = rawKey.toString().trim();
+    } else {
+      throw new PartitionKeyRequiredError(
+        'partitionKey object must have a valid string conversion (e.g. ObjectId)'
+      );
+    }
+    if (!normalizedKey) {
+      throw new PartitionKeyRequiredError(
+        'partitionKey converted to an empty string'
+      );
+    }
+  } else {
+    throw new PartitionKeyRequiredError(
+      `Invalid partitionKey type "${typeof rawKey}". Expected string, number, or ObjectId.`
+    );
+  }
+
   // Derive stable partition slot ID once before entering transaction retry callback
-  const logicalTxId = String(
-    txOptions.partitionKey || txOptions.requestId || crypto.randomUUID()
-  );
-  const designatedSlotId = computeDesignatedSlotId(logicalTxId);
+  const designatedSlotId = computeDesignatedSlotId(normalizedKey);
 
   let session = null;
   try {

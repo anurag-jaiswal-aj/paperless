@@ -16,7 +16,7 @@ import { validateDocxZip } from '../utils/docxValidator.js';
 import { cleanupRequestTempFiles } from '../utils/fileCleanup.js';
 import { escapeHtml } from '../utils/helpers.js';
 import { logger } from '../utils/logger.js';
-import { withRequiredTransaction } from '../utils/dbTransaction.js';
+import { withRequiredTransaction, isUnknownTransactionCommitResult } from '../utils/dbTransaction.js';
 import { trackMutationOperation } from '../middleware/quiescenceGate.js';
 import { classifyStorageKey, trackDeletionTask } from './formController.js';
 import {
@@ -27,6 +27,10 @@ import StorageJournal, {
   STORAGE_JOURNAL_STATUS,
   STORAGE_OPERATION_TYPE
 } from '../models/storageJournal.js';
+import {
+  uploadAdmissionService,
+  AdmissionError
+} from '../services/uploadAdmissionService.js';
 
 const verifyCommittedIdempotentResponse = async (existingResponse) => {
   if (!existingResponse || existingResponse.commitStatus === 'pending') {
@@ -118,6 +122,65 @@ export const computePayloadHash = (answers = []) => {
 };
 
 /**
+ * Compute the verified payload size and SHA-256 hash for an uploaded file
+ * to preserve immutable cryptographic provenance in StorageJournal.
+ *
+ * @deprecated Superseded by single-pass upload stream provenance in StorageService.uploadFile (Phase 2D.1K.14.1.7.5).
+ * Retained strictly for legacy fixture compatibility; not invoked in production submitResponse pipeline.
+ *
+ * @param {object} file - Multer file object
+ * @returns {Promise<{payloadSize: number|null, payloadHash: string|null}>}
+ */
+export const computeUploadedFileMeta = async (file) => {
+  if (!file) return { payloadSize: null, payloadHash: null };
+
+  if (Buffer.isBuffer(file.buffer)) {
+    return {
+      payloadSize: file.buffer.length,
+      payloadHash: crypto.createHash('sha256').update(file.buffer).digest('hex')
+    };
+  }
+
+  if (file.path && fs.existsSync(file.path)) {
+    try {
+      const fileData = await fs.promises.readFile(file.path);
+      return {
+        payloadSize: fileData.length,
+        payloadHash: crypto.createHash('sha256').update(fileData).digest('hex')
+      };
+    } catch {
+      return new Promise((resolve) => {
+        const hash = crypto.createHash('sha256');
+        let size = 0;
+        const stream = fs.createReadStream(file.path);
+        stream.on('data', (chunk) => {
+          const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+          hash.update(buf);
+          size += buf.length;
+        });
+        stream.on('end', () => {
+          resolve({
+            payloadSize: typeof file.size === 'number' && file.size > 0 ? file.size : size,
+            payloadHash: hash.digest('hex')
+          });
+        });
+        stream.on('error', () => {
+          resolve({
+            payloadSize: typeof file.size === 'number' ? file.size : null,
+            payloadHash: null
+          });
+        });
+      });
+    }
+  }
+
+  return {
+    payloadSize: typeof file.size === 'number' ? file.size : null,
+    payloadHash: null
+  };
+};
+
+/**
  * @route   POST /api/responses/:formId
  * @desc    Submit response to a form
  * @access  Public
@@ -130,6 +193,7 @@ export const submitResponse = async (req, res, next) => {
   let heartbeatTimer = null;
   let clientDisconnectHandler = null;
   let targetFormId = req.params?.formId || req.params?.id || null;
+  let localUploadPermit = null;
   const uploadedKeys = [];
   try {
     const rawIdempotencyKey =
@@ -513,6 +577,23 @@ export const submitResponse = async (req, res, next) => {
       }
     }
 
+    // Upload admission management: acquire permit before reservation and stream creation
+    if (filesToUpload.length === 0) {
+      if (req.uploadPermit) {
+        req.uploadPermit.release();
+        req.uploadPermit = null;
+      }
+    } else {
+      localUploadPermit = req.uploadPermit || null;
+      if (!localUploadPermit) {
+        localUploadPermit = await uploadAdmissionService.acquire({
+          signal: req.signal,
+          timeoutMs: 30000,
+          metadata: { formId: req.params.formId, ip: req.ip }
+        });
+      }
+    }
+
     // Acquire durable, independently tracked submission reservation
     const reservationResult = await trackMutationOperation(
       () =>
@@ -531,6 +612,8 @@ export const submitResponse = async (req, res, next) => {
 
     leaseId = reservationResult.leaseId;
     fenceToken = reservationResult.fenceToken;
+    const expectedGeneration = reservationResult.barrierGeneration;
+    const publicationAttemptId = crypto.randomUUID();
     const authoritativeForm = reservationResult.form;
     targetFormId = authoritativeForm?._id || targetFormId;
     hasSubmissionReservation = true;
@@ -568,6 +651,7 @@ export const submitResponse = async (req, res, next) => {
     let response;
     try {
       response = await trackMutationOperation(async () => {
+        const responseId = new mongoose.Types.ObjectId();
         const stagedFiles = [];
       for (const item of filesToUpload) {
         if (uploadAbortController.signal.aborted) {
@@ -579,8 +663,10 @@ export const submitResponse = async (req, res, next) => {
         const stagingKey = `staging/forms/${form._id}/${leaseId}/${item.fileId}.${item.safeExt}`;
         const finalKey = item.key || `forms/${form._id}/responses/${item.fileId}.${item.safeExt}`;
 
-        const fileStream = fs.createReadStream(item.file.path);
-        fileStream.on('error', () => {}); // Ignore stream errors caused by async file deletion in tests
+        const fileStream = item.file.path && fs.existsSync(item.file.path)
+          ? fs.createReadStream(item.file.path)
+          : (item.file.buffer ? item.file.buffer : fs.createReadStream(item.file.path));
+
         uploadedKeys.push(stagingKey);
         const stagedRecorded = await SubmissionReservationManager.recordStagedKey(
           leaseId,
@@ -592,10 +678,12 @@ export const submitResponse = async (req, res, next) => {
           conflictErr.statusCode = 409;
           throw conflictErr;
         }
-        await storageService.uploadFile(fileStream, stagingKey, item.canonicalMime, {
+        const uploadResult = await storageService.uploadFile(fileStream, stagingKey, item.canonicalMime, {
           formId: form._id,
           reservationLeaseId: leaseId,
-          abortSignal: uploadAbortController.signal
+          abortSignal: uploadAbortController.signal,
+          admissionPermit: localUploadPermit,
+          returnMetadata: true
         });
 
         // Assert lease validity immediately after upload completes
@@ -610,7 +698,22 @@ export const submitResponse = async (req, res, next) => {
           throw conflictErr;
         }
 
-        stagedFiles.push({ item, stagingKey, finalKey });
+        const verifiedSize =
+          typeof uploadResult === 'object' && uploadResult !== null && uploadResult.payloadSize !== undefined
+            ? uploadResult.payloadSize
+            : (typeof item.file.size === 'number' ? item.file.size : null);
+        const verifiedHash =
+          typeof uploadResult === 'object' && uploadResult !== null && uploadResult.payloadHash !== undefined
+            ? uploadResult.payloadHash
+            : null;
+
+        stagedFiles.push({
+          item,
+          stagingKey,
+          finalKey,
+          payloadSize: verifiedSize,
+          payloadHash: verifiedHash
+        });
       }
 
       // Promote staged files to permanent response namespace before transactional commit
@@ -640,6 +743,9 @@ export const submitResponse = async (req, res, next) => {
         await storageService.copyFile(staged.stagingKey, staged.finalKey, {
           formId: form._id,
           reservationLeaseId: leaseId,
+          responseId,
+          payloadSize: staged.payloadSize,
+          payloadHash: staged.payloadHash,
           contentType: staged.item.canonicalMime,
           abortSignal: uploadAbortController.signal
         });
@@ -661,7 +767,7 @@ export const submitResponse = async (req, res, next) => {
             key: staged.finalKey,
             originalName: staged.item.file.originalname,
             mimeType: staged.item.canonicalMime,
-            size: staged.item.file.size
+            size: typeof staged.payloadSize === 'number' ? staged.payloadSize : staged.item.file.size
           }
         });
       }
@@ -731,7 +837,9 @@ export const submitResponse = async (req, res, next) => {
         const isCommitting = await SubmissionReservationManager.markCommitting(
           leaseId,
           fenceToken,
-          session
+          session,
+          undefined,
+          expectedGeneration
         );
         if (!isCommitting) {
           const conflictErr = new Error('Form is currently being deleted');
@@ -740,11 +848,13 @@ export const submitResponse = async (req, res, next) => {
         }
 
         const docData = {
+          _id: responseId,
           formId: req.params.formId,
           answers: validAnswersToSave,
           submittedBy,
           payloadHash,
           reservationLeaseId: leaseId,
+          publicationAttemptId,
           commitStatus: 'committed',
           ...(idempotencyKey ? { idempotencyKey } : {})
         };
@@ -769,21 +879,18 @@ export const submitResponse = async (req, res, next) => {
         // Step 5: Atomically transition promoted files to COMMITTED inside replica-set transaction session
         if (stagedFiles.length > 0) {
           const promotedFinalKeys = stagedFiles.map((s) => s.finalKey);
-          await StorageJournal.updateMany(
-            {
-              destinationKey: { $in: promotedFinalKeys },
-              type: STORAGE_OPERATION_TYPE.COPY_OBJECT,
-              status: STORAGE_JOURNAL_STATUS.CONFIRMED
-            },
-            {
-              $set: {
-                status: STORAGE_JOURNAL_STATUS.COMMITTED,
-                responseId: created._id,
-                updatedAt: txNow
-              }
-            },
-            { session }
-          );
+          const commitRes = await StorageJournal.commitInTransaction(promotedFinalKeys, {
+            responseId: created._id,
+            formId: req.params.formId,
+            session
+          });
+          if (!commitRes || commitRes.matchedCount !== promotedFinalKeys.length) {
+            const journalMismatchErr = new Error(
+              `StorageJournal commit mismatch: expected ${promotedFinalKeys.length} matching operations, got ${commitRes?.matchedCount || 0}`
+            );
+            journalMismatchErr.statusCode = 500;
+            throw journalMismatchErr;
+          }
         }
 
         return created;
@@ -813,6 +920,46 @@ export const submitResponse = async (req, res, next) => {
       if (heartbeatTimer) {
         clearInterval(heartbeatTimer);
         heartbeatTimer = null;
+      }
+
+      // Check if this error represents an unknown transaction commit result (commit ambiguity)
+      if (isUnknownTransactionCommitResult(uploadOrDbError)) {
+        logger.error('submission.transaction_commit_ambiguous', uploadOrDbError, {
+          leaseId,
+          formId: targetFormId,
+          event: 'submission.commit_ambiguous'
+        });
+
+        // Disarm destructive compensation; preserve reservation and S3 files
+        hasSubmissionReservation = false;
+
+        try {
+          await SubmissionReservationManager.armAmbiguousCommitQuarantine(
+            leaseId,
+            fenceToken,
+            targetFormId
+          );
+        } catch (quarantineErr) {
+          logger.warn('submission.arm_ambiguous_quarantine_failed', {
+            leaseId,
+            error: quarantineErr.message
+          });
+        }
+
+        res.setHeader('Retry-After', '2');
+        if (idempotencyKey) {
+          res.setHeader('Idempotency-Key', idempotencyKey);
+        }
+        return res.status(503).json({
+          success: false,
+          code: 'TRANSACTION_COMMIT_AMBIGUOUS',
+          message:
+            'Submission processing timed out with an unconfirmed transaction outcome. Please retry with the same idempotency key.',
+          retryable: true,
+          idempotencyKey: idempotencyKey || null,
+          leaseId,
+          publicationAttemptId
+        });
       }
 
       // Rollback S3 uploads & reservation ONLY if persistence did not commit
@@ -866,6 +1013,40 @@ export const submitResponse = async (req, res, next) => {
           success: false,
           message: 'Form is currently being deleted'
         });
+      }
+
+      if (uploadOrDbError instanceof AdmissionError) {
+        if (uploadOrDbError.code === 'ERR_UPLOAD_ADMISSION_QUEUE_FULL') {
+          res.setHeader('Retry-After', '5');
+          return res.status(429).json({
+            success: false,
+            code: 'ERR_UPLOAD_ADMISSION_QUEUE_FULL',
+            message: 'Upload concurrency limit reached. Please retry in a few moments.'
+          });
+        }
+        if (uploadOrDbError.code === 'ERR_UPLOAD_ADMISSION_TIMEOUT') {
+          res.setHeader('Retry-After', '5');
+          return res.status(504).json({
+            success: false,
+            code: 'ERR_UPLOAD_ADMISSION_TIMEOUT',
+            message: 'Server timed out waiting for upload capacity.'
+          });
+        }
+        if (uploadOrDbError.code === 'ERR_UPLOAD_ADMISSION_DRAINING') {
+          res.setHeader('Retry-After', '15');
+          return res.status(503).json({
+            success: false,
+            code: 'ERR_UPLOAD_ADMISSION_DRAINING',
+            message: 'Server is currently undergoing maintenance. Please retry shortly.'
+          });
+        }
+        if (uploadOrDbError.code === 'ERR_UPLOAD_ADMISSION_ABORTED') {
+          return res.status(499).json({
+            success: false,
+            code: 'ERR_UPLOAD_ADMISSION_ABORTED',
+            message: 'Upload admission canceled by client.'
+          });
+        }
       }
 
       if (uploadOrDbError.statusCode === 409 || uploadOrDbError.statusCode === 403) {
@@ -931,6 +1112,10 @@ export const submitResponse = async (req, res, next) => {
         track(releasePromise, { req, operationType: 'storage', description: 'reservation_release_cleanup' });
       }
       await releasePromise;
+    }
+    if (localUploadPermit) {
+      localUploadPermit.release();
+      localUploadPermit = null;
     }
     // Clean up temporary files from disk
     cleanupRequestTempFiles(req);

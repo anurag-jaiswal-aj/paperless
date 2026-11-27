@@ -399,6 +399,22 @@ export const waitForInFlightMutations = async (timeoutMs = 15000) => {
 export const drainInFlight = async (drainTimeoutMs = 15000) => {
   const startMonoMs = performance.now();
 
+  // 0. Drain upload admission coordinator (reject queue, wait for active uploads)
+  try {
+    const { uploadAdmissionService } = await import('../services/uploadAdmissionService.js');
+    if (uploadAdmissionService && typeof uploadAdmissionService.drain === 'function') {
+      const uploadDrained = await uploadAdmissionService.drain(drainTimeoutMs);
+      if (!uploadDrained) {
+        logger.warn('quiescence.drain_timed_out_upload_admission', {
+          event: 'quiescence.drain_failed',
+          reason: 'upload_admission_timeout'
+        });
+      }
+    }
+  } catch (drainErr) {
+    logger.warn('quiescence.drain_upload_admission_failed', { error: drainErr.message });
+  }
+
   // 1. Wait for in-flight HTTP mutations and active business operations
   const mutationsDrained = await waitForInFlightMutations(drainTimeoutMs);
   if (!mutationsDrained) {

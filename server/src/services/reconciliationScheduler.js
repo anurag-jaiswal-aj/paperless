@@ -330,22 +330,46 @@ export class ReconciliationScheduler {
             return { skipped: true, reason: 'BACKUP_QUIESCENCE_ACTIVE' };
           }
 
-          // Execute batch with shouldPause hook checking lease and quiescence,
-          // propagating workerContext to enforce lease validation on deletions
-          const batchResult = await this.reconciler.reconcileBatch({
-            limit: this.batchLimit,
-            probeDelayMs: this.probeDelayMs,
-            workerId: this.workerId,
-            workerContext: this,
-            isWorkerDriven: true,
-            requireWorkerContext: true,
-            shouldPause: async () => {
-              if (!this.isLeaseValid()) return true;
-              return await shouldPauseWorker();
-            }
-          });
+          // Establish Causal Barrier before reading or reconciling records
+          let barrierContext = null;
+          try {
+            const { causalBarrierService } = await import('./causalBarrierService.js');
+            barrierContext = await causalBarrierService.establishCausalBarrier({
+              role: this.role,
+              workerId: this.workerId,
+              incarnationId: this.incarnationId,
+              epoch: this.currentEpoch
+            });
 
-          return batchResult;
+            // Execute batch with shouldPause hook checking lease and quiescence,
+            // propagating workerContext to enforce lease validation on deletions
+            const batchResult = await this.reconciler.reconcileBatch({
+              limit: this.batchLimit,
+              probeDelayMs: this.probeDelayMs,
+              workerId: this.workerId,
+              workerContext: this,
+              barrierContext,
+              isWorkerDriven: true,
+              requireWorkerContext: true,
+              shouldPause: async () => {
+                if (!this.isLeaseValid()) return true;
+                return await shouldPauseWorker();
+              }
+            });
+
+            return batchResult;
+          } catch (barrierErr) {
+            logger.warn('reconciliation.causal_barrier_failed', {
+              error: barrierErr.message,
+              workerId: this.workerId
+            });
+            // If barrier failed, abort batch non-destructively without modifying records
+            return { skipped: true, reason: 'CAUSAL_BARRIER_FAILED', error: barrierErr.message };
+          } finally {
+            if (barrierContext?.session) {
+              await barrierContext.session.endSession().catch(() => {});
+            }
+          }
         },
         { rejectOnQuiescence: false }
       );

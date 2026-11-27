@@ -45,6 +45,10 @@ const responseSchema = new mongoose.Schema({
     type: String,
     default: null
   },
+  publicationAttemptId: {
+    type: String,
+    default: null
+  },
   commitStatus: {
     type: String,
     enum: ['committed', 'pending'],

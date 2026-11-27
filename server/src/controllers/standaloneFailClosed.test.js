@@ -123,7 +123,7 @@ describe('Standalone MongoDB Fail-Closed Enforcement (No Fallback)', () => {
     await expect(
       withRequiredTransaction(async () => {
         callbackExecuted = true;
-      })
+      }, { partitionKey: 'test-standalone-key' })
     ).rejects.toThrow(/replica[- ]set/i);
     expect(callbackExecuted).toBe(false);
   });

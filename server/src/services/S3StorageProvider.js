@@ -125,7 +125,15 @@ class S3StorageProvider {
     if (!this.client) {
       if (this.isMock) {
         logger.debug('storage.s3_mock_upload', { path, mimeType });
-        if (fileBuffer && typeof fileBuffer.destroy === 'function') {
+        if (fileBuffer && typeof fileBuffer.pipe === 'function') {
+          // Drain stream to simulate S3 upload consumer so transform finishes
+          await new Promise((resolve, reject) => {
+            fileBuffer.on('data', () => {});
+            fileBuffer.on('end', resolve);
+            fileBuffer.on('error', reject);
+            fileBuffer.resume();
+          });
+        } else if (fileBuffer && typeof fileBuffer.destroy === 'function') {
           fileBuffer.destroy();
         }
         const mockEtag = '"mock-etag-' + Date.now() + '"';

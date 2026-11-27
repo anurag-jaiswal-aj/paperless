@@ -235,7 +235,7 @@ describe('Phase 4.4 Workstream 2D.1F: Correctness & Remediation Test Suite', () 
           // Simulate sudden lease expiration mid-transaction
           instanceLeaseService.setLocalLeaseDeadlineForTesting(performance.now() - 100);
           return 'done';
-        })
+        }, { partitionKey: 'test-blk04-fence' })
       ).rejects.toThrow('Instance lease expired during transaction execution');
     });
 
@@ -244,7 +244,7 @@ describe('Phase 4.4 Workstream 2D.1F: Correctness & Remediation Test Suite', () 
       instanceLeaseService.setLocalLeaseDeadlineForTesting(performance.now() + 1000);
 
       await expect(
-        withRequiredTransaction(async () => 'done')
+        withRequiredTransaction(async () => 'done', { partitionKey: 'test-blk04-fence' })
       ).rejects.toThrow('Instance lease near expiration before transaction start');
     });
   });

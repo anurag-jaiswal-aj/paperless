@@ -91,6 +91,20 @@ services:
     deploy:
       mode: replicated
       replicas: 1
+      resources:
+        limits:
+          memory: 1024M
+        reservations:
+          memory: 256M
+    mem_limit: 1024m
+    user: "1000:1000"
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777,size=768M
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     depends_on:
       mongo:
         condition: service_healthy
@@ -117,6 +131,10 @@ services:
       - S3_ACCESS_KEY_ID=${S3_ACCESS_KEY_ID:-staging_minio_admin}
       - S3_SECRET_ACCESS_KEY=${S3_SECRET_ACCESS_KEY:-staging_minio_password}
       - MAX_FILE_SIZE=${MAX_FILE_SIZE:-5242880}
+      - UPLOAD_ADMISSION_MAX_CONCURRENT=${UPLOAD_ADMISSION_MAX_CONCURRENT:-10}
+      - UPLOAD_ADMISSION_MAX_QUEUE_SIZE=${UPLOAD_ADMISSION_MAX_QUEUE_SIZE:-50}
+      - UPLOAD_ADMISSION_QUEUE_TIMEOUT_MS=${UPLOAD_ADMISSION_QUEUE_TIMEOUT_MS:-30000}
+      - NODE_OPTIONS=--max-old-space-size=256
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o-mini}
       - RESEND_API_KEY=${RESEND_API_KEY:-}

@@ -2162,7 +2162,10 @@ export const recoverAbandonedFormDeletions = async (options = {}) =>
           for (const deadId of deadFormIds) {
             if (signal?.aborted || (await shouldPauseWorker())) break;
             const deadIdStr = deadId.toString();
-            const deadReservations = await SubmissionReservation.find({ formId: deadId }).lean();
+            const deadReservations = await SubmissionReservation.find({
+              formId: deadId,
+              $or: [{ quarantinedUntil: null }, { quarantinedUntil: { $lte: now } }]
+            }).lean();
             for (const resItem of deadReservations) {
               if (signal?.aborted || (await shouldPauseWorker())) break;
               try {

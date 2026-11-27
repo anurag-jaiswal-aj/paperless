@@ -13,7 +13,10 @@ import { logger } from '../utils/logger.js';
 export { INSTANCE_LEASE_SINGLETON_ID, INSTANCE_LEASE_STATUS, ALL_16_SLOT_IDS };
 
 export class InstanceFencedError extends Error {
-  constructor(message = 'Instance is fenced or deployment lease has expired', code = 'INSTANCE_FENCED') {
+  constructor(
+    message = 'Instance is fenced or deployment lease has expired',
+    code = 'INSTANCE_FENCED'
+  ) {
     super(message);
     this.name = 'InstanceFencedError';
     this.code = code;
@@ -72,10 +75,16 @@ export const isInstanceLeaseValid = (minRemainingMs = 0) => {
     // If local test deadlines were explicitly injected without an instanceId, evaluate them
     if (localMonotonicDeadlineMs > 0 || localUptimeDeadlineSec > 0) {
       const bufferMs = Math.max(0, minRemainingMs);
-      if (localMonotonicDeadlineMs > 0 && performance.now() + bufferMs >= localMonotonicDeadlineMs) {
+      if (
+        localMonotonicDeadlineMs > 0 &&
+        performance.now() + bufferMs >= localMonotonicDeadlineMs
+      ) {
         return false;
       }
-      if (localUptimeDeadlineSec > 0 && systemUptimeGetter() + (bufferMs / 1000) >= localUptimeDeadlineSec) {
+      if (
+        localUptimeDeadlineSec > 0 &&
+        systemUptimeGetter() + bufferMs / 1000 >= localUptimeDeadlineSec
+      ) {
         return false;
       }
       return true;
@@ -95,7 +104,10 @@ export const isInstanceLeaseValid = (minRemainingMs = 0) => {
   if (localMonotonicDeadlineMs > 0 && performance.now() + bufferMs >= localMonotonicDeadlineMs) {
     return false;
   }
-  if (localUptimeDeadlineSec > 0 && systemUptimeGetter() + (bufferMs / 1000) >= localUptimeDeadlineSec) {
+  if (
+    localUptimeDeadlineSec > 0 &&
+    systemUptimeGetter() + bufferMs / 1000 >= localUptimeDeadlineSec
+  ) {
     return false;
   }
   return true;
@@ -358,10 +370,11 @@ export const acquireInstanceLease = async (options = {}) => {
     parseInt(process.env.INSTANCE_HEARTBEAT_INTERVAL_MS, 10) ||
     DEFAULT_INSTANCE_HEARTBEAT_INTERVAL_MS;
 
-  const defaultQuarantine =
-    process.env.INSTANCE_QUARANTINE_COOLDOWN_MS
-      ? parseInt(process.env.INSTANCE_QUARANTINE_COOLDOWN_MS, 10)
-      : (process.env.NODE_ENV === 'test' ? 0 : DEFAULT_QUARANTINE_COOLDOWN_MS);
+  const defaultQuarantine = process.env.INSTANCE_QUARANTINE_COOLDOWN_MS
+    ? parseInt(process.env.INSTANCE_QUARANTINE_COOLDOWN_MS, 10)
+    : process.env.NODE_ENV === 'test'
+      ? 0
+      : DEFAULT_QUARANTINE_COOLDOWN_MS;
 
   const quarantineCooldownMs =
     options.quarantineCooldownMs !== undefined
@@ -501,7 +514,8 @@ export const acquireInstanceLease = async (options = {}) => {
       return {
         success: false,
         reason: 'SYSTEM_QUIESCENCE_ACTIVE',
-        message: 'Cannot register application instance while system is actively in quiescence or draining'
+        message:
+          'Cannot register application instance while system is actively in quiescence or draining'
       };
     } else if (txErr.message === 'SYSTEM_RECOVERY_REQUIRED') {
       logger.warn('Instance registration rejected: system is in RECOVERY_REQUIRED status', {
@@ -533,7 +547,11 @@ export const acquireInstanceLease = async (options = {}) => {
     const existing = await InstanceLease.findById(INSTANCE_LEASE_SINGLETON_ID).lean();
 
     // Check if rejection was due to quarantine cooldown
-    if (existing?.status === INSTANCE_LEASE_STATUS.ACTIVE && existing.expiresAt && existing.expiresAt < now) {
+    if (
+      existing?.status === INSTANCE_LEASE_STATUS.ACTIVE &&
+      existing.expiresAt &&
+      existing.expiresAt < now
+    ) {
       const remainingQuarantineMs = Math.max(
         0,
         new Date(existing.expiresAt).getTime() + quarantineCooldownMs - now.getTime()
@@ -576,7 +594,7 @@ export const acquireInstanceLease = async (options = {}) => {
   isFencedExplicitly = false;
   consecutiveHeartbeatFailures = 0;
   localMonotonicDeadlineMs = performance.now() + leaseTtlMs;
-  localUptimeDeadlineSec = systemUptimeGetter() + (leaseTtlMs / 1000);
+  localUptimeDeadlineSec = systemUptimeGetter() + leaseTtlMs / 1000;
 
   // Start background heartbeat unless explicitly skipped (e.g. in one-shot tests)
   if (!options.skipHeartbeat) {
@@ -607,7 +625,7 @@ export const startHeartbeat = (instanceId, leaseTtlMs, heartbeatIntervalMs) => {
   stopHeartbeat();
 
   localMonotonicDeadlineMs = performance.now() + leaseTtlMs;
-  localUptimeDeadlineSec = systemUptimeGetter() + (leaseTtlMs / 1000);
+  localUptimeDeadlineSec = systemUptimeGetter() + leaseTtlMs / 1000;
   consecutiveHeartbeatFailures = 0;
   isFencedExplicitly = false;
 
@@ -615,7 +633,10 @@ export const startHeartbeat = (instanceId, leaseTtlMs, heartbeatIntervalMs) => {
     const now = new Date();
 
     // 1. Pre-heartbeat check: if local deadline already expired, self-fence immediately
-    if (performance.now() >= localMonotonicDeadlineMs || systemUptimeGetter() >= localUptimeDeadlineSec) {
+    if (
+      performance.now() >= localMonotonicDeadlineMs ||
+      systemUptimeGetter() >= localUptimeDeadlineSec
+    ) {
       logger.fatal(
         'FATAL: Instance lease expired locally before heartbeat renewal! Self-fencing process immediately.',
         { event: 'instance_lease.fenced_locally', instanceId }
@@ -687,7 +708,7 @@ export const startHeartbeat = (instanceId, leaseTtlMs, heartbeatIntervalMs) => {
 
       consecutiveHeartbeatFailures = 0;
       localMonotonicDeadlineMs = performance.now() + leaseTtlMs;
-      localUptimeDeadlineSec = systemUptimeGetter() + (leaseTtlMs / 1000);
+      localUptimeDeadlineSec = systemUptimeGetter() + leaseTtlMs / 1000;
     } catch (err) {
       consecutiveHeartbeatFailures++;
       logger.error(
@@ -750,47 +771,187 @@ export const releaseInstanceLease = async (instanceId = activeInstanceId) => {
     return { success: true, released: false };
   }
 
+  const now = new Date();
+  const BackupLease =
+    mongoose.models.BackupLease ||
+    (mongoose.modelNames().includes('BackupLease') ? mongoose.model('BackupLease') : null);
+
+  let hasTxSupport = false;
   try {
-    const updated = await InstanceLease.findOneAndUpdate(
-      {
+    const { supportsTransactions } = await import('../utils/dbTransaction.js');
+    hasTxSupport = supportsTransactions();
+  } catch {
+    hasTxSupport = false;
+  }
+
+  let wasReleased = false;
+  let wasExpired = false;
+
+  if (hasTxSupport) {
+    const releaseSession = await mongoose.startSession();
+    try {
+      await releaseSession.withTransaction(
+        async () => {
+          // 1. Verify lease is held by this instance
+          const currentDoc = await InstanceLease.findOne({
+            _id: INSTANCE_LEASE_SINGLETON_ID,
+            instanceId
+          }).session(releaseSession);
+
+          if (!currentDoc) {
+            wasReleased = false;
+            return;
+          }
+
+          // 2. Quarantine Cooldown Barrier:
+          // If lease already expired, retain ACTIVE status so successors wait quarantine cooldown.
+          if (currentDoc.status === INSTANCE_LEASE_STATUS.ACTIVE && currentDoc.expiresAt <= now) {
+            wasExpired = true;
+            wasReleased = false;
+
+            if (BackupLease) {
+              await BackupLease.updateOne(
+                { _id: 'singleton', activeInstanceId: instanceId },
+                { $set: { activeInstanceId: null }, $inc: { version: 1 } },
+                { session: releaseSession }
+              );
+            }
+            return;
+          }
+
+          if (currentDoc.status === INSTANCE_LEASE_STATUS.RELEASED) {
+            wasReleased = false;
+            return;
+          }
+
+          // 3. Clean release: atomically update InstanceLease, slots, and BackupLease
+          const updated = await InstanceLease.findOneAndUpdate(
+            {
+              _id: INSTANCE_LEASE_SINGLETON_ID,
+              instanceId,
+              status: INSTANCE_LEASE_STATUS.ACTIVE,
+              expiresAt: { $gt: now }
+            },
+            {
+              $set: {
+                status: INSTANCE_LEASE_STATUS.RELEASED,
+                expiresAt: now
+              },
+              $inc: { version: 1 }
+            },
+            { session: releaseSession, new: true }
+          );
+
+          if (!updated) {
+            wasReleased = false;
+            return;
+          }
+
+          await InstanceLeaseSlot.updateMany(
+            { instanceId, status: INSTANCE_LEASE_STATUS.ACTIVE },
+            { $set: { status: INSTANCE_LEASE_STATUS.RELEASED, expiresAt: now } },
+            { session: releaseSession }
+          );
+
+          if (BackupLease) {
+            await BackupLease.updateOne(
+              { _id: 'singleton', activeInstanceId: instanceId },
+              { $set: { activeInstanceId: null }, $inc: { version: 1 } },
+              { session: releaseSession }
+            );
+          }
+
+          wasReleased = true;
+        },
+        {
+          readConcern: { level: 'snapshot' },
+          writeConcern: { w: 'majority' },
+          maxCommitTimeMS: 10000
+        }
+      );
+    } catch (txErr) {
+      logger.error('instance_lease.release_transaction_error', txErr, {
+        event: 'instance_lease.release_error',
+        instanceId
+      });
+      return { success: false, error: txErr.message };
+    } finally {
+      await releaseSession.endSession().catch(() => {});
+    }
+  } else {
+    // Non-transactional fallback for standalone test environments
+    try {
+      const currentDoc = await InstanceLease.findOne({
         _id: INSTANCE_LEASE_SINGLETON_ID,
         instanceId
-      },
-      {
-        $set: {
-          status: INSTANCE_LEASE_STATUS.RELEASED,
-          expiresAt: new Date()
-        },
-        $inc: { version: 1 }
-      },
-      { new: true }
-    );
+      });
 
-    try {
-      await InstanceLeaseSlot.updateMany(
-        { instanceId },
-        { $set: { status: INSTANCE_LEASE_STATUS.RELEASED, expiresAt: new Date() } }
-      );
-    } catch {
-      // Non-fatal if slots collection is temporarily unavailable
+      if (!currentDoc || currentDoc.status === INSTANCE_LEASE_STATUS.RELEASED) {
+        wasReleased = false;
+      } else if (
+        currentDoc.status === INSTANCE_LEASE_STATUS.ACTIVE &&
+        currentDoc.expiresAt <= now
+      ) {
+        wasExpired = true;
+        wasReleased = false;
+        if (BackupLease) {
+          await BackupLease.updateOne(
+            { _id: 'singleton', activeInstanceId: instanceId },
+            { $set: { activeInstanceId: null }, $inc: { version: 1 } }
+          );
+        }
+      } else {
+        const updated = await InstanceLease.findOneAndUpdate(
+          {
+            _id: INSTANCE_LEASE_SINGLETON_ID,
+            instanceId,
+            status: INSTANCE_LEASE_STATUS.ACTIVE,
+            expiresAt: { $gt: now }
+          },
+          {
+            $set: {
+              status: INSTANCE_LEASE_STATUS.RELEASED,
+              expiresAt: now
+            },
+            $inc: { version: 1 }
+          },
+          { new: true }
+        );
+
+        if (updated) {
+          await InstanceLeaseSlot.updateMany(
+            { instanceId, status: INSTANCE_LEASE_STATUS.ACTIVE },
+            { $set: { status: INSTANCE_LEASE_STATUS.RELEASED, expiresAt: now } }
+          );
+
+          if (BackupLease) {
+            await BackupLease.updateOne(
+              { _id: 'singleton', activeInstanceId: instanceId },
+              { $set: { activeInstanceId: null }, $inc: { version: 1 } }
+            );
+          }
+          wasReleased = true;
+        }
+      }
+    } catch (nonTxErr) {
+      logger.error(`Failed to release instance lease cleanly: ${nonTxErr.message}`, nonTxErr, {
+        event: 'instance_lease.release_error',
+        instanceId
+      });
+      return { success: false, error: nonTxErr.message };
     }
-
-    activeInstanceId = null;
-
-    logger.info('Released single-instance deployment lease cleanly', {
-      event: 'instance_lease.released',
-      instanceId,
-      wasReleased: Boolean(updated)
-    });
-
-    return { success: true, released: Boolean(updated) };
-  } catch (err) {
-    logger.error(`Failed to release instance lease cleanly: ${err.message}`, err, {
-      event: 'instance_lease.release_error',
-      instanceId
-    });
-    return { success: false, error: err.message };
   }
+
+  activeInstanceId = null;
+
+  logger.info('Released single-instance deployment lease cleanly', {
+    event: 'instance_lease.released',
+    instanceId,
+    wasReleased,
+    wasExpired
+  });
+
+  return { success: true, released: wasReleased, wasExpired };
 };
 
 export default {

@@ -420,7 +420,7 @@ describe('Phase 4.4 Workstream 2D.1A: HTTP Disconnects & Asynchronous Mutation T
             // Simulate transaction processing delay
             await sleep(250);
             txCommitted = true;
-          });
+          }, { partitionKey: 'test-disconnect-partition' });
         });
         if (!res.writableEnded) {
           res.status(201).json({ id: createdFormId });

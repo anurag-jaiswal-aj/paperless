@@ -48,8 +48,7 @@ export const resetSystemUptimeForTesting = () => {
  */
 export const isTtlMonitorDisabledByConfig = (env = process.env) => {
   return Boolean(
-    env.PAPERLESS_DISABLE_TTL_MONITOR === '1' ||
-    env.PAPERLESS_DISABLE_TTL_MONITOR === 'true'
+    env.PAPERLESS_DISABLE_TTL_MONITOR === '1' || env.PAPERLESS_DISABLE_TTL_MONITOR === 'true'
   );
 };
 
@@ -133,9 +132,8 @@ export const setMonotonicWatchdog = (leaseId, maxDurationMs) => {
     maxAllowedDurationMs: maxDurationMs,
     monotonicDeadlineMs: start + maxDurationMs,
     uptimeStartSec: uptimeSec,
-    uptimeDeadlineSec: typeof uptimeSec === 'number' && uptimeSec > 0
-      ? uptimeSec + (maxDurationMs / 1000)
-      : null
+    uptimeDeadlineSec:
+      typeof uptimeSec === 'number' && uptimeSec > 0 ? uptimeSec + maxDurationMs / 1000 : null
   };
 };
 
@@ -176,15 +174,16 @@ export const syncAdmissionState = async (status) => {
       // Distributed worker coordination signaling (AW-03)
       if (mongoose.connection && mongoose.connection.readyState === 1) {
         const workerColl = mongoose.connection.db.collection('app_workers');
-        await workerColl.updateMany(
-          { status: 'ACTIVE' },
-          { $set: { status: 'DRAINING', updatedAt: new Date() } }
-        ).catch(() => {});
+        await workerColl
+          .updateMany({ status: 'ACTIVE' }, { $set: { status: 'DRAINING', updatedAt: new Date() } })
+          .catch(() => {});
       }
     } else if (status === BACKUP_LEASE_STATUS.NORMAL) {
       // Safety guard: Never open mutation admission if the persistent singleton is currently RECOVERY_REQUIRED!
       if (mongoose.connection && mongoose.connection.readyState === 1) {
-        const leaseDoc = await BackupLease.findById(BACKUP_LEASE_SINGLETON_ID).lean().catch(() => null);
+        const leaseDoc = await BackupLease.findById(BACKUP_LEASE_SINGLETON_ID)
+          .lean()
+          .catch(() => null);
         if (leaseDoc && leaseDoc.status === BACKUP_LEASE_STATUS.RECOVERY_REQUIRED) {
           logger.warn('quiescence.sync_admission_refused_recovery_required', {
             event: 'quiescence.sync_admission_refused',
@@ -228,7 +227,10 @@ export const isMonotonicWatchdogExpired = (leaseId) => {
   ) {
     try {
       const currentUptime = getSystemUptime();
-      if (typeof currentUptime === 'number' && currentUptime >= activeMonotonicWatchdog.uptimeDeadlineSec) {
+      if (
+        typeof currentUptime === 'number' &&
+        currentUptime >= activeMonotonicWatchdog.uptimeDeadlineSec
+      ) {
         return true;
       }
     } catch {
@@ -245,7 +247,10 @@ export const getMonotonicRemainingMs = (leaseId) => {
   if (leaseId && activeMonotonicWatchdog.leaseId !== leaseId) {
     return Infinity;
   }
-  const perfRemaining = Math.max(0, activeMonotonicWatchdog.monotonicDeadlineMs - performance.now());
+  const perfRemaining = Math.max(
+    0,
+    activeMonotonicWatchdog.monotonicDeadlineMs - performance.now()
+  );
   if (
     typeof activeMonotonicWatchdog.uptimeDeadlineSec === 'number' &&
     activeMonotonicWatchdog.uptimeDeadlineSec > 0
@@ -253,7 +258,10 @@ export const getMonotonicRemainingMs = (leaseId) => {
     try {
       const currentUptime = getSystemUptime();
       if (typeof currentUptime === 'number') {
-        const uptimeRemaining = Math.max(0, (activeMonotonicWatchdog.uptimeDeadlineSec - currentUptime) * 1000);
+        const uptimeRemaining = Math.max(
+          0,
+          (activeMonotonicWatchdog.uptimeDeadlineSec - currentUptime) * 1000
+        );
         return Math.min(perfRemaining, uptimeRemaining);
       }
     } catch {
@@ -409,7 +417,7 @@ export const ensureSingletonExists = async () => {
  * @returns {Promise<object>}
  */
 export const acquire = async (options = {}) => {
-  const opts = typeof options === 'string' ? { backupSessionId: options } : (options || {});
+  const opts = typeof options === 'string' ? { backupSessionId: options } : options || {};
   if (!mongoose.connection || mongoose.connection.readyState !== 1) {
     return {
       success: false,
@@ -460,21 +468,22 @@ export const acquire = async (options = {}) => {
     mongoose.models.InstanceLease ||
     (mongoose.modelNames().includes('InstanceLease') ? mongoose.model('InstanceLease') : null);
 
+  let numActiveInstances = 0;
   if (InstanceLease) {
     try {
-      const activeInstances = await InstanceLease.countDocuments({
+      numActiveInstances = await InstanceLease.countDocuments({
         status: 'ACTIVE',
         expiresAt: { $gt: now }
       });
-      if (activeInstances > 1) {
+      if (numActiveInstances > 1) {
         logger.warn('Quiescence acquire rejected: multiple active instances detected', {
           event: 'quiescence.multiple_instances_detected',
-          activeInstances
+          activeInstances: numActiveInstances
         });
         return {
           success: false,
           reason: 'MULTIPLE_INSTANCES_ACTIVE',
-          message: `Quiescence requires a single active application instance, found ${activeInstances} active instances`
+          message: `Quiescence requires a single active application instance, found ${numActiveInstances} active instances`
         };
       }
     } catch (instErr) {
@@ -497,7 +506,8 @@ export const acquire = async (options = {}) => {
     return {
       success: false,
       reason: 'RECOVERY_REQUIRED',
-      message: 'System is in RECOVERY_REQUIRED status; explicit recovery must be completed before acquiring a new lease',
+      message:
+        'System is in RECOVERY_REQUIRED status; explicit recovery must be completed before acquiring a new lease',
       drainFailureReason: currentLeaseDoc.drainFailureReason,
       drainFailureAt: currentLeaseDoc.drainFailureAt
     };
@@ -537,6 +547,10 @@ export const acquire = async (options = {}) => {
     },
     $inc: { version: 1 }
   };
+
+  if (numActiveInstances === 0) {
+    update.$set.activeInstanceId = null;
+  }
 
   const acquired = await BackupLease.findOneAndUpdate(query, update, {
     new: true,
@@ -869,7 +883,9 @@ export const release = async (options = {}) => {
     (current.expiresAt && current.expiresAt < now) ||
     (hardDeadline && hardDeadline <= now) ||
     (current.bootId && current.bootId !== currentBootId) ||
-    (current.bootId === currentBootId && typeof current.monotonicHardDeadlineMs === 'number' && currentHostMonoMs >= current.monotonicHardDeadlineMs) ||
+    (current.bootId === currentBootId &&
+      typeof current.monotonicHardDeadlineMs === 'number' &&
+      currentHostMonoMs >= current.monotonicHardDeadlineMs) ||
     (current.grantedAt && now.getTime() < new Date(current.grantedAt).getTime()) ||
     isMonotonicWatchdogExpired(leaseId)
   );
@@ -992,7 +1008,10 @@ export const recoverFromDrainFailure = async (options = {}) => {
     };
   }
 
-  if (doc.status !== BACKUP_LEASE_STATUS.RECOVERY_REQUIRED && doc.status !== BACKUP_LEASE_STATUS.DRAINING) {
+  if (
+    doc.status !== BACKUP_LEASE_STATUS.RECOVERY_REQUIRED &&
+    doc.status !== BACKUP_LEASE_STATUS.DRAINING
+  ) {
     return {
       success: false,
       reason: 'NOT_IN_RECOVERY',
@@ -1010,8 +1029,10 @@ export const recoverFromDrainFailure = async (options = {}) => {
 
   // 1. Check in-flight mutations
   const gateMod = await import('../middleware/quiescenceGate.js');
-  const inFlight = typeof gateMod.getInFlightMutationCount === 'function' ? gateMod.getInFlightMutationCount() : 0;
-  const activeOps = typeof gateMod.getActiveOperationCount === 'function' ? gateMod.getActiveOperationCount() : 0;
+  const inFlight =
+    typeof gateMod.getInFlightMutationCount === 'function' ? gateMod.getInFlightMutationCount() : 0;
+  const activeOps =
+    typeof gateMod.getActiveOperationCount === 'function' ? gateMod.getActiveOperationCount() : 0;
   if (inFlight > 0 || activeOps > 0) {
     return {
       success: false,
@@ -1197,7 +1218,9 @@ export const checkDurableDatastoreDrain = async (options = {}) => {
 
     // 3. Post-Cascade Cleanup Jobs: cleaning or pending
     const cleanupColl = db.collection('deletioncleanupjobs');
-    const cleanupJobs = await cleanupColl.countDocuments({ status: { $in: ['cleaning', 'pending'] } });
+    const cleanupJobs = await cleanupColl.countDocuments({
+      status: { $in: ['cleaning', 'pending'] }
+    });
     diagnostics.activeCleanupJobs = cleanupJobs;
 
     // 4. Background Workers: Durable app_workers collection check + in-memory tasks
@@ -1225,8 +1248,29 @@ export const checkDurableDatastoreDrain = async (options = {}) => {
     }
     diagnostics.activeWorkers = activeWorkers + inMemoryWorkers;
 
-    // 5. Storage Operations Journal: All non-terminal states
+    // 5. Storage Operations Journal: Bifurcate non-terminal vs terminal states
     const storageColl = db.collection('storage_operations');
+    const activeStorageQuery = {
+      $or: [
+        {
+          status: {
+            $in: ['PENDING', 'CREATED', 'DISPATCHED', 'RECONCILING', 'AMBIGUOUS']
+          }
+        },
+        {
+          status: 'CONFIRMED',
+          type: { $in: ['PutObject', 'CopyObject', 'MultipartUpload'] },
+          $or: [{ vacuumAt: null }, { vacuumAt: { $exists: false } }]
+        }
+      ]
+    };
+
+    const confirmedUncommittedQuery = {
+      status: 'CONFIRMED',
+      type: { $in: ['PutObject', 'CopyObject', 'MultipartUpload'] },
+      $or: [{ vacuumAt: null }, { vacuumAt: { $exists: false } }]
+    };
+
     const [
       activeStorage,
       dispatchedOps,
@@ -1235,11 +1279,9 @@ export const checkDurableDatastoreDrain = async (options = {}) => {
       reconcilingOps,
       pendingReconcileOps
     ] = await Promise.all([
-      storageColl.countDocuments({
-        status: { $in: ['PENDING', 'CREATED', 'DISPATCHED', 'CONFIRMED', 'RECONCILING', 'AMBIGUOUS'] }
-      }),
+      storageColl.countDocuments(activeStorageQuery),
       storageColl.countDocuments({ status: { $in: ['PENDING', 'CREATED', 'DISPATCHED'] } }),
-      storageColl.countDocuments({ status: 'CONFIRMED' }),
+      storageColl.countDocuments(confirmedUncommittedQuery),
       storageColl.countDocuments({ status: 'AMBIGUOUS', quarantinedUntil: { $gt: now } }),
       storageColl.countDocuments({ status: 'RECONCILING', lockedUntil: { $gt: now } }),
       storageColl.countDocuments({
@@ -1256,7 +1298,8 @@ export const checkDurableDatastoreDrain = async (options = {}) => {
     diagnostics.storageDetails.pendingReconcile = pendingReconcileOps;
 
     // 6. Active WiredTiger multi-document transactions via currentOp and in-process tracker
-    const inProcessTx = typeof getInFlightTransactionCount === 'function' ? getInFlightTransactionCount() : 0;
+    const inProcessTx =
+      typeof getInFlightTransactionCount === 'function' ? getInFlightTransactionCount() : 0;
     diagnostics.inProcessActiveTransactions = inProcessTx;
 
     const commandTimeoutMs = options?.commandTimeoutMs || 5000;
@@ -1269,11 +1312,7 @@ export const checkDurableDatastoreDrain = async (options = {}) => {
       if (Array.isArray(currentOp?.inprog)) {
         const userTx = currentOp.inprog.filter((op) => {
           const ns = op.ns || '';
-          return (
-            !ns.startsWith('local.') &&
-            !ns.startsWith('admin.') &&
-            !ns.startsWith('config.')
-          );
+          return !ns.startsWith('local.') && !ns.startsWith('admin.') && !ns.startsWith('config.');
         });
         diagnostics.activeTransactions = userTx.length;
         diagnostics.transactionCheckStatus = 'VERIFIED';
@@ -1294,13 +1333,28 @@ export const checkDurableDatastoreDrain = async (options = {}) => {
       let errType = 'ERROR';
       const msg = txErr?.message || '';
       const code = txErr?.code;
-      if (code === 13 || txErr?.codeName === 'Unauthorized' || /not authorized|requires.*privilege|unauthorized/i.test(msg)) {
+      if (
+        code === 13 ||
+        txErr?.codeName === 'Unauthorized' ||
+        /not authorized|requires.*privilege|unauthorized/i.test(msg)
+      ) {
         errType = 'UNAUTHORIZED';
-      } else if (code === 50 || txErr?.codeName === 'MaxTimeMSExpired' || /timed? ?out|exceeded.*limit/i.test(msg)) {
+      } else if (
+        code === 50 ||
+        txErr?.codeName === 'MaxTimeMSExpired' ||
+        /timed? ?out|exceeded.*limit/i.test(msg)
+      ) {
         errType = 'TIMEOUT';
-      } else if (txErr?.name === 'MongoNetworkError' || /topology was destroyed|connection closed|socket/i.test(msg)) {
+      } else if (
+        txErr?.name === 'MongoNetworkError' ||
+        /topology was destroyed|connection closed|socket/i.test(msg)
+      ) {
         errType = 'CONNECTIVITY_ERROR';
-      } else if (code === 59 || txErr?.codeName === 'CommandNotFound' || /no such (cmd|command)|not supported/i.test(msg)) {
+      } else if (
+        code === 59 ||
+        txErr?.codeName === 'CommandNotFound' ||
+        /no such (cmd|command)|not supported/i.test(msg)
+      ) {
         errType = 'MOCK_UNSUPPORTED';
       }
 
@@ -1370,7 +1424,8 @@ export const checkDurableDatastoreDrain = async (options = {}) => {
     diagnostics.activeWorkers === 0 &&
     diagnostics.activeStorageOperations === 0;
 
-  const txClear = diagnostics.activeTransactions === 0 && diagnostics.inProcessActiveTransactions === 0;
+  const txClear =
+    diagnostics.activeTransactions === 0 && diagnostics.inProcessActiveTransactions === 0;
 
   let isDrained = false;
   let reason;
@@ -1451,9 +1506,18 @@ export const markQuiesced = async (options = {}) => {
     try {
       const gateMod = await import('../middleware/quiescenceGate.js');
       const workerMod = await import('./workerCoordinationService.js');
-      const inFlightMutations = typeof gateMod.getInFlightMutationCount === 'function' ? gateMod.getInFlightMutationCount() : 0;
-      const activeOps = typeof gateMod.getActiveOperationCount === 'function' ? gateMod.getActiveOperationCount() : 0;
-      const activeWorkers = typeof workerMod.getActiveWorkerTaskCount === 'function' ? workerMod.getActiveWorkerTaskCount() : 0;
+      const inFlightMutations =
+        typeof gateMod.getInFlightMutationCount === 'function'
+          ? gateMod.getInFlightMutationCount()
+          : 0;
+      const activeOps =
+        typeof gateMod.getActiveOperationCount === 'function'
+          ? gateMod.getActiveOperationCount()
+          : 0;
+      const activeWorkers =
+        typeof workerMod.getActiveWorkerTaskCount === 'function'
+          ? workerMod.getActiveWorkerTaskCount()
+          : 0;
       if (inFlightMutations > 0 || activeOps > 0 || activeWorkers > 0) {
         isDrained = false;
       }
@@ -1468,7 +1532,8 @@ export const markQuiesced = async (options = {}) => {
         return {
           success: false,
           reason: 'DRAIN_PENDING',
-          message: 'Cannot transition to QUIESCED: in-flight operations or worker tasks are still active'
+          message:
+            'Cannot transition to QUIESCED: in-flight operations or worker tasks are still active'
         };
       }
     }
@@ -1483,9 +1548,10 @@ export const markQuiesced = async (options = {}) => {
         return {
           success: false,
           reason: durableDrain.reason || 'DRAIN_PENDING',
-          message: durableDrain.reason === 'TRANSACTION_DRAIN_UNVERIFIED'
-            ? 'Cannot transition to QUIESCED: multi-document transaction drain could not be verified'
-            : 'Cannot transition to QUIESCED: durable datastore mutations are still active',
+          message:
+            durableDrain.reason === 'TRANSACTION_DRAIN_UNVERIFIED'
+              ? 'Cannot transition to QUIESCED: multi-document transaction drain could not be verified'
+              : 'Cannot transition to QUIESCED: durable datastore mutations are still active',
           diagnostics: durableDrain.diagnostics
         };
       }
@@ -1506,7 +1572,10 @@ export const markQuiesced = async (options = {}) => {
         quiescedAt: now,
         ttlMonitorDisabled: true,
         ttlDisabledAt: now,
-        ttlDisabledByLeaseId: leaseId
+        ttlDisabledByLeaseId: leaseId,
+        storageLocked: true,
+        storageLockType: 'APPLICATION_DRAIN_BARRIER',
+        storageLockedAt: now
       },
       $inc: { version: 1, generation: 1 }
     },
@@ -1680,7 +1749,9 @@ export const getStatus = async () => {
     (hardDeadline && hardDeadline <= now) ||
     (doc.monotonicWatchdogDeadline && doc.monotonicWatchdogDeadline <= now) ||
     (doc.bootId && doc.bootId !== currentBootId) ||
-    (doc.bootId === currentBootId && typeof doc.monotonicHardDeadlineMs === 'number' && currentHostMonoMs >= doc.monotonicHardDeadlineMs) ||
+    (doc.bootId === currentBootId &&
+      typeof doc.monotonicHardDeadlineMs === 'number' &&
+      currentHostMonoMs >= doc.monotonicHardDeadlineMs) ||
     (doc.grantedAt && now.getTime() < new Date(doc.grantedAt).getTime()) ||
     isMonotonicExpired
   );
@@ -1690,8 +1761,7 @@ export const getStatus = async () => {
 
   let effectiveStatus = doc.status;
   const isQuiescenceActive =
-    doc.status === BACKUP_LEASE_STATUS.DRAINING ||
-    doc.status === BACKUP_LEASE_STATUS.QUIESCED;
+    doc.status === BACKUP_LEASE_STATUS.DRAINING || doc.status === BACKUP_LEASE_STATUS.QUIESCED;
 
   if (isQuiescenceActive && isExpired) {
     // Fail-Closed Remediation (Finding F2 & Invariant INV-4):
@@ -1824,7 +1894,11 @@ export const initialize = async (options = {}) => {
   if (!mongoose.connection || mongoose.connection.readyState !== 1) {
     clearMonotonicWatchdog();
     await syncAdmissionState(BACKUP_LEASE_STATUS.RECOVERY_REQUIRED);
-    return { success: false, reason: 'DB_DISCONNECTED', status: BACKUP_LEASE_STATUS.RECOVERY_REQUIRED };
+    return {
+      success: false,
+      reason: 'DB_DISCONNECTED',
+      status: BACKUP_LEASE_STATUS.RECOVERY_REQUIRED
+    };
   }
 
   // Evaluate PAPERLESS_DISABLE_TTL_MONITOR configuration (F4 / Invariant INV-7)
@@ -1889,24 +1963,22 @@ export const initialize = async (options = {}) => {
 
     // 3. Wall clock rollback check: fail closed to RECOVERY_REQUIRED
     const isClockRollback = Boolean(
-      doc.grantedAt &&
-      now.getTime() < new Date(doc.grantedAt).getTime()
+      doc.grantedAt && now.getTime() < new Date(doc.grantedAt).getTime()
     );
 
     // 4. Interrupted lifecycle states (ACQUIRING / RELEASING)
     const isInterruptedLifecycle =
-      doc.status === BACKUP_LEASE_STATUS.ACQUIRING ||
-      doc.status === BACKUP_LEASE_STATUS.RELEASING;
+      doc.status === BACKUP_LEASE_STATUS.ACQUIRING || doc.status === BACKUP_LEASE_STATUS.RELEASING;
 
     const recoveryReason = isHostRebooted
       ? 'INTERRUPTED_BY_REBOOT'
       : isHostMonoExhausted
-      ? 'MONOTONIC_WATCHDOG_EXHAUSTED'
-      : isClockRollback
-      ? 'CLOCK_ROLLBACK_DETECTED'
-      : isInterruptedLifecycle
-      ? 'INTERRUPTED_LIFECYCLE'
-      : 'INTERRUPTED_DRAIN_ON_STARTUP';
+        ? 'MONOTONIC_WATCHDOG_EXHAUSTED'
+        : isClockRollback
+          ? 'CLOCK_ROLLBACK_DETECTED'
+          : isInterruptedLifecycle
+            ? 'INTERRUPTED_LIFECYCLE'
+            : 'INTERRUPTED_DRAIN_ON_STARTUP';
 
     clearMonotonicWatchdog();
     await syncAdmissionState(BACKUP_LEASE_STATUS.RECOVERY_REQUIRED);
@@ -2081,10 +2153,10 @@ export const drainInFlight = async (drainTimeoutMs = 15000, leaseId = null, opti
   } else {
     // FAIL CLOSED: Transition lease to RECOVERY_REQUIRED, preserve diagnostics, keep admission closed!
     const failureReason = !schedulerDrained
-      ? (schedulerError || 'SCHEDULER_DRAIN_TIMEOUT')
+      ? schedulerError || 'SCHEDULER_DRAIN_TIMEOUT'
       : !inMemoryDrained
-      ? 'DRAIN_TIMEOUT'
-      : (datastoreReason || 'DATASTORE_DRAIN_TIMEOUT');
+        ? 'DRAIN_TIMEOUT'
+        : datastoreReason || 'DATASTORE_DRAIN_TIMEOUT';
 
     const now = new Date();
     if (targetLeaseId) {
@@ -2120,9 +2192,10 @@ export const drainInFlight = async (drainTimeoutMs = 15000, leaseId = null, opti
       isDrained: false,
       status: BACKUP_LEASE_STATUS.RECOVERY_REQUIRED,
       reason: failureReason,
-      message: failureReason === 'TRANSACTION_DRAIN_UNVERIFIED'
-        ? 'Timed out waiting for in-flight operations to drain: transaction drain unverified'
-        : `Timed out waiting for operations to drain: ${failureReason}`,
+      message:
+        failureReason === 'TRANSACTION_DRAIN_UNVERIFIED'
+          ? 'Timed out waiting for in-flight operations to drain: transaction drain unverified'
+          : `Timed out waiting for operations to drain: ${failureReason}`,
       datastoreDiagnostics
     };
   }

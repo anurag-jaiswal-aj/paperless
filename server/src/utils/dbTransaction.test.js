@@ -7,6 +7,8 @@ import {
   assertTransactionsSupported,
   verifyReplicaSetTopology,
   ReplicaSetRequiredError,
+  PartitionKeyRequiredError,
+  isUnknownTransactionCommitResult,
   getTopologyType
 } from './dbTransaction.js';
 
@@ -245,8 +247,32 @@ describe('dbTransaction utility', () => {
       vi.spyOn(mongoose, 'startSession').mockRejectedValue(new Error('Session pool exhausted'));
       const operation = vi.fn();
 
-      await expect(withRequiredTransaction(operation)).rejects.toThrow(
+      await expect(
+        withRequiredTransaction(operation, { partitionKey: 'test-partition' })
+      ).rejects.toThrow(
         /Failed to start required MongoDB transaction session/
+      );
+      expect(operation).not.toHaveBeenCalled();
+
+      mongoose.connection.client = originalClient;
+    });
+
+    it('fails closed when partitionKey is missing or invalid', async () => {
+      const originalClient = mongoose.connection.client;
+      mongoose.connection.client = {
+        topology: { description: { type: 'ReplicaSetWithPrimary' } }
+      };
+
+      const operation = vi.fn();
+      await expect(withRequiredTransaction(operation)).rejects.toThrow(PartitionKeyRequiredError);
+      await expect(withRequiredTransaction(operation, { partitionKey: '' })).rejects.toThrow(
+        PartitionKeyRequiredError
+      );
+      await expect(withRequiredTransaction(operation, { partitionKey: '   ' })).rejects.toThrow(
+        PartitionKeyRequiredError
+      );
+      await expect(withRequiredTransaction(operation, { partitionKey: NaN })).rejects.toThrow(
+        PartitionKeyRequiredError
       );
       expect(operation).not.toHaveBeenCalled();
 
@@ -276,12 +302,33 @@ describe('dbTransaction utility', () => {
       vi.spyOn(mongoose, 'startSession').mockResolvedValue(mockSession);
       const operation = vi.fn().mockResolvedValue('strict-tx-result');
 
-      const result = await withRequiredTransaction(operation);
+      const result = await withRequiredTransaction(operation, { partitionKey: 'valid-partition' });
       expect(result).toBe('strict-tx-result');
       expect(operation).toHaveBeenCalledWith(mockSession);
       expect(mockSession.endSession).toHaveBeenCalledTimes(1);
 
       mongoose.connection.client = originalClient;
+    });
+
+    it('isUnknownTransactionCommitResult correctly identifies ambiguous commit outcomes', () => {
+      expect(isUnknownTransactionCommitResult(null)).toBe(false);
+      expect(isUnknownTransactionCommitResult(new Error('Validation failed'))).toBe(false);
+
+      const errWithLabel = new Error('Unknown error');
+      errWithLabel.hasErrorLabel = (label) => label === 'UnknownTransactionCommitResult';
+      expect(isUnknownTransactionCommitResult(errWithLabel)).toBe(true);
+
+      const netTimeoutErr = new Error('Socket timed out');
+      netTimeoutErr.name = 'MongoNetworkTimeoutError';
+      expect(isUnknownTransactionCommitResult(netTimeoutErr)).toBe(true);
+
+      const writeConcernErr = new Error('Write concern timeout');
+      writeConcernErr.code = 64;
+      expect(isUnknownTransactionCommitResult(writeConcernErr)).toBe(true);
+
+      const socketResetErr = new Error('read ECONNRESET');
+      socketResetErr.code = 'ECONNRESET';
+      expect(isUnknownTransactionCommitResult(socketResetErr)).toBe(true);
     });
   });
 });

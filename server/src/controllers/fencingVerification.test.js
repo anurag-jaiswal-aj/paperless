@@ -531,7 +531,7 @@ describe('Phase 4.4 Workstream 2D.1K.3: 16-Slot Transactional Fencing & Auth Ver
 
       // Simulate leader loss during transaction execution
       instanceLeaseService.markFencedForTesting();
-    });
+    }, { partitionKey: 'test-fencing-rollback' });
 
     await expect(txPromise).rejects.toThrow(instanceLeaseService.InstanceFencedError);
     const duration = Date.now() - startTime;
